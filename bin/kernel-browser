@@ -213,8 +213,10 @@ probe_local_cdp() {
   require_command curl
   local endpoint_value
   endpoint_value="$(local_cdp_endpoint)"
-  curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
-    "$endpoint_value/json/version"
+  if ! curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+    "$endpoint_value/json/version"; then
+    return 1
+  fi
   printf '\n'
 }
 
