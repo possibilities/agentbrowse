@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly KERNEL_BROWSER_CONTEXT="${KERNEL_BROWSER_CONTEXT:-artbird}"
+readonly KERNEL_BROWSER_REMOTE_HOST="${KERNEL_BROWSER_REMOTE_HOST:-artbird}"
+readonly KERNEL_BROWSER_SOURCE_DIR="${KERNEL_BROWSER_SOURCE_DIR:-${HOME:?}/src/kernel-images}"
+readonly KERNEL_BROWSER_CONTAINER="${KERNEL_BROWSER_CONTAINER:-agentbrowse-kernel-headful}"
+readonly KERNEL_BROWSER_IMAGE_REPOSITORY="${KERNEL_BROWSER_IMAGE_REPOSITORY:-agentbrowse/kernel-headful}"
+readonly KERNEL_BROWSER_CDP_PORT="${KERNEL_BROWSER_CDP_PORT:-9222}"
+readonly KERNEL_BROWSER_LOCAL_CDP_PORT="${KERNEL_BROWSER_LOCAL_CDP_PORT:-19222}"
+readonly KERNEL_BROWSER_SESSION="${KERNEL_BROWSER_SESSION:-agentbrowse-artbird-cdp}"
+readonly KERNEL_BROWSER_TIMEZONE="${KERNEL_BROWSER_TIMEZONE:-America/New_York}"
+readonly KERNEL_BROWSER_SMOKE_URL="${KERNEL_BROWSER_SMOKE_URL:-https://example.com}"
+
+readonly KERNEL_BROWSER_CHROMIUM_FLAGS="--user-data-dir=/home/kernel/user-data --disable-dev-shm-usage --disable-gpu --start-maximized --disable-software-rasterizer --remote-allow-origins=* --enable-features=WebMCPTesting,DevToolsWebMCPSupport"
+
+usage() {
+  cat <<'EOF'
+Usage: bin/kernel-browser <command>
+
+Commands:
+  build      Build the local kernel-images headful image on artbird
+  start      Start (or restart) the detached headful browser container
+  status     Show the container, headful services, and CDP reachability
+  endpoint   Print the tailnet-only CDP HTTP endpoint
+  probe      Fetch the remote browser's CDP version document
+  tunnel     Forward the remote CDP port to greybird until interrupted
+  connect    Verify agent-browser attaches through the local CDP forward
+  smoke      Navigate through the forward and print remote-browser evidence
+  logs       Print the latest container logs
+  stop       Stop the container without removing it or its image
+
+Configuration is available through KERNEL_BROWSER_* environment variables;
+see README.md for the supported overrides and security model.
+EOF
+}
+
+die() {
+  printf 'kernel-browser: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+ensure_docker_context() {
+  require_command docker
+  docker context inspect "$KERNEL_BROWSER_CONTEXT" >/dev/null 2>&1 ||
+    die "Docker context '$KERNEL_BROWSER_CONTEXT' is unavailable"
+}
+
+ensure_source_checkout() {
+  [[ -d "$KERNEL_BROWSER_SOURCE_DIR/.git" ]] ||
+    die "kernel-images checkout not found at $KERNEL_BROWSER_SOURCE_DIR"
+  [[ -f "$KERNEL_BROWSER_SOURCE_DIR/images/chromium-headful/Dockerfile" ]] ||
+    die "headful Dockerfile not found in $KERNEL_BROWSER_SOURCE_DIR"
+}
+
+source_revision() {
+  ensure_source_checkout
+  git -C "$KERNEL_BROWSER_SOURCE_DIR" rev-parse --short=12 HEAD
+}
+
+image_ref() {
+  if [[ -n "${KERNEL_BROWSER_IMAGE:-}" ]]; then
+    printf '%s\n' "$KERNEL_BROWSER_IMAGE"
+  else
+    printf '%s:%s\n' "$KERNEL_BROWSER_IMAGE_REPOSITORY" "$(source_revision)"
+  fi
+}
+
+artbird_tailnet_ip() {
+  if [[ -n "${KERNEL_BROWSER_ARTBIRD_IP:-}" ]]; then
+    printf '%s\n' "$KERNEL_BROWSER_ARTBIRD_IP"
+    return
+  fi
+
+  require_command ssh
+  local detected_ip
+  detected_ip="$(ssh -o BatchMode=yes "$KERNEL_BROWSER_REMOTE_HOST" 'tailscale ip -4' | sed -n '1p')"
+  [[ "$detected_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "could not resolve artbird's tailnet IPv4 address"
+  printf '%s\n' "$detected_ip"
+}
+
+cdp_endpoint() {
+  printf 'http://%s:%s\n' "$(artbird_tailnet_ip)" "$KERNEL_BROWSER_CDP_PORT"
+}
+
+local_cdp_endpoint() {
+  printf 'http://127.0.0.1:%s\n' "$KERNEL_BROWSER_LOCAL_CDP_PORT"
+}
+
+container_exists() {
+  docker --context "$KERNEL_BROWSER_CONTEXT" container inspect "$KERNEL_BROWSER_CONTAINER" >/dev/null 2>&1
+}
+
+container_running() {
+  [[ "$(docker --context "$KERNEL_BROWSER_CONTEXT" container inspect --format '{{.State.Running}}' "$KERNEL_BROWSER_CONTAINER" 2>/dev/null)" == "true" ]]
+}
+
+wait_for_cdp() {
+  require_command curl
+  local endpoint_value
+  endpoint_value="$(cdp_endpoint)"
+
+  printf 'Waiting for CDP at %s\n' "$endpoint_value"
+  for ((attempt = 1; attempt <= 120; attempt++)); do
+    if curl --noproxy '*' --fail --silent --connect-timeout 2 --max-time 3 \
+      "$endpoint_value/json/version" >/dev/null; then
+      printf 'CDP is ready at %s\n' "$endpoint_value"
+      return
+    fi
+    sleep 1
+  done
+
+  docker --context "$KERNEL_BROWSER_CONTEXT" logs --tail 100 "$KERNEL_BROWSER_CONTAINER" >&2 || true
+  die "CDP did not become ready within 120 seconds"
+}
+
+build_image() {
+  ensure_docker_context
+  ensure_source_checkout
+
+  local container_image
+  container_image="$(image_ref)"
+  printf 'Building %s from %s on Docker context %s\n' \
+    "$container_image" "$KERNEL_BROWSER_SOURCE_DIR" "$KERNEL_BROWSER_CONTEXT"
+
+  DOCKER_BUILDKIT=1 docker --context "$KERNEL_BROWSER_CONTEXT" build \
+    --platform linux/amd64 \
+    --file "$KERNEL_BROWSER_SOURCE_DIR/images/chromium-headful/Dockerfile" \
+    --label "dev.agentbrowse.kernel-images-revision=$(source_revision)" \
+    --tag "$container_image" \
+    "$KERNEL_BROWSER_SOURCE_DIR"
+}
+
+start_container() {
+  ensure_docker_context
+  local container_image endpoint_ip
+  container_image="$(image_ref)"
+  endpoint_ip="$(artbird_tailnet_ip)"
+
+  if container_exists; then
+    if container_running; then
+      printf 'Container %s is already running\n' "$KERNEL_BROWSER_CONTAINER"
+    else
+      printf 'Starting existing container %s\n' "$KERNEL_BROWSER_CONTAINER"
+      docker --context "$KERNEL_BROWSER_CONTEXT" start "$KERNEL_BROWSER_CONTAINER" >/dev/null
+    fi
+    wait_for_cdp
+    return
+  fi
+
+  docker --context "$KERNEL_BROWSER_CONTEXT" image inspect "$container_image" >/dev/null 2>&1 ||
+    die "image $container_image is not present on artbird; run '$0 build' first"
+
+  printf 'Starting %s from %s\n' "$KERNEL_BROWSER_CONTAINER" "$container_image"
+  docker --context "$KERNEL_BROWSER_CONTEXT" run --detach \
+    --name "$KERNEL_BROWSER_CONTAINER" \
+    --label dev.agentbrowse.role=kernel-headful \
+    --platform linux/amd64 \
+    --privileged \
+    --tmpfs /dev/shm:rw,size=2g \
+    --memory 8g \
+    --publish "${endpoint_ip}:${KERNEL_BROWSER_CDP_PORT}:9222" \
+    --env DISPLAY_NUM=1 \
+    --env HEIGHT=1080 \
+    --env WIDTH=1920 \
+    --env "TZ=$KERNEL_BROWSER_TIMEZONE" \
+    --env RUN_AS_ROOT=false \
+    --env "CHROMIUM_FLAGS=$KERNEL_BROWSER_CHROMIUM_FLAGS" \
+    "$container_image" >/dev/null
+
+  wait_for_cdp
+}
+
+show_status() {
+  ensure_docker_context
+  if ! container_exists; then
+    printf 'Container %s does not exist\n' "$KERNEL_BROWSER_CONTAINER"
+    return
+  fi
+
+  docker --context "$KERNEL_BROWSER_CONTEXT" ps --all \
+    --filter "name=^/${KERNEL_BROWSER_CONTAINER}$" \
+    --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+
+  if ! container_running; then
+    return
+  fi
+
+  printf '\nHeadful service state:\n'
+  docker --context "$KERNEL_BROWSER_CONTEXT" exec "$KERNEL_BROWSER_CONTAINER" \
+    supervisorctl -c /etc/supervisor/supervisord.conf status \
+    xorg mutter chromium kernel-images-api
+
+  printf '\nCDP probe:\n'
+  probe_cdp
+}
+
+probe_cdp() {
+  require_command curl
+  local endpoint_value
+  endpoint_value="$(cdp_endpoint)"
+  curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+    "$endpoint_value/json/version"
+  printf '\n'
+}
+
+probe_local_cdp() {
+  require_command curl
+  local endpoint_value
+  endpoint_value="$(local_cdp_endpoint)"
+  curl --noproxy '*' --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+    "$endpoint_value/json/version"
+  printf '\n'
+}
+
+open_tunnel() {
+  require_command ssh
+  local remote_ip
+  remote_ip="$(artbird_tailnet_ip)"
+
+  printf 'Forwarding 127.0.0.1:%s to %s:%s through %s\n' \
+    "$KERNEL_BROWSER_LOCAL_CDP_PORT" "$remote_ip" "$KERNEL_BROWSER_CDP_PORT" \
+    "$KERNEL_BROWSER_REMOTE_HOST"
+  printf 'Keep this command running; press Ctrl-C to close the forward.\n'
+  exec ssh -N \
+    -o BatchMode=yes \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -L "127.0.0.1:${KERNEL_BROWSER_LOCAL_CDP_PORT}:${remote_ip}:${KERNEL_BROWSER_CDP_PORT}" \
+    "$KERNEL_BROWSER_REMOTE_HOST"
+}
+
+ensure_local_cdp() {
+  if ! probe_local_cdp >/dev/null 2>&1; then
+    die "local CDP forward is unavailable at $(local_cdp_endpoint); run '$0 tunnel' in another terminal"
+  fi
+}
+
+agent_browser_cdp() {
+  agent-browser \
+    --session "$KERNEL_BROWSER_SESSION" \
+    --cdp "$KERNEL_BROWSER_LOCAL_CDP_PORT" \
+    "$@"
+}
+
+attached_cdp_url() {
+  local attached_cdp
+  attached_cdp="$(agent_browser_cdp get cdp-url)"
+  [[ "$attached_cdp" == "ws://127.0.0.1:${KERNEL_BROWSER_LOCAL_CDP_PORT}/devtools/browser/"* ]] ||
+    die "agent-browser attached to unexpected CDP endpoint: $attached_cdp"
+  printf '%s\n' "$attached_cdp"
+}
+
+connect_browser() {
+  require_command agent-browser
+  ensure_local_cdp
+
+  local attached_cdp
+  attached_cdp="$(attached_cdp_url)"
+
+  printf 'Attached CDP: %s\n' "$attached_cdp"
+  printf 'Session: %s\n' "$KERNEL_BROWSER_SESSION"
+  printf 'Next: agent-browser --session %q --cdp %q snapshot -i\n' \
+    "$KERNEL_BROWSER_SESSION" "$KERNEL_BROWSER_LOCAL_CDP_PORT"
+}
+
+smoke_browser() {
+  require_command agent-browser
+  ensure_local_cdp
+
+  agent_browser_cdp open "$KERNEL_BROWSER_SMOKE_URL"
+  agent_browser_cdp wait --load domcontentloaded
+
+  printf '\nBrowser title:\n'
+  agent_browser_cdp get title
+  printf '\nBrowser URL:\n'
+  agent_browser_cdp get url
+  printf '\nAttached CDP:\n'
+  attached_cdp_url
+  printf '\nInteractive snapshot:\n'
+  agent_browser_cdp snapshot -i
+}
+
+show_logs() {
+  ensure_docker_context
+  container_exists || die "container $KERNEL_BROWSER_CONTAINER does not exist"
+  docker --context "$KERNEL_BROWSER_CONTEXT" logs --tail 200 "$KERNEL_BROWSER_CONTAINER"
+}
+
+stop_container() {
+  ensure_docker_context
+  if ! container_exists; then
+    printf 'Container %s does not exist\n' "$KERNEL_BROWSER_CONTAINER"
+    return
+  fi
+  if ! container_running; then
+    printf 'Container %s is already stopped\n' "$KERNEL_BROWSER_CONTAINER"
+    return
+  fi
+  docker --context "$KERNEL_BROWSER_CONTEXT" stop "$KERNEL_BROWSER_CONTAINER"
+}
+
+main() {
+  case "${1:-}" in
+    build) build_image ;;
+    start) start_container ;;
+    status) show_status ;;
+    endpoint) cdp_endpoint ;;
+    probe) probe_cdp ;;
+    tunnel) open_tunnel ;;
+    connect) connect_browser ;;
+    smoke) smoke_browser ;;
+    logs) show_logs ;;
+    stop) stop_container ;;
+    -h|--help|help|'') usage ;;
+    *) usage >&2; die "unknown command: $1" ;;
+  esac
+}
+
+main "$@"
