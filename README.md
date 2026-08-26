@@ -1,8 +1,9 @@
 # agentbrowse
 
-This repository contains a narrow integration proof: run the Kernel headful
-browser image on the Docker host `artbird`, then control it from `greybird`
-with `agent-browser` over Chrome DevTools Protocol (CDP).
+This repository contains narrow integration proofs using the Kernel headful
+browser image on the Docker host `artbird`: control it from `greybird` with
+`agent-browser` over Chrome DevTools Protocol (CDP), or view and control a
+separate browser through Kernel Live View.
 
 ## Topology
 
@@ -20,10 +21,19 @@ SSH forward on greybird (127.0.0.1:19222)
         | agent-browser --cdp 19222
         v
 agent-browser session on greybird
+
+separate headful Chromium container on artbird
+        |
+        | Neko HTTP on artbird loopback through SSH
+        | WebRTC UDP on artbird's tailnet address
+        v
+Kernel Live View in a greybird browser
 ```
 
-The container runs Xorg, Mutter, and Chromium. WebRTC/live-view and the Kernel
-recording API are intentionally not published in this first integration slice.
+The CDP and Live View experiments use separate containers so either path can be
+run or stopped without disturbing the other. Both reuse the same built image;
+Live View is enabled entirely with container environment variables and port
+publishing. Nothing in `~/src/kernel-images` is changed.
 
 ## Prerequisites
 
@@ -101,6 +111,43 @@ Inspect logs or stop the container without deleting it:
 `stop` deliberately preserves both the stopped container and its SHA-tagged
 image. Deleting either is an explicit Docker operation outside this helper.
 
+## Run the Kernel Live View proof
+
+Start a second container from the already-built image with Neko enabled:
+
+```sh
+./bin/kernel-browser live-view-start
+./bin/kernel-browser live-view-status
+```
+
+This does not rebuild the image or modify the kernel-images checkout. It passes
+`ENABLE_WEBRTC=true`, configures Neko's single UDP mux port, and advertises
+artbird's tailnet address at container creation time.
+
+Keep the Live View HTTP forward open in one terminal:
+
+```sh
+./bin/kernel-browser live-view-tunnel
+```
+
+Then open the URL printed by the helper (by default
+<http://127.0.0.1:18080>) in a browser on greybird. The bundled Kernel client
+joins the Neko session and provides video plus mouse and keyboard control.
+HTTP and its WebSocket stay on an SSH tunnel; WebRTC media uses UDP port 56000
+directly over the tailnet.
+
+The Live View container is independent of `agentbrowse-kernel-headful`. Stop it
+without removing the container or image:
+
+```sh
+./bin/kernel-browser live-view-stop
+```
+
+If a stopped Live View container's image, environment, or port bindings no
+longer match the requested configuration, `live-view-start` fails instead of
+silently reusing it. Removing that container to recreate it is an explicit
+Docker operation.
+
 ## Configuration
 
 The command accepts these environment overrides:
@@ -119,6 +166,10 @@ The command accepts these environment overrides:
 | `KERNEL_BROWSER_VIEWPORT_WIDTH` | `1280` | CDP page width used for dashboard interaction |
 | `KERNEL_BROWSER_VIEWPORT_HEIGHT` | `720` | CDP page height used for dashboard interaction |
 | `KERNEL_BROWSER_SMOKE_URL` | `https://example.com` | Navigation target for `smoke` |
+| `KERNEL_BROWSER_LIVE_VIEW_CONTAINER` | `agentbrowse-kernel-live-view` | Separate remote Live View container name |
+| `KERNEL_BROWSER_REMOTE_LIVE_VIEW_PORT` | `18080` | Artbird loopback port for Neko HTTP |
+| `KERNEL_BROWSER_LOCAL_LIVE_VIEW_PORT` | `18080` | Greybird loopback port used by the Live View SSH forward |
+| `KERNEL_BROWSER_LIVE_VIEW_WEBRTC_PORT` | `56000` | Tailnet-bound Neko WebRTC UDP mux port |
 
 ## Security boundary
 
@@ -129,3 +180,10 @@ SSH client exposes the forwarded endpoint only on greybird loopback. Tailscale
 ACLs and SSH authorization remain responsible for deciding who can reach the
 remote port. Do not browse sensitive accounts until those policies are known
 to be appropriately narrow.
+
+Kernel Live View has the same trust assumptions for its control plane. Neko's
+HTTP and WebSocket port is bound only to artbird loopback and reaches greybird
+only through the loopback SSH forward. Its single WebRTC UDP mux port is bound
+only to artbird's Tailscale IPv4 address. Anyone permitted by the applicable
+Tailscale ACLs to reach that UDP port can send traffic to the media endpoint;
+do not widen the bind or port range casually.
