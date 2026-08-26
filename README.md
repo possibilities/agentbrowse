@@ -81,6 +81,11 @@ agent-browser --session agentbrowse-artbird-cdp --cdp 19222 open https://example
 agent-browser --session agentbrowse-artbird-cdp --cdp 19222 screenshot /tmp/agentbrowse-artbird.png
 ```
 
+Both `connect` and `smoke` set the CDP page viewport to 1280×720. Keeping the
+remote page metrics aligned with the dashboard viewport makes mouse coordinates
+land on the elements shown in the live canvas. Override both dimensions when a
+different dashboard resolution is required.
+
 With agent-browser 0.33.2, do not substitute `agent-browser connect <url>` for
 the global `--cdp` option. The `connect` command can silently launch a local
 Chrome instead of attaching to the requested remote endpoint. The helper's
@@ -111,6 +116,8 @@ The command accepts these environment overrides:
 | `KERNEL_BROWSER_CDP_PORT` | `9222` | Tailnet-side CDP port |
 | `KERNEL_BROWSER_LOCAL_CDP_PORT` | `19222` | Greybird loopback port used by the SSH forward |
 | `KERNEL_BROWSER_SESSION` | `agentbrowse-artbird-cdp` | Local agent-browser session |
+| `KERNEL_BROWSER_VIEWPORT_WIDTH` | `1280` | CDP page width used for dashboard interaction |
+| `KERNEL_BROWSER_VIEWPORT_HEIGHT` | `720` | CDP page height used for dashboard interaction |
 | `KERNEL_BROWSER_SMOKE_URL` | `https://example.com` | Navigation target for `smoke` |
 
 ## Security boundary

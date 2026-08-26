@@ -9,6 +9,8 @@ readonly KERNEL_BROWSER_IMAGE_REPOSITORY="${KERNEL_BROWSER_IMAGE_REPOSITORY:-age
 readonly KERNEL_BROWSER_CDP_PORT="${KERNEL_BROWSER_CDP_PORT:-9222}"
 readonly KERNEL_BROWSER_LOCAL_CDP_PORT="${KERNEL_BROWSER_LOCAL_CDP_PORT:-19222}"
 readonly KERNEL_BROWSER_SESSION="${KERNEL_BROWSER_SESSION:-agentbrowse-artbird-cdp}"
+readonly KERNEL_BROWSER_VIEWPORT_WIDTH="${KERNEL_BROWSER_VIEWPORT_WIDTH:-1280}"
+readonly KERNEL_BROWSER_VIEWPORT_HEIGHT="${KERNEL_BROWSER_VIEWPORT_HEIGHT:-720}"
 readonly KERNEL_BROWSER_TIMEZONE="${KERNEL_BROWSER_TIMEZONE:-America/New_York}"
 readonly KERNEL_BROWSER_SMOKE_URL="${KERNEL_BROWSER_SMOKE_URL:-https://example.com}"
 
@@ -250,6 +252,17 @@ agent_browser_cdp() {
     "$@"
 }
 
+configure_browser_viewport() {
+  [[ "$KERNEL_BROWSER_VIEWPORT_WIDTH" =~ ^[1-9][0-9]*$ ]] ||
+    die "viewport width must be a positive integer: $KERNEL_BROWSER_VIEWPORT_WIDTH"
+  [[ "$KERNEL_BROWSER_VIEWPORT_HEIGHT" =~ ^[1-9][0-9]*$ ]] ||
+    die "viewport height must be a positive integer: $KERNEL_BROWSER_VIEWPORT_HEIGHT"
+
+  agent_browser_cdp set viewport \
+    "$KERNEL_BROWSER_VIEWPORT_WIDTH" \
+    "$KERNEL_BROWSER_VIEWPORT_HEIGHT"
+}
+
 attached_cdp_url() {
   local attached_cdp
   attached_cdp="$(agent_browser_cdp get cdp-url)"
@@ -261,6 +274,7 @@ attached_cdp_url() {
 connect_browser() {
   require_command agent-browser
   ensure_local_cdp
+  configure_browser_viewport
 
   local attached_cdp
   attached_cdp="$(attached_cdp_url)"
@@ -274,6 +288,7 @@ connect_browser() {
 smoke_browser() {
   require_command agent-browser
   ensure_local_cdp
+  configure_browser_viewport
 
   agent_browser_cdp open "$KERNEL_BROWSER_SMOKE_URL"
   agent_browser_cdp wait --load domcontentloaded
