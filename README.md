@@ -24,6 +24,9 @@ loopback Live View HTTP, and WebRTC UDP ports:
 agentbrowse create testing --slot 1
 ```
 
+Chromium starts maximized within the remote desktop while retaining its tab
+strip and address bar.
+
 List every browser target carrying agentbrowse ownership labels:
 
 ```sh

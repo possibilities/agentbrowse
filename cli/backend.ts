@@ -320,6 +320,8 @@ export class DockerFarmBackend implements FarmBackend {
       "--env",
       "RUN_AS_ROOT=false",
       "--env",
+      "CHROMIUM_FLAGS=--start-maximized",
+      "--env",
       "ENABLE_WEBRTC=true",
       "--env",
       `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`,

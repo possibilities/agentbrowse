@@ -39,6 +39,7 @@ function managedState(name: string, slot: number, image: string, ip: string): Co
     },
     environment: [
       "ENABLE_WEBRTC=true",
+      "CHROMIUM_FLAGS=--start-maximized",
       `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`,
       `NEKO_WEBRTC_NAT1TO1=${ip}`,
     ],
@@ -158,6 +159,22 @@ test("create fails closed when an existing container drifts", async () => {
 
   await expect(farm.create({ name: "testing", slot: 2 })).rejects.toMatchObject({
     code: "browser_drift",
+  });
+  expect(backend.runs).toHaveLength(0);
+});
+
+test("create rejects a browser that does not start maximized", async () => {
+  const backend = new FakeBackend();
+  const state = managedState("testing", 2, backend.image, backend.ip);
+  backend.existing = {
+    ...state,
+    environment: state.environment.filter((value) => value !== "CHROMIUM_FLAGS=--start-maximized"),
+  };
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  await expect(farm.create({ name: "testing", slot: 2 })).rejects.toMatchObject({
+    code: "browser_drift",
+    message: "agentbrowse-browser-testing does not start Chromium maximized",
   });
   expect(backend.runs).toHaveLength(0);
 });
