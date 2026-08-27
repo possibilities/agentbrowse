@@ -104,9 +104,13 @@ video memory to one frame plus leases currently held by consumers; it never
 accumulates a playback backlog.
 
 The native RGBA converter samples directly from the leased I420 planes. It has
-no full-size intermediate, applies WebRTC rotation during sampling, uses BT.601
+no full-size intermediate, applies WebRTC rotation during sampling, uses
+center-aligned bilinear filtering for resized luma and chroma, uses BT.601
 limited-range conversion, and caps output at 8192 pixels per dimension and 32
-million pixels total.
+million pixels total. Output never exceeds the decoded display dimensions:
+when a Retina terminal has more backing pixels than the stream, Ghostty's
+linear GPU texture sampler performs the final enlargement instead of receiving
+CPU-manufactured pixels.
 
 ## Threads and teardown
 

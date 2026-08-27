@@ -97,6 +97,27 @@ test("frame fitting preserves browser aspect in terminal pixels", () => {
   });
 });
 
+test("frame fitting leaves Retina enlargement to the terminal GPU", () => {
+  const geometry = fitFrameGeometry(
+    200,
+    100,
+    {
+      width: 1920,
+      height: 1080,
+      displayWidth: 1920,
+      displayHeight: 1080,
+      rotationDegrees: 0,
+    },
+    { width: 10, height: 20 },
+  );
+  expect(geometry).toMatchObject({
+    cellWidth: 200,
+    cellHeight: 56,
+    outputWidth: 1920,
+    outputHeight: 1080,
+  });
+});
+
 test("mouse mapping rejects letterbox cells and maps cell centers", () => {
   const geometry = fitFrameGeometry(
     40,

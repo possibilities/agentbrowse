@@ -78,7 +78,12 @@ export function fitFrameGeometry(
   const cellHeight = Math.max(1, Math.round(cellScale));
   const availablePixelWidth = cellWidth * cellPixels.width;
   const availablePixelHeight = cellHeight * cellPixels.height;
+  // Preserve decoded detail when the terminal's backing-pixel area is larger
+  // than the stream. Ghostty scales Kitty textures with its linear GPU
+  // sampler; pre-expanding here would only manufacture nearest-neighbor pixels
+  // and increase terminal bandwidth.
   const pixelScale = Math.min(
+    1,
     availablePixelWidth / frame.displayWidth,
     availablePixelHeight / frame.displayHeight,
   );
