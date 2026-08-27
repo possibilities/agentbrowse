@@ -1,4 +1,4 @@
-import type { TerminalColors } from "@opentui/core";
+import { type ColorInput, RGBA, type TerminalColors } from "@opentui/core";
 
 const RAMP_BLEND = {
   accent: 0.85,
@@ -22,6 +22,7 @@ export const RAMP_FALLBACK = {
 } as const;
 
 export type Ramp = { -readonly [Key in keyof typeof RAMP_FALLBACK]: string };
+export type TerminalNativeRamp = { [Key in keyof Ramp]: ColorInput };
 
 const LIGHT_FALLBACK_FOREGROUND = "#262626";
 
@@ -54,12 +55,24 @@ export function hostRamp(colors: TerminalColors | null): Ramp {
   };
 }
 
-/** Keep the first frame on the terminal's exact native canvas while its RGB is unknown. */
-export function startupSurfaceBackground(
-  colors: TerminalColors | null,
-  palettePending: boolean,
-): string {
-  return palettePending ? "transparent" : hostRamp(colors).background;
+/**
+ * Express the fxnk roles as terminal color intents, without discovering or
+ * snapshotting the host palette. ANSI slots and defaults follow the terminal
+ * immediately, including across dark/light changes.
+ */
+export function terminalNativeRamp(): TerminalNativeRamp {
+  return {
+    background: RGBA.defaultBackground(),
+    surface: RGBA.defaultBackground(),
+    divider: RGBA.fromIndex(8),
+    dim: RGBA.fromIndex(8),
+    secondary: RGBA.defaultForeground(),
+    accent: RGBA.defaultForeground(),
+    foreground: RGBA.defaultForeground(),
+    focus: RGBA.fromIndex(4),
+    error: RGBA.fromIndex(1),
+    backdrop: RAMP_FALLBACK.backdrop,
+  };
 }
 
 export function mixHexColors(base: string, tint: string, amount: number): string {

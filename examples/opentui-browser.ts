@@ -8,9 +8,7 @@ import {
   createCliRenderer,
   fg,
   type KeyEvent,
-  RGBA,
   StyledText,
-  type TerminalColors,
   TextAttributes,
   type TextChunk,
   TextRenderable,
@@ -21,11 +19,10 @@ import {
   LiveViewRenderable,
   type LiveViewSurfaceState,
 } from "../src/opentui/LiveViewRenderable.ts";
-import { hostRamp, type Ramp, startupSurfaceBackground } from "../src/opentui/palette.ts";
+import { type TerminalNativeRamp, terminalNativeRamp } from "../src/opentui/palette.ts";
 
 const PICKER_TITLE = " browser ";
 const PICKER_MAX_WIDTH = 68;
-const FIRST_FRAME_PALETTE_BUDGET_MS = 16;
 
 class OpenTuiBrowserApp {
   private readonly stage: BoxRenderable;
@@ -35,29 +32,22 @@ class OpenTuiBrowserApp {
   private readonly pickerBox: BoxRenderable;
   private readonly pickerText: TextRenderable;
   private readonly picker: BrowserPickerController;
-  private ramp: Ramp;
+  private readonly ramp = terminalNativeRamp();
   private shuttingDown = false;
 
   private readonly keypressHandler = (key: KeyEvent) => this.onKeyPress(key);
-  private readonly paletteHandler = (colors: TerminalColors) => this.applyPalette(colors);
   private readonly resizeHandler = () => this.renderPicker();
   private readonly destroyHandler = () => this.onRendererDestroyed();
 
-  constructor(
-    private readonly renderer: CliRenderer,
-    initialPalette: TerminalColors | null,
-    palettePending: boolean,
-  ) {
-    this.ramp = hostRamp(initialPalette);
-    const surfaceBackground = startupSurfaceBackground(initialPalette, palettePending);
-    if (!palettePending) renderer.setBackgroundColor(surfaceBackground);
+  constructor(private readonly renderer: CliRenderer) {
+    renderer.setBackgroundColor(this.ramp.background);
     this.stage = new BoxRenderable(renderer, {
       id: "agentbrowse-opentui-stage",
       width: "100%",
       height: "100%",
       alignItems: "center",
       justifyContent: "center",
-      backgroundColor: surfaceBackground,
+      backgroundColor: this.ramp.background,
     });
 
     this.liveView = new LiveViewRenderable(renderer, {
@@ -75,7 +65,7 @@ class OpenTuiBrowserApp {
     this.emptyState = new TextRenderable(renderer, {
       id: "agentbrowse-empty-state",
       content: "no browser",
-      fg: palettePending ? RGBA.fromIndex(8) : this.ramp.dim,
+      fg: this.ramp.dim,
       selectable: false,
     });
 
@@ -88,7 +78,7 @@ class OpenTuiBrowserApp {
       height: "100%",
       zIndex: 100,
       visible: false,
-      backgroundColor: palettePending ? "transparent" : this.ramp.backdrop,
+      backgroundColor: this.ramp.backdrop,
       onMouseDown: () => this.closePicker(),
     });
     this.pickerBox = new BoxRenderable(renderer, {
@@ -105,7 +95,7 @@ class OpenTuiBrowserApp {
       borderStyle: "single",
       borderColor: this.ramp.focus,
       focusedBorderColor: this.ramp.focus,
-      backgroundColor: surfaceBackground,
+      backgroundColor: this.ramp.background,
       title: PICKER_TITLE,
       titleColor: this.ramp.foreground,
       titleAlignment: "left",
@@ -117,7 +107,7 @@ class OpenTuiBrowserApp {
       height: "100%",
       content: " loading…",
       fg: this.ramp.dim,
-      bg: surfaceBackground,
+      bg: this.ramp.background,
       wrapMode: "none",
       truncate: true,
       selectable: false,
@@ -132,18 +122,12 @@ class OpenTuiBrowserApp {
 
     this.picker = new BrowserPickerController(undefined, () => this.renderPicker());
     renderer.keyInput.on("keypress", this.keypressHandler);
-    renderer.on(CliRenderEvents.PALETTE, this.paletteHandler);
     renderer.on(CliRenderEvents.RESIZE, this.resizeHandler);
     renderer.on(CliRenderEvents.DESTROY, this.destroyHandler);
   }
 
   public start(): void {
     this.renderer.start();
-  }
-
-  public setHostPalette(colors: TerminalColors): void {
-    if (this.shuttingDown) return;
-    this.applyPalette(colors);
   }
 
   public async shutdown(exitCode = 0): Promise<void> {
@@ -269,19 +253,6 @@ class OpenTuiBrowserApp {
     this.emptyState.visible = false;
   }
 
-  private applyPalette(colors: TerminalColors): void {
-    this.ramp = hostRamp(colors);
-    this.renderer.setBackgroundColor(this.ramp.background);
-    this.stage.backgroundColor = this.ramp.background;
-    this.pickerBackdrop.backgroundColor = this.ramp.backdrop;
-    this.pickerBox.backgroundColor = this.ramp.background;
-    this.pickerBox.titleColor = this.ramp.foreground;
-    this.pickerText.bg = this.ramp.background;
-    if (this.liveView.state().phase === "failed") this.emptyState.fg = this.ramp.accent;
-    else this.emptyState.fg = this.ramp.dim;
-    this.renderPicker();
-  }
-
   private onRendererDestroyed(): void {
     this.shuttingDown = true;
     this.removeListeners();
@@ -290,7 +261,6 @@ class OpenTuiBrowserApp {
 
   private removeListeners(): void {
     this.renderer.keyInput.off("keypress", this.keypressHandler);
-    this.renderer.off(CliRenderEvents.PALETTE, this.paletteHandler);
     this.renderer.off(CliRenderEvents.RESIZE, this.resizeHandler);
     this.renderer.off(CliRenderEvents.DESTROY, this.destroyHandler);
   }
@@ -299,7 +269,7 @@ class OpenTuiBrowserApp {
 function pickerRows(
   state: BrowserPickerState,
   maxRows: number,
-  ramp: Ramp,
+  ramp: TerminalNativeRamp,
 ): { styled: StyledText; plain: string[] } {
   if (state.loading) {
     return { styled: new StyledText([fg(ramp.dim)(" loading…")]), plain: [" loading…"] };
@@ -382,17 +352,5 @@ if (import.meta.main) {
       reportText: true,
     },
   });
-  const paletteDetection = renderer.getPalette({ size: 16 });
-  const firstPalette = await Promise.race([
-    paletteDetection.then((colors) => ({ kind: "settled" as const, colors })),
-    Bun.sleep(FIRST_FRAME_PALETTE_BUDGET_MS).then(() => ({
-      kind: "pending" as const,
-      colors: null,
-    })),
-  ]);
-  const app = new OpenTuiBrowserApp(renderer, firstPalette.colors, firstPalette.kind === "pending");
-  app.start();
-  if (firstPalette.kind === "pending") {
-    void paletteDetection.then((colors) => app.setHostPalette(colors)).catch(() => undefined);
-  }
+  new OpenTuiBrowserApp(renderer).start();
 }
