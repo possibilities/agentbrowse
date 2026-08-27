@@ -121,9 +121,12 @@ guest image. Creating a headless Live View session does not initialize
 
 OpenTUI-specific behavior is confined to `src/opentui` and `client`: target
 discovery, the managed tunnel, Bun FFI, terminal image fitting, input mapping,
-and the fxnk Ramp used by the example picker. The reusable renderable contains
-no picker or application chrome, so an fmx-like host can compose it beside
-embedded Ghostty terminals and retain ownership of layout and commands.
+and the fxnk Ramp and fx-faithful theme resolver used by the example picker.
+The resolver chooses one complete fixed set before first paint and its live
+monitor replaces that set atomically; neither samples nor derives a host
+palette. The reusable renderable contains no picker or application chrome, so
+an fmx-like host can compose it beside embedded Ghostty terminals and retain
+ownership of layout and commands.
 
 Both the command-line AppKit client and the dylib target deploy to macOS 11.0.
 The dylib loads `LiveKitWebRTC.framework` from `zig-out/Frameworks` through an

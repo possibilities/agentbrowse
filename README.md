@@ -197,6 +197,15 @@ fxnk Ramp picker and `docs/architecture.md` for the runtime and ownership
 boundaries. `@opentui/core` is a peer dependency so the host and this adapter
 always share one renderable and native-image runtime.
 
+The reference app uses the mutually exclusive fxnk design language, not
+Signal Room. Its theme layer follows fx exactly: valid `FX_THEME`, one bounded
+OSC 11 background query, `COLORFGBG`, then dark; it resolves before
+`setupTerminal()` and the first application frame. Live CSI 997 notifications
+trigger a DA1-fenced OSC 11 refresh and one complete fixed-token swap. Reuse
+`resolveFxnkTheme`, `fxnkRamp`, and `FxnkThemeMonitor` from
+`agentbrowse/opentui`; do not use a terminal-palette detector or derive colors
+from host RGB. OpenTUI's independent capability handshake is not theme input.
+
 The dylib at `zig-out/lib/libagentbrowse-live-view.dylib` expects the installed
 `zig-out/Frameworks/LiveKitWebRTC.framework` sibling through its rpath. Keep
 those together when embedding the surface in another OpenTUI app. The default

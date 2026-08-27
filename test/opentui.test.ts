@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ImageRenderable, RGBA } from "@opentui/core";
+import { ImageRenderable } from "@opentui/core";
 import {
   BrowserPickerController as ExportedBrowserPickerController,
   LiveViewRenderable,
@@ -20,10 +20,12 @@ import {
   X11_MODIFIER_KEYSYMS,
 } from "../src/opentui/keysym.ts";
 import {
-  hostRamp,
-  mixHexColors,
-  RAMP_FALLBACK,
-  terminalNativeRamp,
+  colorFgBgIsLight,
+  FxnkThemeMonitor,
+  type FxnkThemeMonitorPort,
+  fxnkRamp,
+  parseOsc11Response,
+  resolveFxnkTheme,
 } from "../src/opentui/palette.ts";
 
 const browserEntries: BrowserListEntry[] = [
@@ -259,36 +261,161 @@ test("a stalled Browser-target discovery becomes a bounded picker error", async 
   });
 });
 
-test("fxnk palette derives grayscale roles from the host canvas", () => {
-  expect(mixHexColors("#000000", "#ffffff", 0.5)).toBe("#808080");
-  expect(hostRamp(null)).toEqual(RAMP_FALLBACK);
-  const light = hostRamp({
-    defaultForeground: "#101010",
-    defaultBackground: "#f0f0f0",
-    palette: [],
-  } as never);
-  expect(light.background).toBe("#f0f0f0");
-  expect(light.foreground).toBe("#101010");
-  expect(light.dim).toBe("#808080");
+test("fxnk ramps are fx's fixed indexed dark and light roles", () => {
+  const dark = fxnkRamp("dark");
+  const light = fxnkRamp("light");
+  expect(dark.background.intent).toBe("default");
+  expect(light.background.intent).toBe("default");
+  expect([
+    dark.foreground.slot,
+    dark.accent.slot,
+    dark.secondary.slot,
+    dark.dim.slot,
+    dark.divider.slot,
+  ]).toEqual([255, 252, 250, 245, 240]);
+  expect([
+    light.foreground.slot,
+    light.accent.slot,
+    light.secondary.slot,
+    light.dim.slot,
+    light.divider.slot,
+  ]).toEqual([235, 238, 241, 247, 250]);
+  expect(dark.focus.slot).toBe(4);
+  expect(light.focus.slot).toBe(4);
+  expect(dark.error.slot).toBe(1);
+  expect(light.error.slot).toBe(1);
 });
 
-test("the terminal-native fxnk ramp needs no resolved host palette", () => {
-  const ramp = terminalNativeRamp();
-  expect(ramp.background).toBeInstanceOf(RGBA);
-  expect((ramp.background as RGBA).intent).toBe("default");
-  expect(ramp.foreground).toBeInstanceOf(RGBA);
-  expect((ramp.foreground as RGBA).intent).toBe("default");
-  expect(ramp.dim).toBeInstanceOf(RGBA);
-  expect((ramp.dim as RGBA).intent).toBe("indexed");
-  expect((ramp.dim as RGBA).slot).toBe(8);
-  expect((ramp.focus as RGBA).slot).toBe(4);
-  expect((ramp.error as RGBA).slot).toBe(1);
-  expect(ramp.backdrop).toBe(RAMP_FALLBACK.backdrop);
+test("fxnk theme parsing matches fx's OSC 11 and COLORFGBG thresholds", () => {
+  expect(parseOsc11Response("\x1b]11;rgb:ffff/ffff/ffff\x1b\\")).toEqual({
+    light: true,
+    hex: "#ffffff",
+  });
+  expect(parseOsc11Response("\x1b]11;rgb:0/0/0\x07")).toEqual({
+    light: false,
+    hex: "#000000",
+  });
+  expect(parseOsc11Response("\x1b]11;rgb:FFFF/ABCD/0000\x07")).toEqual({
+    light: true,
+    hex: "#ffab00",
+  });
+  expect(parseOsc11Response("\x1b]11;RGB:ffff/ffff/ffff\x07")).toBeNull();
+  expect(parseOsc11Response("\x1b]10;rgb:ffff/ffff/ffff\x07")).toBeNull();
+  expect(colorFgBgIsLight("0;8")).toBe(true);
+  expect(colorFgBgIsLight("0;7")).toBe(false);
+  expect(colorFgBgIsLight("1;3;15")).toBe(true);
+  expect(colorFgBgIsLight("0;999")).toBe(false);
 });
 
-test("the reference app paints one stable empty frame without querying the palette", async () => {
+test("fxnk resolution uses FX_THEME, OSC 11, COLORFGBG, then dark", async () => {
+  const explicitPort = new FakeThemePort();
+  expect(
+    await resolveFxnkTheme(explicitPort, { FX_THEME: "LIGHT", COLORFGBG: "0;0" }, 1),
+  ).toMatchObject({
+    theme: "light",
+    source: "FX_THEME",
+    explicit: true,
+  });
+  expect(explicitPort.writes).toEqual([]);
+
+  const oscPort = new FakeThemePort("\x1b]11;rgb:ffff/ffff/ffff\x1b\\");
+  expect(await resolveFxnkTheme(oscPort, { COLORFGBG: "15;0" }, 20)).toMatchObject({
+    theme: "light",
+    source: "osc11",
+    background: "#ffffff",
+  });
+  expect(oscPort.writes).toEqual(["\x1b]11;?\x1b\\"]);
+
+  expect(await resolveFxnkTheme(new FakeThemePort(), { COLORFGBG: "0;15" }, 1)).toMatchObject({
+    theme: "light",
+    source: "COLORFGBG",
+  });
+  expect(await resolveFxnkTheme(new FakeThemePort(), {}, 1)).toMatchObject({
+    theme: "dark",
+    source: "default",
+  });
+});
+
+test("live fxnk changes use a fenced OSC 11 sample and swap once", () => {
+  const port = new FakeThemePort();
+  const updates: string[] = [];
+  const monitor = new FxnkThemeMonitor(
+    port,
+    { theme: "dark", background: "#000000", source: "osc11", explicit: false },
+    (resolution) => updates.push(resolution.theme),
+  );
+  monitor.start();
+  try {
+    expect(port.feedInput("\x1b[?997;2n")).toBe(true);
+    expect(port.writes.at(-1)).toBe("\x1b[c");
+    expect(port.feedInput("\x1b[?1;2c")).toBe(true);
+    expect(port.writes.at(-1)).toBe("\x1b]11;?\x1b\\\x1b[c");
+    port.emitOsc("\x1b]11;rgb:ffff/ffff/ffff\x1b\\");
+    expect(port.feedInput("\x1b[?1;2c")).toBe(true);
+    expect(updates).toEqual(["light"]);
+  } finally {
+    monitor.dispose();
+  }
+});
+
+test("a newer 997 notification drops an in-flight sample and starts a fresh fenced cycle", () => {
+  const port = new FakeThemePort();
+  const updates: Array<{ theme: string; background: string | null }> = [];
+  const monitor = new FxnkThemeMonitor(
+    port,
+    { theme: "dark", background: "#000000", source: "osc11", explicit: false },
+    ({ theme, background }) => updates.push({ theme, background }),
+  );
+  monitor.start();
+  try {
+    port.feedInput("\x1b[?997;2n");
+    port.feedInput("\x1b[?1;2c");
+    port.emitOsc("\x1b]11;rgb:ffff/ffff/ffff\x1b\\");
+    port.feedInput("\x1b[?997;1n");
+
+    // The fence closes the obsolete light sample and immediately begins a
+    // newly fenced dark cycle. Nothing from the obsolete cycle is applied.
+    port.feedInput("\x1b[?1;2c");
+    expect(updates).toEqual([]);
+    expect(port.writes.at(-1)).toBe("\x1b[c");
+
+    port.feedInput("\x1b[?1;2c");
+    port.emitOsc("\x1b]11;rgb:1111/1111/1111\x1b\\");
+    port.feedInput("\x1b[?1;2c");
+    expect(updates).toEqual([{ theme: "dark", background: "#111111" }]);
+  } finally {
+    monitor.dispose();
+  }
+});
+
+test("a response fence arriving before OSC 11 keeps the bounded sample open", () => {
+  const port = new FakeThemePort();
+  const updates: string[] = [];
+  const monitor = new FxnkThemeMonitor(
+    port,
+    { theme: "dark", background: "#000000", source: "osc11", explicit: false },
+    ({ theme }) => updates.push(theme),
+  );
+  monitor.start();
+  try {
+    port.feedInput("\x1b[?997;2n");
+    port.feedInput("\x1b[?1;2c");
+    port.feedInput("\x1b[?1;2c");
+    expect(updates).toEqual([]);
+
+    port.emitOsc("\x1b]11;rgb:ffff/ffff/ffff\x1b\\");
+    port.feedInput("\x1b[?1;2c");
+    expect(updates).toEqual(["light"]);
+  } finally {
+    monitor.dispose();
+  }
+});
+
+test("the reference app resolves light before its first stable empty frame", async () => {
   const chunks: Uint8Array[] = [];
   let output = "";
+  let outputBeforeThemeReply = "";
+  let answered = false;
   let resolveFirstFrame: (() => void) | undefined;
   const firstFrame = new Promise<void>((resolve) => {
     resolveFirstFrame = resolve;
@@ -299,7 +426,15 @@ test("the reference app paints one stable empty frame without querying the palet
     data: (_terminal, chunk) => {
       const copy = chunk.slice();
       chunks.push(copy);
-      output += new TextDecoder().decode(copy, { stream: true });
+      const text = new TextDecoder().decode(copy, { stream: true });
+      output += text;
+      if (!answered && text.includes("\x1b]11;?")) {
+        answered = true;
+        setTimeout(() => {
+          outputBeforeThemeReply = output;
+          terminal.write("\x1b]11;rgb:ffff/ffff/ffff\x1b\\");
+        }, 80);
+      }
       if (output.includes("no browser")) resolveFirstFrame?.();
     },
   });
@@ -307,6 +442,8 @@ test("the reference app paints one stable empty frame without querying the palet
     cwd: new URL("..", import.meta.url).pathname,
     env: {
       ...Bun.env,
+      FX_THEME: undefined,
+      COLORFGBG: undefined,
       COLORTERM: "truecolor",
       TERM: "xterm-256color",
     },
@@ -328,7 +465,46 @@ test("the reference app paints one stable empty frame without querying the palet
   }
 
   const startup = new TextDecoder().decode(Buffer.concat(chunks));
+  expect(outputBeforeThemeReply).not.toContain("no browser");
   expect(startup.match(/no browser/gu)).toHaveLength(1);
-  expect(startup).toContain("\u001b[38;5;8m");
+  expect(startup).toContain("\u001b[38;5;247m");
+  expect(startup).not.toContain("\u001b[38;5;245m");
   expect(startup).not.toContain("\u001b]4;");
 });
+
+class FakeThemePort implements FxnkThemeMonitorPort {
+  readonly writes: string[] = [];
+  private readonly oscHandlers = new Set<(sequence: string) => void>();
+  private readonly inputHandlers: Array<(sequence: string) => boolean> = [];
+
+  constructor(private readonly immediateOsc: string | null = null) {}
+
+  write(sequence: string): void {
+    this.writes.push(sequence);
+    if (this.immediateOsc && sequence.includes("\x1b]11;?")) {
+      queueMicrotask(() => this.emitOsc(this.immediateOsc!));
+    }
+  }
+
+  subscribeOsc(handler: (sequence: string) => void): () => void {
+    this.oscHandlers.add(handler);
+    return () => this.oscHandlers.delete(handler);
+  }
+
+  prependInputHandler(handler: (sequence: string) => boolean): void {
+    this.inputHandlers.unshift(handler);
+  }
+
+  removeInputHandler(handler: (sequence: string) => boolean): void {
+    const index = this.inputHandlers.indexOf(handler);
+    if (index !== -1) this.inputHandlers.splice(index, 1);
+  }
+
+  emitOsc(sequence: string): void {
+    for (const handler of this.oscHandlers) handler(sequence);
+  }
+
+  feedInput(sequence: string): boolean {
+    return this.inputHandlers.some((handler) => handler(sequence));
+  }
+}

@@ -4,8 +4,7 @@ import {
   BoxRenderable,
   bold,
   CliRenderEvents,
-  type CliRenderer,
-  createCliRenderer,
+  CliRenderer,
   fg,
   type KeyEvent,
   StyledText,
@@ -19,7 +18,13 @@ import {
   LiveViewRenderable,
   type LiveViewSurfaceState,
 } from "../src/opentui/LiveViewRenderable.ts";
-import { type TerminalNativeRamp, terminalNativeRamp } from "../src/opentui/palette.ts";
+import {
+  type FxnkRamp,
+  type FxnkTheme,
+  FxnkThemeMonitor,
+  fxnkRamp,
+  resolveFxnkTheme,
+} from "../src/opentui/palette.ts";
 
 const PICKER_TITLE = " browser ";
 const PICKER_MAX_WIDTH = 68;
@@ -32,14 +37,18 @@ class OpenTuiBrowserApp {
   private readonly pickerBox: BoxRenderable;
   private readonly pickerText: TextRenderable;
   private readonly picker: BrowserPickerController;
-  private readonly ramp = terminalNativeRamp();
+  private ramp: FxnkRamp;
   private shuttingDown = false;
 
   private readonly keypressHandler = (key: KeyEvent) => this.onKeyPress(key);
   private readonly resizeHandler = () => this.renderPicker();
   private readonly destroyHandler = () => this.onRendererDestroyed();
 
-  constructor(private readonly renderer: CliRenderer) {
+  constructor(
+    private readonly renderer: CliRenderer,
+    initialTheme: FxnkTheme,
+  ) {
+    this.ramp = fxnkRamp(initialTheme);
     renderer.setBackgroundColor(this.ramp.background);
     this.stage = new BoxRenderable(renderer, {
       id: "agentbrowse-opentui-stage",
@@ -128,6 +137,20 @@ class OpenTuiBrowserApp {
 
   public start(): void {
     this.renderer.start();
+  }
+
+  /** Replace the complete fxnk token set in one render turn. */
+  public setTheme(theme: FxnkTheme): void {
+    this.ramp = fxnkRamp(theme);
+    this.renderer.setBackgroundColor(this.ramp.background);
+    this.stage.backgroundColor = this.ramp.background;
+    this.pickerBackdrop.backgroundColor = this.ramp.backdrop;
+    this.pickerBox.backgroundColor = this.ramp.background;
+    this.pickerBox.titleColor = this.ramp.foreground;
+    this.pickerText.bg = this.ramp.background;
+    this.onLiveViewState(this.liveView.state());
+    this.renderPicker();
+    this.renderer.requestRender();
   }
 
   public async shutdown(exitCode = 0): Promise<void> {
@@ -269,7 +292,7 @@ class OpenTuiBrowserApp {
 function pickerRows(
   state: BrowserPickerState,
   maxRows: number,
-  ramp: TerminalNativeRamp,
+  ramp: FxnkRamp,
 ): { styled: StyledText; plain: string[] } {
   if (state.loading) {
     return { styled: new StyledText([fg(ramp.dim)(" loading…")]), plain: [" loading…"] };
@@ -340,17 +363,47 @@ function ownKey(key: KeyEvent): void {
 }
 
 if (import.meta.main) {
-  const renderer = await createCliRenderer({
-    exitOnCtrlC: false,
-    targetFps: 15,
-    maxFps: 30,
-    useKittyKeyboard: {
-      disambiguate: true,
-      alternateKeys: true,
-      events: true,
-      allKeysAsEscapes: true,
-      reportText: true,
+  const renderer = new CliRenderer(
+    process.stdin,
+    process.stdout,
+    process.stdout.columns || 80,
+    process.stdout.rows || 24,
+    {
+      exitOnCtrlC: false,
+      targetFps: 15,
+      maxFps: 30,
+      useKittyKeyboard: {
+        disambiguate: true,
+        alternateKeys: true,
+        events: true,
+        allKeysAsEscapes: true,
+        reportText: true,
+      },
     },
+  );
+  const themePort = {
+    write: (sequence: string) => process.stdout.write(sequence),
+    subscribeOsc: (handler: (sequence: string) => void) => renderer.subscribeOsc(handler),
+    prependInputHandler: (handler: (sequence: string) => boolean) =>
+      renderer.prependInputHandler(handler),
+    removeInputHandler: (handler: (sequence: string) => boolean) =>
+      renderer.removeInputHandler(handler),
+  };
+  let resolution = await resolveFxnkTheme(themePort);
+  let app: OpenTuiBrowserApp | null = null;
+  const themeMonitor = new FxnkThemeMonitor(themePort, resolution, (next) => {
+    resolution = next;
+    app?.setTheme(next.theme);
   });
-  new OpenTuiBrowserApp(renderer).start();
+  themeMonitor.start();
+  renderer.once(CliRenderEvents.DESTROY, () => themeMonitor.dispose());
+  try {
+    await renderer.setupTerminal();
+    app = new OpenTuiBrowserApp(renderer, resolution.theme);
+    app.start();
+  } catch (error) {
+    themeMonitor.dispose();
+    renderer.destroy();
+    throw error;
+  }
 }
