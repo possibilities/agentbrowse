@@ -483,7 +483,6 @@ fn onLocalCandidate(context: ?*anyopaque, sdp_ptr: [*]const u8, sdp_len: usize, 
 
 fn onNativeState(context: ?*anyopaque, native_state: native.State) callconv(.c) void {
     const self = fromContext(context);
-    std.debug.print("native state: {s}\n", .{@tagName(native_state)});
     switch (native_state) {
         .ws_open => self.setStatus("Signaling connected · negotiating"),
         .ws_closed, .peer_failed => {
@@ -514,7 +513,8 @@ fn onNativeState(context: ?*anyopaque, native_state: native.State) callconv(.c) 
 
 fn onNativeError(context: ?*anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void {
     const self = fromContext(context);
-    std.debug.print("native error: {s}\n", .{bytes[0..len]});
+    _ = bytes;
+    _ = len;
     self.setLifecycle(.failed);
     self.releaseHeldInput();
     self.setStatus("Native transport error");
@@ -543,25 +543,11 @@ fn onFrame(context: ?*anyopaque, width: u32, height: u32, rotation: u16, timesta
     self.remote_width.store(width, .release);
     self.remote_height.store(height, .release);
     self.frames.publish(frame);
-    if (decoded == 1 or decoded % 100 == 0) logFrameSample(self);
+    if (decoded == 1 or decoded % 100 == 0) noteFrameSample(self);
 }
 
-fn logFrameSample(self: *Session) void {
-    var lease = self.acquireLatestFrame() orelse return;
-    defer lease.release();
+fn noteFrameSample(self: *Session) void {
     _ = self.headless_samples.fetchAdd(1, .monotonic);
-    const metrics = self.snapshotMetrics();
-    std.debug.print(
-        "video metrics: {d}x{d} i420 decoded={d} failed={d} replaced={d} checksum={x}\n",
-        .{
-            lease.frame.width,
-            lease.frame.height,
-            metrics.decoded_frames,
-            metrics.failed_frames,
-            metrics.replaced_frames,
-            frame_mod.checksum(lease.frame),
-        },
-    );
 }
 
 fn onPasteReady(context: ?*anyopaque) callconv(.c) void {
