@@ -6,6 +6,7 @@ import {
 } from "agentbrowse/opentui";
 
 import type { BrowserListEntry } from "../cli/farm.ts";
+import { FXNK_MODAL_PADDING_X, pickerModalWidth, pickerRows } from "../examples/opentui-browser.ts";
 import { BrowserPickerController } from "../src/opentui/browser-picker.ts";
 import {
   type FittedFrameGeometry,
@@ -259,6 +260,32 @@ test("a stalled Browser-target discovery becomes a bounded picker error", async 
     choices: [],
     error: "Browser target discovery timed out after 5 ms",
   });
+});
+
+test("fxnk picker bodies own exactly one horizontal cell on each side", () => {
+  const ramp = fxnkRamp("dark");
+  const common = {
+    open: true,
+    choices: [],
+    selectedIndex: -1,
+  } as const;
+  const loading = pickerRows({ ...common, loading: true, error: null }, 1, ramp).plain;
+  const failure = pickerRows(
+    {
+      ...common,
+      loading: false,
+      error: "Browser host is offline or unreachable",
+    },
+    1,
+    ramp,
+  ).plain;
+  const empty = pickerRows({ ...common, loading: false, error: null }, 1, ramp).plain;
+
+  expect(FXNK_MODAL_PADDING_X).toBe(1);
+  expect(loading).toEqual(["loading…"]);
+  expect(failure).toEqual(["Browser host is offline or unreachable"]);
+  expect(empty).toEqual(["no browser targets"]);
+  expect(pickerModalWidth(failure, 100) - failure[0]!.length).toBe(4);
 });
 
 test("fxnk ramps are fx's fixed indexed dark and light roles", () => {
