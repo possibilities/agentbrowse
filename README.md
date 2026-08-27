@@ -24,9 +24,9 @@ loopback Live View HTTP, and WebRTC UDP ports:
 agentbrowse create testing --slot 1
 ```
 
-Chromium starts maximized within the remote desktop while retaining its tab
-strip and address bar. The non-interactive Chrome for Testing banner is hidden
-so the page receives the full remaining viewport.
+Chromium starts in ordinary browser fullscreen so the page fills the remote
+desktop. Normal shortcuts such as F11, Ctrl+1, and Ctrl+Tab still work. The
+non-interactive Chrome for Testing banner is also hidden.
 
 List every browser target carrying agentbrowse ownership labels:
 
