@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ImageRenderable } from "@opentui/core";
+import { ImageRenderable, RGBA } from "@opentui/core";
 import {
   BrowserPickerController as ExportedBrowserPickerController,
   LiveViewRenderable,
@@ -23,7 +23,7 @@ import {
   hostRamp,
   mixHexColors,
   RAMP_FALLBACK,
-  startupSurfaceBackground,
+  terminalNativeRamp,
 } from "../src/opentui/palette.ts";
 
 const browserEntries: BrowserListEntry[] = [
@@ -272,17 +272,63 @@ test("fxnk palette derives grayscale roles from the host canvas", () => {
   expect(light.dim).toBe("#808080");
 });
 
-test("a pending startup palette preserves the terminal's native background", () => {
-  expect(startupSurfaceBackground(null, true)).toBe("transparent");
-  expect(startupSurfaceBackground(null, false)).toBe(RAMP_FALLBACK.background);
-  expect(
-    startupSurfaceBackground(
-      {
-        defaultForeground: "#f0f0f0",
-        defaultBackground: "#0d1117",
-        palette: [],
-      } as never,
-      false,
-    ),
-  ).toBe("#0d1117");
+test("the terminal-native fxnk ramp needs no resolved host palette", () => {
+  const ramp = terminalNativeRamp();
+  expect(ramp.background).toBeInstanceOf(RGBA);
+  expect((ramp.background as RGBA).intent).toBe("default");
+  expect(ramp.foreground).toBeInstanceOf(RGBA);
+  expect((ramp.foreground as RGBA).intent).toBe("default");
+  expect(ramp.dim).toBeInstanceOf(RGBA);
+  expect((ramp.dim as RGBA).intent).toBe("indexed");
+  expect((ramp.dim as RGBA).slot).toBe(8);
+  expect((ramp.focus as RGBA).slot).toBe(4);
+  expect((ramp.error as RGBA).slot).toBe(1);
+  expect(ramp.backdrop).toBe(RAMP_FALLBACK.backdrop);
+});
+
+test("the reference app paints one stable empty frame without querying the palette", async () => {
+  const chunks: Uint8Array[] = [];
+  let output = "";
+  let resolveFirstFrame: (() => void) | undefined;
+  const firstFrame = new Promise<void>((resolve) => {
+    resolveFirstFrame = resolve;
+  });
+  const terminal = new Bun.Terminal({
+    cols: 80,
+    rows: 24,
+    data: (_terminal, chunk) => {
+      const copy = chunk.slice();
+      chunks.push(copy);
+      output += new TextDecoder().decode(copy, { stream: true });
+      if (output.includes("no browser")) resolveFirstFrame?.();
+    },
+  });
+  const child = Bun.spawn([process.execPath, "run", "examples/opentui-browser.ts"], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: {
+      ...Bun.env,
+      COLORTERM: "truecolor",
+      TERM: "xterm-256color",
+    },
+    terminal,
+  });
+
+  try {
+    await Promise.race([
+      firstFrame,
+      Bun.sleep(2_000).then(() => {
+        throw new Error("reference app did not paint its empty state");
+      }),
+    ]);
+    await Bun.sleep(350);
+  } finally {
+    terminal.write("\u0003");
+    await child.exited;
+    terminal.close();
+  }
+
+  const startup = new TextDecoder().decode(Buffer.concat(chunks));
+  expect(startup.match(/no browser/gu)).toHaveLength(1);
+  expect(startup).toContain("\u001b[38;5;8m");
+  expect(startup).not.toContain("\u001b]4;");
 });
