@@ -1,4 +1,6 @@
 .deps/
+.cache/
+node_modules/
 .zig-cache/
 zig-out/
 *.xcframework.zip
