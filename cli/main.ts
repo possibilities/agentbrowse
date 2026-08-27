@@ -149,13 +149,12 @@ function humanCreate(result: CreateResult): string {
   Container: ${result.container}
   Image: ${result.image}
   CDP: ${result.cdpUrl}
-  Live View: ${result.liveViewUrl} (requires tools/live-view tunnel ${result.name})
+  Live View: ${result.liveViewUrl} (opened by tools/live-view launch ${result.name})
 
 Control:
   agent-browser --cdp ${result.cdpUrl} snapshot -i
 
 View:
-  tools/live-view tunnel ${result.name}
   tools/live-view launch ${result.name}
 `;
 }

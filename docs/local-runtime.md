@@ -21,14 +21,9 @@ The create result contains the CDP URL used by `agent-browser`:
 agent-browser --cdp http://ARTBIRD_TAILNET_IP:9223 open https://example.com
 ```
 
-Keep the HTTP/WebSocket tunnel open in another terminal:
-
-```sh
-tools/live-view tunnel testing
-```
-
-Then launch the native app. The command emits the sensitive connection
-descriptor into a pipe; it never appears in the process arguments:
+Launch the native app. The command opens the HTTP/WebSocket tunnel, waits for
+it to become ready, and emits the sensitive connection descriptor into a
+pipe; the descriptor never appears in the process arguments:
 
 ```sh
 tools/live-view launch testing
@@ -38,7 +33,6 @@ Additional browsers use additional names, slots, and app processes:
 
 ```sh
 agentbrowse create research --slot 2
-tools/live-view tunnel research
 tools/live-view launch research
 ```
 
@@ -46,8 +40,9 @@ Each process creates its own outbound input channel. The deployed Neko server
 also opens a same-labeled inbound channel; this is expected and the bridge
 deliberately keeps the client-created channel for pointer and keyboard packets.
 
-Tunnel lifecycle remains external to the app, so closing the AppKit window
-never leaves an app-owned SSH process behind.
+Tunnel lifecycle remains external to the app but is owned by the launcher.
+Closing the AppKit window returns control to the launcher, which reaps its SSH
+process.
 
 `agentbrowse destroy NAME` removes only that named, ownership-verified
 container and its generated local target metadata. The pinned image remains
