@@ -91,6 +91,11 @@ for one `plugin.manifest`, `browser.launch`, or `browser.close` request; the
 subcommand responds over standard output and exits. The agent-browser daemon
 then connects directly to the returned Tailnet-only CDP URL.
 
+For an editable fleet installation, run `scripts/install.sh --install`. It
+installs frozen Bun dependencies, links `~/.local/bin/agentbrowse` to this
+checkout, and records the deployed Git commit under
+`~/.local/state/agentbrowse/deployed-sha`.
+
 Delete only that exact, ownership-labeled container when finished. Its pinned
 Kernel image is preserved:
 
