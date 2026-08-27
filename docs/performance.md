@@ -52,10 +52,12 @@ generation gaps between frames handed to `ImageRenderable`.
   synchronous conversion.
 - Bun polls at 1–30 FPS, with 15 FPS as the default. A slow or paused event loop
   reads the newest generation when it resumes rather than draining a backlog.
-- RGBA output is fitted to terminal pixel capacity before conversion and is
-  limited to 8192 pixels per dimension and 32 million pixels total.
-- Conversion rotates, scales, and converts in one native pass. It allocates no
-  source-sized RGBA intermediate.
+- RGBA output is fitted to terminal pixel capacity before conversion, never
+  enlarged beyond the decoded display dimensions, and limited to 8192 pixels
+  per dimension and 32 million pixels total. A larger Kitty placement is
+  enlarged by Ghostty's linear GPU sampler, reducing CPU and terminal traffic.
+- Conversion rotates, center-aligned-bilinear scales, and converts luma and
+  chroma in one native pass. It allocates no source-sized RGBA intermediate.
 - `NativeImage.fromRgba` and OpenTUI retain their own native image storage, so
   one submitted generation currently incurs a caller-owned RGBA buffer plus
   OpenTUI's retained copy. The caller buffer becomes collectible immediately
