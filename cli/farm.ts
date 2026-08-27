@@ -1,7 +1,12 @@
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import type { ContainerState, FarmBackend, PortBinding } from "./backend.ts";
+import type {
+  ContainerState,
+  FarmBackend,
+  ManagedContainerRecord,
+  PortBinding,
+} from "./backend.ts";
 import { CliError } from "./errors.ts";
 import {
   type BrowserDescription,
@@ -27,6 +32,12 @@ export interface DestroyResult {
   name: string;
   container: string;
   destroyed: boolean;
+}
+
+export interface BrowserListEntry extends ManagedContainerRecord {
+  cdpUrl: string;
+  liveViewUrl: string;
+  slotConflict: boolean;
 }
 
 function hasBinding(
@@ -128,6 +139,17 @@ export class BrowserFarm {
     const target = targetFor(options.name, options.slot);
     await this.verifyRecordedTarget(target);
     await this.backend.verifyHost();
+    const managed = await this.backend.listManagedContainers();
+    const occupant = managed.find(
+      (browser) => browser.slot === target.slot && browser.container !== target.container,
+    );
+    if (occupant !== undefined) {
+      throw new CliError(
+        "slot_in_use",
+        `slot ${target.slot} is already used by browser target ${occupant.name} (${occupant.state})`,
+        "choose another slot or destroy the occupying browser target",
+      );
+    }
     const [tailnetIp, image] = await Promise.all([
       this.backend.resolveTailnetIp(),
       this.backend.resolveImage(options.image),
@@ -175,6 +197,29 @@ export class BrowserFarm {
       liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
       created,
     };
+  }
+
+  async list(): Promise<readonly BrowserListEntry[]> {
+    await this.backend.verifyHost();
+    const [tailnetIp, managed] = await Promise.all([
+      this.backend.resolveTailnetIp(),
+      this.backend.listManagedContainers(),
+    ]);
+    const slotCounts = new Map<number, number>();
+    for (const browser of managed) {
+      slotCounts.set(browser.slot, (slotCounts.get(browser.slot) ?? 0) + 1);
+    }
+    return managed
+      .map((browser) => {
+        const target = targetFor(browser.name, browser.slot);
+        return {
+          ...browser,
+          cdpUrl: `http://${tailnetIp}:${target.cdpPort}`,
+          liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
+          slotConflict: (slotCounts.get(browser.slot) ?? 0) > 1,
+        };
+      })
+      .sort((left, right) => left.slot - right.slot || left.name.localeCompare(right.name));
   }
 
   async destroy(name: string): Promise<DestroyResult> {

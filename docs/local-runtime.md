@@ -6,6 +6,7 @@ slot, which gives it unique CDP, loopback HTTP, and WebRTC UDP ports.
 
 ```sh
 agentbrowse create testing --slot 1
+agentbrowse list
 tools/live-view status testing
 ```
 

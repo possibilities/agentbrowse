@@ -3,7 +3,12 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ContainerState, FarmBackend, RunBrowserInput } from "../cli/backend.ts";
+import type {
+  ContainerState,
+  FarmBackend,
+  ManagedContainerRecord,
+  RunBrowserInput,
+} from "../cli/backend.ts";
 import { CliError } from "../cli/errors.ts";
 import { BrowserFarm } from "../cli/farm.ts";
 import { configPath, targetFor } from "../cli/model.ts";
@@ -51,6 +56,7 @@ class FakeBackend implements FarmBackend {
   readonly image = "agentbrowse/kernel-headful:test";
   existing: ContainerState | undefined;
   imagePresent = true;
+  managed: ManagedContainerRecord[] = [];
   verified = 0;
   started: string[] = [];
   waited: string[] = [];
@@ -71,6 +77,10 @@ class FakeBackend implements FarmBackend {
 
   async imageExists(): Promise<boolean> {
     return this.imagePresent;
+  }
+
+  async listManagedContainers(): Promise<readonly ManagedContainerRecord[]> {
+    return this.managed;
   }
 
   async inspectContainer(): Promise<ContainerState | undefined> {
@@ -150,6 +160,65 @@ test("create fails closed when an existing container drifts", async () => {
     code: "browser_drift",
   });
   expect(backend.runs).toHaveLength(0);
+});
+
+test("create rejects a slot occupied by another managed browser", async () => {
+  const backend = new FakeBackend();
+  backend.managed = [
+    {
+      name: "existing",
+      slot: 2,
+      container: "agentbrowse-browser-existing",
+      state: "running",
+      status: "Up 1 minute",
+    },
+  ];
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  await expect(farm.create({ name: "testing", slot: 2 })).rejects.toMatchObject({
+    code: "slot_in_use",
+    message: "slot 2 is already used by browser target existing (running)",
+  });
+  expect(backend.runs).toHaveLength(0);
+});
+
+test("list sorts browsers and marks duplicate slots", async () => {
+  const backend = new FakeBackend();
+  backend.managed = [
+    {
+      name: "second",
+      slot: 4,
+      container: "agentbrowse-browser-second",
+      state: "running",
+      status: "Up 2 minutes",
+    },
+    {
+      name: "first",
+      slot: 3,
+      container: "agentbrowse-browser-first",
+      state: "created",
+      status: "Created",
+    },
+    {
+      name: "collision",
+      slot: 4,
+      container: "agentbrowse-browser-collision",
+      state: "created",
+      status: "Created",
+    },
+  ];
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  const result = await farm.list();
+
+  expect(result.map((browser) => browser.name)).toEqual(["first", "collision", "second"]);
+  expect(result[0]).toMatchObject({
+    cdpUrl: "http://100.64.0.8:9225",
+    liveViewUrl: "http://127.0.0.1:18083",
+    slotConflict: false,
+  });
+  expect(result[1]?.slotConflict).toBe(true);
+  expect(result[2]?.slotConflict).toBe(true);
 });
 
 test("destroy verifies ownership before removing the exact container", async () => {

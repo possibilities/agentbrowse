@@ -24,6 +24,18 @@ loopback Live View HTTP, and WebRTC UDP ports:
 agentbrowse create testing --slot 1
 ```
 
+List every browser target carrying agentbrowse ownership labels:
+
+```sh
+agentbrowse list
+agentbrowse list --json
+```
+
+The list includes stopped and failed-created containers as well as running
+ones. A `!` beside the state means more than one target records the same slot.
+`create` refuses a slot already recorded by another managed target before it
+asks Docker to start a container.
+
 The command prints the target's tailnet-only CDP endpoint. Use it directly
 with `agent-browser`:
 

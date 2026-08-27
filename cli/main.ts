@@ -5,17 +5,24 @@ import { join } from "node:path";
 
 import { DockerFarmBackend } from "./backend.ts";
 import { CliError, UsageError } from "./errors.ts";
-import { BrowserFarm, type CreateResult, type DestroyResult } from "./farm.ts";
+import {
+  BrowserFarm,
+  type BrowserListEntry,
+  type CreateResult,
+  type DestroyResult,
+} from "./farm.ts";
 import { parseSlot, SCHEMA_VERSION } from "./model.ts";
 
 const HELP = `agentbrowse: create Kernel browsers on Artbird
 
 Usage:
   agentbrowse create NAME --slot N [--image REF] [--json]
+  agentbrowse list [--json]
   agentbrowse destroy NAME [--json]
 
 Commands:
   create   Create or start one CDP + Live View browser target
+  list     List every browser target managed by agentbrowse
   destroy  Delete one exactly owned browser target and its runtime metadata
 
 Options:
@@ -39,7 +46,11 @@ interface ParsedDestroy {
   json: boolean;
 }
 
-type Parsed = ParsedCreate | ParsedDestroy | { command: "help"; json: boolean };
+type Parsed =
+  | ParsedCreate
+  | ParsedDestroy
+  | { command: "list"; json: boolean }
+  | { command: "help"; json: boolean };
 
 function takeValue(args: readonly string[], index: number, flag: string): string {
   const value = args[index + 1];
@@ -56,6 +67,10 @@ export function parseArgs(argv: readonly string[]): Parsed {
     return { command: "help", json };
   }
   const command = args[0];
+  if (command === "list") {
+    if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
+    return { command, json };
+  }
   const name = args[1];
   if (command !== "create" && command !== "destroy") {
     throw new UsageError(`unknown command: ${command}`);
@@ -151,6 +166,43 @@ function humanDestroy(result: DestroyResult): string {
     : `${result.container} was already absent; removed its runtime metadata\n`;
 }
 
+function listPayload(results: readonly BrowserListEntry[]): Record<string, unknown> {
+  return {
+    browsers: results.map((browser) => ({
+      name: browser.name,
+      slot: browser.slot,
+      container: browser.container,
+      state: browser.state,
+      status: browser.status,
+      cdp_url: browser.cdpUrl,
+      live_view_url: browser.liveViewUrl,
+      slot_conflict: browser.slotConflict,
+    })),
+    count: results.length,
+  };
+}
+
+function humanList(results: readonly BrowserListEntry[]): string {
+  if (results.length === 0) return "No agentbrowse browser targets found\n";
+  const rows = results.map((browser) => [
+    browser.name,
+    String(browser.slot),
+    browser.slotConflict ? `${browser.state} !` : browser.state,
+    browser.cdpUrl,
+    browser.liveViewUrl,
+  ]);
+  const headings = ["NAME", "SLOT", "STATE", "CDP", "LIVE VIEW"];
+  const widths = headings.map((heading, index) =>
+    Math.max(heading.length, ...rows.map((row) => row[index]!.length)),
+  );
+  const renderRow = (row: readonly string[]): string =>
+    row
+      .map((value, index) => value.padEnd(widths[index]!))
+      .join("  ")
+      .trimEnd();
+  return `${renderRow(headings)}\n${rows.map(renderRow).join("\n")}\n`;
+}
+
 export async function run(argv: readonly string[], env = process.env): Promise<number> {
   const json = argv.includes("--json");
   let parsed: Parsed;
@@ -175,6 +227,9 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
         ...(parsed.image === undefined ? {} : { image: parsed.image }),
       });
       process.stdout.write(parsed.json ? success(createPayload(result)) : humanCreate(result));
+    } else if (parsed.command === "list") {
+      const result = await farm.list();
+      process.stdout.write(parsed.json ? success(listPayload(result)) : humanList(result));
     } else {
       const result = await farm.destroy(parsed.name);
       process.stdout.write(parsed.json ? success(result) : humanDestroy(result));

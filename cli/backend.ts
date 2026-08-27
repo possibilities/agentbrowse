@@ -24,11 +24,20 @@ export interface RunBrowserInput {
   nekoLogLevel: string;
 }
 
+export interface ManagedContainerRecord {
+  name: string;
+  slot: number;
+  container: string;
+  state: string;
+  status: string;
+}
+
 export interface FarmBackend {
   verifyHost(): Promise<void>;
   resolveTailnetIp(): Promise<string>;
   resolveImage(override?: string): Promise<string>;
   imageExists(image: string): Promise<boolean>;
+  listManagedContainers(): Promise<readonly ManagedContainerRecord[]>;
   inspectContainer(container: string): Promise<ContainerState | undefined>;
   runBrowser(input: RunBrowserInput): Promise<void>;
   startContainer(container: string): Promise<void>;
@@ -185,6 +194,48 @@ export class DockerFarmBackend implements FarmBackend {
   async imageExists(image: string): Promise<boolean> {
     const result = await command(["docker", "--context", this.context, "image", "inspect", image]);
     return result.exitCode === 0;
+  }
+
+  async listManagedContainers(): Promise<readonly ManagedContainerRecord[]> {
+    const format = [
+      '{{.Label "dev.agentbrowse.target"}}',
+      '{{.Label "dev.agentbrowse.slot"}}',
+      "{{.Names}}",
+      "{{.State}}",
+      "{{.Status}}",
+    ].join("\t");
+    const result = await command([
+      "docker",
+      "--context",
+      this.context,
+      "container",
+      "list",
+      "--all",
+      "--filter",
+      "label=dev.agentbrowse.managed=true",
+      "--filter",
+      "label=dev.agentbrowse.role=kernel-browser",
+      "--format",
+      format,
+    ]);
+    if (result.exitCode !== 0) throw failure("docker container list", result);
+    if (result.stdout === "") return [];
+
+    return result.stdout.split("\n").map((line) => {
+      const [name, slotValue, container, state, status] = line.split("\t");
+      if (
+        name === undefined ||
+        !/^[a-z][a-z0-9-]{0,31}$/.test(name) ||
+        slotValue === undefined ||
+        !/^(0|[1-9][0-9]{0,2})$/.test(slotValue) ||
+        container === undefined ||
+        state === undefined ||
+        status === undefined
+      ) {
+        throw new CliError("invalid_docker_response", "managed browser labels are malformed");
+      }
+      return { name, slot: Number(slotValue), container, state, status };
+    });
   }
 
   async inspectContainer(container: string): Promise<ContainerState | undefined> {
