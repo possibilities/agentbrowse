@@ -94,13 +94,20 @@ million pixels total.
 ## Threads and teardown
 
 NSURLSession and WebRTC callbacks may enter Zig from worker threads. Session
-state visible to polling clients is atomic or mutex-protected. Transport
-objects, reconnect resets, sends, and delegate callbacks are serialized on the
-native session monitor. Transport callbacks are counted by the Objective-C++
-bridge, while the video sink has a separate lock covering the complete frame
-callback. Destruction first stops transport work, disables new callbacks, and
+state visible to polling clients is atomic or mutex-protected. The native
+session monitor protects transport identity and ownership. Offer/candidate
+negotiation snapshots that identity under the monitor, invokes WebRTC outside
+it, then revalidates the captured peer in each completion: WebRTC may
+synchronously cross executors and re-enter a delegate, so holding the monitor
+across negotiation would invert the lock against its signaling thread.
+Reconnect resets are serialized separately. Teardown swaps transport objects
+out under the monitor, then closes them outside it. Transport callbacks are
+counted by the Objective-C++ bridge, while the video sink has a separate lock
+covering the complete frame callback. Destruction disables new callbacks and
 waits for callbacks already inside Zig before any session-owned descriptor,
-status, identifier, or frame queue is released.
+status, identifier, or frame queue is released. The embeddable session layer
+never writes diagnostics to stdout or stderr; hosts obtain status through the
+polling ABI so retained terminal surfaces cannot be corrupted.
 
 OpenTUI target switching uses a separate operation generation. A tunnel or
 session that completes after a newer connect, disconnect, or destroy operation

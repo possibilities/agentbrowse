@@ -227,6 +227,8 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 @property(nonatomic, strong) NSCondition *callbackCondition;
 @property(nonatomic, assign) BOOL callbacksEnabled;
 @property(nonatomic, assign) NSUInteger callbacksInFlight;
+@property(nonatomic, strong) NSCondition *transportResetCondition;
+@property(nonatomic, assign) BOOL transportResetting;
 @property(nonatomic, copy) NSString *windowTitle;
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) KLInputView *inputView;
@@ -254,6 +256,7 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   _callbacks = callbacks;
   _callbackCondition = [NSCondition new];
   _callbacksEnabled = YES;
+  _transportResetCondition = [NSCondition new];
   _frameSink = [KLFrameSink new];
   _frameSink.callbacks = callbacks;
   _frameSink.callbackLock = [NSLock new];
@@ -298,6 +301,18 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   if (!_callbacks.on_state || ![self beginCallback]) return;
   _callbacks.on_state(_callbacks.context, state);
   [self endCallback];
+}
+
+- (BOOL)isCurrentWebSocketTask:(NSURLSessionWebSocketTask *)task {
+  @synchronized (self) {
+    return !self.closing && task == self.webSocket;
+  }
+}
+
+- (BOOL)isCurrentPeer:(LKRTCPeerConnection *)peer {
+  @synchronized (self) {
+    return !self.closing && peer == self.peer;
+  }
 }
 
 - (BOOL)createWindowWithCallbacks:(KLAppKitCallbacks)callbacks
@@ -383,216 +398,272 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 }
 
 - (void)receiveNextMessage {
+  NSURLSessionWebSocketTask *task;
   @synchronized (self) {
     if (self.closing || !self.webSocket) return;
-    NSURLSessionWebSocketTask *task = self.webSocket;
-    __weak KLNativeSession *weakSelf = self;
-    [task receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage *message, NSError *error) {
-      KLNativeSession *strongSelf = weakSelf;
-      if (!strongSelf) return;
-      @synchronized (strongSelf) {
-        if (strongSelf.closing || task != strongSelf.webSocket) return;
-        if (error) {
-          [strongSelf reportError:@"websocket receive failed"];
-          [strongSelf emitState:KL_NATIVE_WS_CLOSED];
-          return;
-        }
-        NSString *text = message.string;
-        if (text && strongSelf.callbacks.on_websocket_message &&
-            [strongSelf beginCallback]) {
-          KLBytes(text, ^(const uint8_t *bytes, size_t len) {
-            strongSelf.callbacks.on_websocket_message(strongSelf.callbacks.context, bytes, len);
-          });
-          [strongSelf endCallback];
-        }
-        [strongSelf receiveNextMessage];
-      }
-    }];
+    task = self.webSocket;
   }
+  __weak KLNativeSession *weakSelf = self;
+  [task receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage *message, NSError *error) {
+    KLNativeSession *strongSelf = weakSelf;
+    if (!strongSelf || ![strongSelf isCurrentWebSocketTask:task]) return;
+    if (error) {
+      [strongSelf reportError:@"websocket receive failed"];
+      [strongSelf emitState:KL_NATIVE_WS_CLOSED];
+      return;
+    }
+    NSString *text = message.string;
+    if (text && strongSelf.callbacks.on_websocket_message &&
+        [strongSelf beginCallback]) {
+      if ([strongSelf isCurrentWebSocketTask:task]) {
+        KLBytes(text, ^(const uint8_t *bytes, size_t len) {
+          strongSelf.callbacks.on_websocket_message(strongSelf.callbacks.context, bytes, len);
+        });
+      }
+      [strongSelf endCallback];
+    }
+    if ([strongSelf isCurrentWebSocketTask:task]) [strongSelf receiveNextMessage];
+  }];
 }
 
 - (BOOL)sendWebSocketBytes:(const uint8_t *)bytes length:(size_t)len {
+  NSURLSessionWebSocketTask *task;
   @synchronized (self) {
     if (!self.webSocket || self.closing) return NO;
-    NSURLSessionWebSocketTask *task = self.webSocket;
-    NSString *text = KLString(bytes, len);
-    NSURLSessionWebSocketMessage *message = [[NSURLSessionWebSocketMessage alloc] initWithString:text];
-    [task sendMessage:message completionHandler:^(NSError *error) {
-      @synchronized (self) {
-        if (error && !self.closing && task == self.webSocket) {
-          [self reportError:@"websocket send failed"];
-          [self emitState:KL_NATIVE_WS_CLOSED];
-        }
-      }
-    }];
-    return YES;
+    task = self.webSocket;
   }
+  NSString *text = KLString(bytes, len);
+  NSURLSessionWebSocketMessage *message = [[NSURLSessionWebSocketMessage alloc] initWithString:text];
+  [task sendMessage:message completionHandler:^(NSError *error) {
+    if (error && [self isCurrentWebSocketTask:task]) {
+      [self reportError:@"websocket send failed"];
+      [self emitState:KL_NATIVE_WS_CLOSED];
+    }
+  }];
+  return YES;
 }
 
 - (void)createPeerWithIceJSON:(NSString *)iceJSON lite:(BOOL)lite {
+  [self.transportResetCondition lock];
+  BOOL resetting = self.transportResetting;
+  [self.transportResetCondition unlock];
+  if (resetting) return;
   @synchronized (self) {
     if (self.closing || self.peer) return;
-    LKRTCDefaultVideoEncoderFactory *encoder = [LKRTCDefaultVideoEncoderFactory new];
-    LKRTCDefaultVideoDecoderFactory *decoder = [LKRTCDefaultVideoDecoderFactory new];
-    self.factory = [[LKRTCPeerConnectionFactory alloc] initWithEncoderFactory:encoder decoderFactory:decoder];
+  }
 
-    LKRTCConfiguration *configuration = [LKRTCConfiguration new];
-    configuration.sdpSemantics = LKRTCSdpSemanticsUnifiedPlan;
-    NSMutableArray<LKRTCIceServer *> *servers = [NSMutableArray new];
-    if (!lite) {
-      NSData *data = [iceJSON dataUsingEncoding:NSUTF8StringEncoding];
-      NSArray *entries = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-      if ([entries isKindOfClass:NSArray.class]) {
-        for (NSDictionary *entry in entries) {
-          id urlsValue = entry[@"urls"];
-          NSArray<NSString *> *urls = [urlsValue isKindOfClass:NSString.class] ? @[urlsValue] : urlsValue;
-          if (![urls isKindOfClass:NSArray.class] || urls.count == 0) continue;
-          NSString *username = [entry[@"username"] isKindOfClass:NSString.class] ? entry[@"username"] : nil;
-          NSString *credential = [entry[@"credential"] isKindOfClass:NSString.class] ? entry[@"credential"] : nil;
-          [servers addObject:[[LKRTCIceServer alloc] initWithURLStrings:urls username:username credential:credential]];
-        }
+  LKRTCDefaultVideoEncoderFactory *encoder = [LKRTCDefaultVideoEncoderFactory new];
+  LKRTCDefaultVideoDecoderFactory *decoder = [LKRTCDefaultVideoDecoderFactory new];
+  LKRTCPeerConnectionFactory *factory =
+      [[LKRTCPeerConnectionFactory alloc] initWithEncoderFactory:encoder decoderFactory:decoder];
+
+  LKRTCConfiguration *configuration = [LKRTCConfiguration new];
+  configuration.sdpSemantics = LKRTCSdpSemanticsUnifiedPlan;
+  NSMutableArray<LKRTCIceServer *> *servers = [NSMutableArray new];
+  if (!lite) {
+    NSData *data = [iceJSON dataUsingEncoding:NSUTF8StringEncoding];
+    NSArray *entries = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if ([entries isKindOfClass:NSArray.class]) {
+      for (NSDictionary *entry in entries) {
+        id urlsValue = entry[@"urls"];
+        NSArray<NSString *> *urls = [urlsValue isKindOfClass:NSString.class] ? @[urlsValue] : urlsValue;
+        if (![urls isKindOfClass:NSArray.class] || urls.count == 0) continue;
+        NSString *username = [entry[@"username"] isKindOfClass:NSString.class] ? entry[@"username"] : nil;
+        NSString *credential = [entry[@"credential"] isKindOfClass:NSString.class] ? entry[@"credential"] : nil;
+        [servers addObject:[[LKRTCIceServer alloc] initWithURLStrings:urls username:username credential:credential]];
       }
     }
-    configuration.iceServers = servers;
-    NSDictionary *mandatory = @{
-      @"OfferToReceiveVideo" : @"true",
-      @"OfferToReceiveAudio" : @"false",
-    };
-    LKRTCMediaConstraints *constraints = [[LKRTCMediaConstraints alloc] initWithMandatoryConstraints:mandatory optionalConstraints:nil];
-    self.peer = [self.factory peerConnectionWithConfiguration:configuration constraints:constraints delegate:self];
-    if (!self.peer) {
-      [self reportError:@"peer creation failed"];
-      return;
-    }
-    LKRTCDataChannelConfiguration *dataConfiguration = [LKRTCDataChannelConfiguration new];
-    self.dataChannel = [self.peer dataChannelForLabel:@"data" configuration:dataConfiguration];
-    self.dataChannel.delegate = self;
-    fprintf(stderr, "native data channel: created label=%s id=%d ordered=%s\n",
-            self.dataChannel.label.UTF8String, self.dataChannel.channelId,
-            self.dataChannel.isOrdered ? "true" : "false");
-    [self emitState:KL_NATIVE_PEER_CONNECTING];
   }
+  configuration.iceServers = servers;
+  NSDictionary *mandatory = @{
+    @"OfferToReceiveVideo" : @"true",
+    @"OfferToReceiveAudio" : @"false",
+  };
+  LKRTCMediaConstraints *constraints =
+      [[LKRTCMediaConstraints alloc] initWithMandatoryConstraints:mandatory optionalConstraints:nil];
+  LKRTCPeerConnection *peer =
+      [factory peerConnectionWithConfiguration:configuration constraints:constraints delegate:self];
+  if (!peer) {
+    [self reportError:@"peer creation failed"];
+    return;
+  }
+  LKRTCDataChannelConfiguration *dataConfiguration = [LKRTCDataChannelConfiguration new];
+  LKRTCDataChannel *dataChannel =
+      [peer dataChannelForLabel:@"data" configuration:dataConfiguration];
+  dataChannel.delegate = self;
+
+  BOOL adopted = NO;
+  [self.transportResetCondition lock];
+  if (!self.transportResetting) {
+    @synchronized (self) {
+      if (!self.closing && !self.peer) {
+        self.factory = factory;
+        self.peer = peer;
+        self.dataChannel = dataChannel;
+        adopted = YES;
+      }
+    }
+  }
+  [self.transportResetCondition unlock];
+  if (!adopted) {
+    dataChannel.delegate = nil;
+    [dataChannel close];
+    peer.delegate = nil;
+    [peer close];
+    return;
+  }
+  [self emitState:KL_NATIVE_PEER_CONNECTING];
 }
 
 - (void)setRemoteAnswer:(BOOL)answer sdp:(NSString *)sdp {
+  LKRTCPeerConnection *peer;
+  BOOL closing;
   @synchronized (self) {
-    if (!self.peer) {
-      [self reportError:@"remote description arrived before peer creation"];
+    closing = self.closing;
+    peer = closing ? nil : self.peer;
+  }
+  if (!peer) {
+    if (!closing) [self reportError:@"remote description arrived before peer creation"];
+    return;
+  }
+  LKRTCSessionDescription *description = [[LKRTCSessionDescription alloc]
+      initWithType:answer ? LKRTCSdpTypeAnswer : LKRTCSdpTypeOffer
+               sdp:sdp];
+  __weak KLNativeSession *weakSelf = self;
+  __weak LKRTCPeerConnection *weakPeer = peer;
+  [peer setRemoteDescription:description completionHandler:^(NSError *error) {
+    KLNativeSession *remoteSelf = weakSelf;
+    LKRTCPeerConnection *remotePeer = weakPeer;
+    if (!remoteSelf || !remotePeer || ![remoteSelf isCurrentPeer:remotePeer]) return;
+    if (error) {
+      [remoteSelf reportError:@"set remote description failed"];
       return;
     }
-    LKRTCSessionDescription *description = [[LKRTCSessionDescription alloc]
-        initWithType:answer ? LKRTCSdpTypeAnswer : LKRTCSdpTypeOffer
-                 sdp:sdp];
-    LKRTCPeerConnection *peer = self.peer;
-    __weak KLNativeSession *weakSelf = self;
-    __weak LKRTCPeerConnection *weakPeer = peer;
-    [peer setRemoteDescription:description completionHandler:^(NSError *error) {
-      KLNativeSession *remoteSelf = weakSelf;
-      LKRTCPeerConnection *remotePeer = weakPeer;
-      if (!remoteSelf || !remotePeer) return;
-      @synchronized (remoteSelf) {
-        if (remoteSelf.closing || remotePeer != remoteSelf.peer) return;
-        if (error) {
-          [remoteSelf reportError:@"set remote description failed"];
+    if (answer) return;
+    LKRTCMediaConstraints *constraints =
+        [[LKRTCMediaConstraints alloc] initWithMandatoryConstraints:nil optionalConstraints:nil];
+    [remotePeer answerForConstraints:constraints completionHandler:^(LKRTCSessionDescription *local, NSError *answerError) {
+      KLNativeSession *answerSelf = weakSelf;
+      LKRTCPeerConnection *answerPeer = weakPeer;
+      if (!answerSelf || !answerPeer || ![answerSelf isCurrentPeer:answerPeer]) return;
+      if (answerError || !local) {
+        [answerSelf reportError:@"create answer failed"];
+        return;
+      }
+      [answerPeer setLocalDescription:local completionHandler:^(NSError *localError) {
+        KLNativeSession *localSelf = weakSelf;
+        LKRTCPeerConnection *localPeer = weakPeer;
+        if (!localSelf || !localPeer || ![localSelf isCurrentPeer:localPeer]) return;
+        if (localError) {
+          [localSelf reportError:@"set local description failed"];
           return;
         }
-        if (answer) return;
-        LKRTCMediaConstraints *constraints = [[LKRTCMediaConstraints alloc] initWithMandatoryConstraints:nil optionalConstraints:nil];
-        [remotePeer answerForConstraints:constraints completionHandler:^(LKRTCSessionDescription *local, NSError *answerError) {
-          KLNativeSession *answerSelf = weakSelf;
-          LKRTCPeerConnection *answerPeer = weakPeer;
-          if (!answerSelf || !answerPeer) return;
-          @synchronized (answerSelf) {
-            if (answerSelf.closing || answerPeer != answerSelf.peer) return;
-            if (answerError || !local) {
-              [answerSelf reportError:@"create answer failed"];
-              return;
-            }
-            [answerPeer setLocalDescription:local completionHandler:^(NSError *localError) {
-              KLNativeSession *localSelf = weakSelf;
-              LKRTCPeerConnection *localPeer = weakPeer;
-              if (!localSelf || !localPeer) return;
-              @synchronized (localSelf) {
-                if (localSelf.closing || localPeer != localSelf.peer) return;
-                if (localError) {
-                  [localSelf reportError:@"set local description failed"];
-                  return;
-                }
-                if (localSelf.callbacks.on_local_description &&
-                    [localSelf beginCallback]) {
-                  KLBytes(local.sdp, ^(const uint8_t *bytes, size_t len) {
-                    localSelf.callbacks.on_local_description(localSelf.callbacks.context, true, bytes, len);
-                  });
-                  [localSelf endCallback];
-                }
-              }
-            }];
+        if (localSelf.callbacks.on_local_description && [localSelf beginCallback]) {
+          if ([localSelf isCurrentPeer:localPeer]) {
+            KLBytes(local.sdp, ^(const uint8_t *bytes, size_t len) {
+              localSelf.callbacks.on_local_description(localSelf.callbacks.context, true, bytes, len);
+            });
           }
-        }];
-      }
+          [localSelf endCallback];
+        }
+      }];
     }];
-  }
+  }];
 }
 
 - (void)addCandidateJSON:(NSString *)candidateJSON {
+  NSData *data = [candidateJSON dataUsingEncoding:NSUTF8StringEncoding];
+  NSDictionary *value = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+  if (![value isKindOfClass:NSDictionary.class]) return;
+  NSString *candidate = [value[@"candidate"] isKindOfClass:NSString.class] ? value[@"candidate"] : nil;
+  NSString *mid = [value[@"sdpMid"] isKindOfClass:NSString.class] ? value[@"sdpMid"] : nil;
+  NSNumber *line = [value[@"sdpMLineIndex"] isKindOfClass:NSNumber.class] ? value[@"sdpMLineIndex"] : @0;
+  if (!candidate) return;
+  LKRTCPeerConnection *peer;
   @synchronized (self) {
-    if (!self.peer) return;
-    NSData *data = [candidateJSON dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary *value = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    if (![value isKindOfClass:NSDictionary.class]) return;
-    NSString *candidate = [value[@"candidate"] isKindOfClass:NSString.class] ? value[@"candidate"] : nil;
-    NSString *mid = [value[@"sdpMid"] isKindOfClass:NSString.class] ? value[@"sdpMid"] : nil;
-    NSNumber *line = [value[@"sdpMLineIndex"] isKindOfClass:NSNumber.class] ? value[@"sdpMLineIndex"] : @0;
-    if (!candidate) return;
-    LKRTCIceCandidate *ice = [[LKRTCIceCandidate alloc] initWithSdp:candidate sdpMLineIndex:line.intValue sdpMid:mid];
-    LKRTCPeerConnection *peer = self.peer;
-    __weak KLNativeSession *weakSelf = self;
-    __weak LKRTCPeerConnection *weakPeer = peer;
-    [peer addIceCandidate:ice completionHandler:^(NSError *error) {
-      KLNativeSession *strongSelf = weakSelf;
-      LKRTCPeerConnection *strongPeer = weakPeer;
-      if (!strongSelf || !strongPeer) return;
-      @synchronized (strongSelf) {
-        if (error && !strongSelf.closing && strongPeer == strongSelf.peer) {
-          [strongSelf reportError:@"add ICE candidate failed"];
-        }
-      }
-    }];
+    peer = self.closing ? nil : self.peer;
   }
+  if (!peer) return;
+  LKRTCIceCandidate *ice = [[LKRTCIceCandidate alloc]
+      initWithSdp:candidate sdpMLineIndex:line.intValue sdpMid:mid];
+  __weak KLNativeSession *weakSelf = self;
+  __weak LKRTCPeerConnection *weakPeer = peer;
+  [peer addIceCandidate:ice completionHandler:^(NSError *error) {
+    KLNativeSession *strongSelf = weakSelf;
+    LKRTCPeerConnection *strongPeer = weakPeer;
+    if (error && strongSelf && strongPeer && [strongSelf isCurrentPeer:strongPeer]) {
+      [strongSelf reportError:@"add ICE candidate failed"];
+    }
+  }];
 }
 
 - (void)resetTransport {
-  @synchronized (self) {
-    if (self.heartbeat) dispatch_source_cancel(self.heartbeat);
-    self.heartbeat = nil;
-    [self.frameSink.callbackLock lock];
-    self.frameSink.enabled = NO;
-    [self.frameSink.callbackLock unlock];
-    if (self.videoTrack) {
-      [self.videoTrack removeRenderer:self.frameSink];
-      if (self.inputView) [self.videoTrack removeRenderer:self.inputView.videoView];
+  dispatch_source_t heartbeat;
+  KLFrameSink *frameSink;
+  KLInputView *inputView;
+  LKRTCVideoTrack *videoTrack;
+  LKRTCDataChannel *dataChannel;
+  LKRTCPeerConnection *peer;
+  NSURLSessionWebSocketTask *webSocket;
+  NSURLSession *urlSession;
+  LKRTCPeerConnectionFactory *factory;
+  [self.transportResetCondition lock];
+  while (self.transportResetting) [self.transportResetCondition wait];
+  self.transportResetting = YES;
+  [self.transportResetCondition unlock];
+  @try {
+    @synchronized (self) {
+      heartbeat = self.heartbeat;
+      self.heartbeat = nil;
+      frameSink = self.frameSink;
+      inputView = self.inputView;
+      videoTrack = self.videoTrack;
+      self.videoTrack = nil;
+      dataChannel = self.dataChannel;
+      self.dataChannel = nil;
+      peer = self.peer;
+      self.peer = nil;
+      webSocket = self.webSocket;
+      self.webSocket = nil;
+      urlSession = self.urlSession;
+      self.urlSession = nil;
+      factory = self.factory;
+      self.factory = nil;
+      dataChannel.delegate = nil;
+      peer.delegate = nil;
     }
-    self.videoTrack = nil;
-    self.dataChannel.delegate = nil;
-    [self.dataChannel close];
-    self.dataChannel = nil;
-    self.peer.delegate = nil;
-    [self.peer close];
-    self.peer = nil;
-    [self.webSocket cancelWithCloseCode:NSURLSessionWebSocketCloseCodeNormalClosure reason:nil];
-    self.webSocket = nil;
-    [self.urlSession invalidateAndCancel];
-    self.urlSession = nil;
-    self.factory = nil;
+    if (heartbeat) dispatch_source_cancel(heartbeat);
+    [frameSink.callbackLock lock];
+    frameSink.enabled = NO;
+    [frameSink.callbackLock unlock];
+    if (videoTrack) {
+      [videoTrack removeRenderer:frameSink];
+      if (inputView) [videoTrack removeRenderer:inputView.videoView];
+    }
+    [dataChannel close];
+    [peer close];
+    [webSocket cancelWithCloseCode:NSURLSessionWebSocketCloseCodeNormalClosure reason:nil];
+    [urlSession invalidateAndCancel];
+    (void)factory;
+  } @finally {
+    [self.transportResetCondition lock];
+    self.transportResetting = NO;
+    [self.transportResetCondition broadcast];
+    [self.transportResetCondition unlock];
   }
 }
 
 - (void)closeNative {
+  BOOL shouldReset = NO;
   @synchronized (self) {
     if (self.closing) return;
     self.closing = YES;
     [self.statusTimer invalidate];
     self.statusTimer = nil;
+    shouldReset = YES;
+  }
+  if (shouldReset) {
+    [self disableCallbacks];
     [self resetTransport];
   }
 }
@@ -611,8 +682,8 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   dispatch_async(reconnectQueue, ^{
     @synchronized (self) {
       if (self.closing) return;
-      [self resetTransport];
     }
+    [self resetTransport];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                  static_cast<int64_t>(delayMs) * NSEC_PER_MSEC),
                    reconnectQueue, ^{
@@ -709,9 +780,6 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 - (void)peerConnection:(LKRTCPeerConnection *)peerConnection didOpenDataChannel:(LKRTCDataChannel *)dataChannel {
   @synchronized (self) {
     if (self.closing || peerConnection != self.peer) return;
-    fprintf(stderr, "native data channel: remote-open label=%s id=%d ordered=%s\n",
-            dataChannel.label.UTF8String, dataChannel.channelId,
-            dataChannel.isOrdered ? "true" : "false");
     // Kernel's client creates the outbound `data` channel. Do not replace that
     // channel if a future server also opens a channel toward the client.
     if (!self.dataChannel || self.dataChannel.readyState == LKRTCDataChannelStateClosed) {
