@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Format = enum { i420, nv12, bgra8, rgba8 };
+pub const Format = enum(u32) { i420 = 1, nv12 = 2, bgra8 = 3, rgba8 = 4 };
 
 pub const Frame = struct {
     allocator: std.mem.Allocator,
@@ -8,6 +8,8 @@ pub const Frame = struct {
     width: u32,
     height: u32,
     format: Format,
+    rotation: u16,
+    generation: u64,
     timestamp_us: i64,
     strides: [3]u32,
     plane_lengths: [3]usize,
@@ -31,6 +33,8 @@ pub const Frame = struct {
             .width = width,
             .height = height,
             .format = format,
+            .rotation = 0,
+            .generation = 0,
             .timestamp_us = timestamp_us,
             .strides = strides,
             .plane_lengths = plane_lengths,
@@ -43,6 +47,7 @@ pub const Frame = struct {
         allocator: std.mem.Allocator,
         width: u32,
         height: u32,
+        rotation: u16,
         timestamp_us: i64,
         plane_y: []const u8,
         stride_y: u32,
@@ -64,6 +69,8 @@ pub const Frame = struct {
             .width = width,
             .height = height,
             .format = .i420,
+            .rotation = rotation,
+            .generation = 0,
             .timestamp_us = timestamp_us,
             .strides = .{ stride_y, stride_u, stride_v },
             .plane_lengths = lengths,
@@ -82,6 +89,14 @@ pub const Frame = struct {
             allocator.free(self.bytes);
             allocator.destroy(self);
         }
+    }
+
+    pub fn displayWidth(self: *const Frame) u32 {
+        return if (self.rotation == 90 or self.rotation == 270) self.height else self.width;
+    }
+
+    pub fn displayHeight(self: *const Frame) u32 {
+        return if (self.rotation == 90 or self.rotation == 270) self.width else self.height;
     }
 };
 

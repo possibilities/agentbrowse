@@ -27,8 +27,8 @@ references.
 _Avoid: image, frame pointer._
 
 **Frontend adapter** — A consumer of the platform-neutral session, frame, and
-input APIs. AppKit is the first frontend adapter; a future OpenTUI frontend
-adapter must not import AppKit types.
+input APIs. AppKit and OpenTUI are frontend adapters; neither owns transport or
+control policy, and the OpenTUI adapter does not import AppKit types.
 _Avoid: viewer, skin._
 
 **Outbound input channel** — The client-created RTC data channel labeled

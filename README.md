@@ -5,8 +5,8 @@ language keeps its normal build files at the repository root. It currently
 contains:
 
 - a Bun/TypeScript CLI that creates Kernel browser targets on Artbird;
-- a Zig/AppKit client for interacting with those targets through Kernel/Neko
-  Live View.
+- a Zig Live View core with AppKit and OpenTUI frontend adapters for
+  interacting with those targets through Kernel/Neko.
 
 ## Create a browser target
 
@@ -145,10 +145,69 @@ The observed signaling contract is in `docs/protocol.md`; reusable frontend
 boundaries and initial measurements are in `docs/architecture.md` and
 `docs/performance.md`.
 
+## OpenTUI Live View
+
+Build the headless dylib and run the reference app:
+
+```sh
+bun run native:build
+bun run opentui:example
+```
+
+The app opens on a blank stage showing `no browser`. Press `ctrl+shift+b` to
+open its Browser-target picker. Running targets are selectable; stopped targets
+and slot conflicts remain visible with a disabled reason. Choosing a target
+closes the picker, opens a managed SSH tunnel, and replaces the stage with the
+live browser surface. `ctrl+c` exits and closes both the Live View session and
+tunnel.
+
+The reusable surface is independent of that picker:
+
+```ts
+import { createCliRenderer } from "@opentui/core";
+import { listBrowserTargets, LiveViewRenderable } from "agentbrowse/opentui";
+
+const renderer = await createCliRenderer({ targetFps: 15, maxFps: 30 });
+const liveView = new LiveViewRenderable(renderer, {
+  width: "100%",
+  height: "100%",
+  pollFps: 15,
+});
+renderer.root.add(liveView);
+renderer.start();
+
+const target = (await listBrowserTargets()).find((candidate) => candidate.selectable);
+if (target) {
+  await liveView.connect(target);
+  liveView.focus();
+}
+
+async function shutdown(): Promise<void> {
+  await liveView.dispose();
+  renderer.destroy();
+}
+```
+
+`LiveViewRenderable` owns one headless native session and its SSH tunnel. It
+uses only OpenTUI's public `NativeImage`/`ImageRenderable` path, forwards
+keyboard, pointer, scroll, and paste input, and releases held input on every
+focus or lifecycle boundary. Hosts keep ownership of layout, command routing,
+and Browser-target selection. See `examples/opentui-browser.ts` for the complete
+fxnk Ramp picker and `docs/architecture.md` for the runtime and ownership
+boundaries. `@opentui/core` is a peer dependency so the host and this adapter
+always share one renderable and native-image runtime.
+
+The dylib at `zig-out/lib/libagentbrowse-live-view.dylib` expects the installed
+`zig-out/Frameworks/LiveKitWebRTC.framework` sibling through its rpath. Keep
+those together when embedding the surface in another OpenTUI app. The default
+library path is relative to the agentbrowse checkout; packaged hosts can pass
+an explicit `nativeLibraryPath` to `LiveViewRenderable`.
+
 ## Development target
 
-- macOS 26 or newer on Apple silicon
+- macOS 11.0 or newer; Apple silicon is the validated development host
 - Zig 0.16.0
+- Bun 1.3.14 or newer
 - the pinned LiveKit libwebrtc XCFramework described in
   `docs/adr/0001-native-webrtc-stack.md`
 
@@ -158,8 +217,9 @@ tools/fetch-webrtc
 zig build
 ```
 
-`zig build` produces both `zig-out/bin/kernel-live-view` for command-line
-integration and the self-contained `zig-out/Kernel Live View.app` bundle.
+`zig build` produces `zig-out/bin/kernel-live-view` for command-line
+integration, the headless Live View dylib and public header, and the
+self-contained `zig-out/Kernel Live View.app` bundle.
 `zig build run -- --connection-stdin` runs the bundled executable so its pinned
 WebRTC framework is resolved exactly as it is in the packaged application. The
 bundle and nested framework receive ad-hoc signatures for local execution; no
