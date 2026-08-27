@@ -28,6 +28,17 @@ pointer input, and clean shutdown. The last sampled native counters were 2,000
 decoded frames, zero failed frames, and 1,999 queue replacements; checksums
 changed after both keyboard and pointer interaction.
 
+That run exposed a presentation bottleneck below the adapter: OpenTUI 0.5.8's
+native Kitty path serialized a destructive image delete, replacement transmit,
+and placement for every changed `NativeImage`. Ghostty could display the black
+cell background between those operations even though decoding, conversion, and
+polling remained healthy. The pinned carry build keeps image and placement IDs
+stable and retransmits changed pixels without the delete. All 21 native Kitty
+renderer tests passed against the 0.5.8 base. A connected agentbrowse stream
+then emitted replacement transmissions with zero destructive `d=I` deletes;
+ten ScreenCaptureKit samples over five seconds showed no black transition and
+only 0–0.11% ordinary inter-frame pixel change.
+
 That replacement count is not a presentation-drop count. The queue always owns
 one latest frame, so every publication after the first replaces its retained
 predecessor even when a consumer currently holds a separate lease. The OpenTUI
@@ -63,6 +74,8 @@ data-channel results.
 
 Pointer-to-visible-response latency, terminal-protocol throughput, sustained
 CPU/RSS for Kitty graphics versus block fallback, and p50/p95 submission age
-still need controlled benchmark runs. Until those measurements identify an
-OpenTUI bottleneck, the design stays on its public `NativeImage` and
-`ImageRenderable` APIs rather than carrying an OpenTUI native patch.
+still need controlled benchmark runs. The design stays on OpenTUI's public
+`NativeImage` and `ImageRenderable` APIs while carrying only the measured
+native renderer correction. `config/opentui-carry.json` records its exact
+source and package artifact so the pin can be removed cleanly when upstream
+contains the same behavior.

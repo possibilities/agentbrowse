@@ -207,13 +207,29 @@ async function shutdown(): Promise<void> {
 ```
 
 `LiveViewRenderable` owns one headless native session and its SSH tunnel. It
-uses only OpenTUI's public `NativeImage`/`ImageRenderable` path, forwards
+uses OpenTUI's public `NativeImage`/`ImageRenderable` API, forwards
 keyboard, pointer, scroll, and paste input, and releases held input on every
 focus or lifecycle boundary. Hosts keep ownership of layout, command routing,
 and Browser-target selection. See `examples/opentui-browser.ts` for the complete
 fxnk Ramp picker and `docs/architecture.md` for the runtime and ownership
 boundaries. `@opentui/core` is a peer dependency so the host and this adapter
 always share one renderable and native-image runtime.
+
+On macOS arm64, this checkout pins OpenTUI's native package to the
+`possibilities/opentui` `carry/kitty-image-replacement` build. OpenTUI 0.5.8
+otherwise deletes the visible Kitty image before transmitting every video-frame
+replacement, briefly exposing the terminal background. The carry build keeps a
+stable image identity and replaces its pixels without that destructive delete.
+Its repository, exact source commit, release asset, SHA-256, and Bun integrity
+are recorded in `config/opentui-carry.json` and checked against both
+`package.json` and `bun.lock` by the test suite.
+
+Bun overrides belong to the installation root and are not inherited from a
+dependency. An OpenTUI host that embeds `agentbrowse/opentui`, including fmx,
+must repeat the `@opentui/core-darwin-arm64` override from this repository and
+lock that resolution until an official OpenTUI release includes the fix. The
+adapter remains on public OpenTUI APIs; the carry is a narrow native-renderer
+package, not an agentbrowse-specific API fork.
 
 The reference app uses the mutually exclusive fxnk design language, not
 Signal Room. Its theme layer follows fx exactly: valid `FX_THEME`, one bounded
