@@ -1,14 +1,73 @@
 # agentbrowse
 
-`agentbrowse` is a flat, polyglot home for native browser-facing applications.
-Each language keeps its normal build files at the repository root. The first
-application is a Zig/AppKit client for Kernel/Neko Live View.
+`agentbrowse` is a flat, polyglot home for browser-facing applications. Each
+language keeps its normal build files at the repository root. It currently
+contains:
+
+- a Bun/TypeScript CLI that creates Kernel browser targets on Artbird;
+- a Zig/AppKit client for interacting with those targets through Kernel/Neko
+  Live View.
+
+## Create a browser target
+
+Install the Bun dependencies and expose the checkout's CLI:
+
+```sh
+bun install
+bun link
+```
+
+Each named browser target uses a numeric slot. The slot selects its CDP,
+loopback Live View HTTP, and WebRTC UDP ports:
+
+```sh
+agentbrowse create testing --slot 1
+```
+
+Chromium starts maximized within the remote desktop while retaining its tab
+strip and address bar. The non-interactive Chrome for Testing banner is hidden
+so the page receives the full remaining viewport.
+
+List every browser target carrying agentbrowse ownership labels:
+
+```sh
+agentbrowse list
+agentbrowse list --json
+```
+
+The list includes stopped and failed-created containers as well as running
+ones. A `!` beside the state means more than one target records the same slot.
+`create` refuses a slot already recorded by another managed target before it
+asks Docker to start a container.
+
+The command prints the target's tailnet-only CDP endpoint. Use it directly
+with `agent-browser`:
+
+```sh
+agent-browser --cdp http://ARTBIRD_TAILNET_IP:9223 open https://example.com
+agent-browser --cdp http://ARTBIRD_TAILNET_IP:9223 snapshot -i
+```
+
+Delete only that exact, ownership-labeled container when finished. Its pinned
+Kernel image is preserved:
+
+```sh
+agentbrowse destroy testing
+```
+
+Pass `--json` to either lifecycle command for a stable
+`{schema_version,ok,error,data}` envelope. The CLI defaults to the SHA-tagged
+image matching `~/src/kernel-images`; `--image` or `AGENTBROWSE_IMAGE` selects
+an already-loaded image explicitly.
+
+## Native Live View
 
 The application receives one connection descriptor on standard input and
 connects immediately. It deliberately has no connection chooser:
 
 ```sh
-tools/live-view launch local
+tools/live-view tunnel testing
+tools/live-view launch testing
 ```
 
 For a descriptor supplied by another integration:
@@ -44,11 +103,19 @@ WebRTC framework is resolved exactly as it is in the packaged application. The
 bundle and nested framework receive ad-hoc signatures for local execution; no
 distribution identity or notarization credential is used.
 
-For the local artbird smoke target, the root helper passes the descriptor to
-that bundled executable directly:
+For an Artbird browser target, the root helper passes the descriptor to that
+bundled executable directly:
 
 ```sh
-tools/live-view start local 0
-tools/live-view tunnel local
-tools/live-view launch local
+agentbrowse create testing --slot 1
+tools/live-view tunnel testing
+tools/live-view launch testing
 ```
+
+## Validate changes
+
+```sh
+bun run check
+```
+
+This checks the Bun/TypeScript CLI and runs the Zig test suite.

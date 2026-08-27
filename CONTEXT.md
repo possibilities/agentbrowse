@@ -1,5 +1,10 @@
 # Context
 
+**Browser target** — One named Kernel headful container on Artbird, exposing
+both a Chrome DevTools Protocol endpoint and the services needed for Live View.
+Its numeric slot deterministically assigns its host ports.
+_Avoid: browser session, Docker target._
+
 **Live View session** — One authenticated connection to a Kernel/Neko endpoint,
 including its WebSocket control plane, WebRTC peer, control ownership, decoded
 frames, and input state.

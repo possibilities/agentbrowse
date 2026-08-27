@@ -1,0 +1,33 @@
+{
+  "name": "agentbrowse",
+  "version": "0.1.0",
+  "description": "Create Kernel browsers on Artbird and view them with native frontends",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/possibilities/agentbrowse.git"
+  },
+  "type": "module",
+  "bin": {
+    "agentbrowse": "./cli/main.ts"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "scripts": {
+    "agentbrowse": "bun run cli/main.ts",
+    "format": "biome check --write cli test",
+    "lint": "biome check .",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check:ts": "bun run lint && bun run typecheck && bun run test",
+    "check": "bun run check:ts && zig build test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.3",
+    "@types/bun": "1.3.14",
+    "bun-types": "1.3.14",
+    "typescript": "5.9.3"
+  }
+}
