@@ -2,12 +2,17 @@ import { expect, test } from "bun:test";
 
 import { CliError, UsageError } from "../cli/errors.ts";
 import {
+  CHROMIUM_FLAGS,
   parseTargetConfig,
   renderTargetConfig,
   targetFor,
   validateName,
   validateSlot,
 } from "../cli/model.ts";
+
+test("Chromium fills the remote desktop without kiosk mode", () => {
+  expect(CHROMIUM_FLAGS).toBe("--start-fullscreen --disable-infobars");
+});
 
 test("slot deterministically assigns all browser ports", () => {
   expect(targetFor("testing", 7)).toEqual({
