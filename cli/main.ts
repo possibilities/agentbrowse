@@ -5,6 +5,7 @@ import type { BrowserListEntry, CreateResult, DestroyResult } from "./farm.ts";
 import { parseSlot, SCHEMA_VERSION } from "./model.ts";
 import { runProvider } from "./provider.ts";
 import { browserFarm } from "./runtime.ts";
+import { runView } from "./view.ts";
 
 const HELP = `agentbrowse: create Kernel browsers on Artbird
 
@@ -13,12 +14,14 @@ Usage:
   agentbrowse list [--json]
   agentbrowse destroy NAME [--json]
   agentbrowse provider
+  agentbrowse view SESSION
 
 Commands:
   create   Create or start one CDP + Live View browser target
   list     List every browser target managed by agentbrowse
   destroy  Delete one exactly owned browser target and its runtime metadata
   provider Handle one agent-browser plugin protocol request over standard I/O
+  view     Open an agent-browser session's Browser target in native Live View
 
 Options:
   --slot N     Port slot from 0 to 999; required by create
@@ -41,9 +44,16 @@ interface ParsedDestroy {
   json: boolean;
 }
 
+interface ParsedView {
+  command: "view";
+  session: string;
+  json: false;
+}
+
 type Parsed =
   | ParsedCreate
   | ParsedDestroy
+  | ParsedView
   | { command: "list"; json: boolean }
   | { command: "provider"; json: false }
   | { command: "help"; json: boolean };
@@ -67,6 +77,15 @@ export function parseArgs(argv: readonly string[]): Parsed {
     if (json) throw new UsageError("provider does not accept --json");
     if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
     return { command, json: false };
+  }
+  if (command === "view") {
+    if (json) throw new UsageError("view does not accept --json");
+    const session = args[1];
+    if (session === undefined || session.startsWith("--")) {
+      throw new UsageError("view requires an agent-browser session name");
+    }
+    if (args.length !== 2) throw new UsageError(`unexpected argument: ${args[2]}`);
+    return { command, session, json: false };
   }
   if (command === "list") {
     if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
@@ -212,6 +231,16 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
     return 0;
   }
   if (parsed.command === "provider") return await runProvider(env);
+  if (parsed.command === "view") {
+    try {
+      return await runView(parsed.session, env);
+    } catch (error) {
+      process.stderr.write(
+        `agentbrowse: could not launch Live View: ${(error as Error).message || String(error)}\n`,
+      );
+      return 1;
+    }
+  }
 
   const farm = browserFarm(env);
   try {
