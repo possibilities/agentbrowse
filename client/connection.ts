@@ -12,6 +12,7 @@ export interface LiveViewConnectionDescriptor {
 }
 
 export interface ConnectionDescriptorOptions {
+  labelPrefix?: string;
   username?: string;
   password?: string;
   readOnly?: boolean;
@@ -24,7 +25,7 @@ export function connectionDescriptor(
 ): LiveViewConnectionDescriptor {
   return {
     version: LIVE_VIEW_DESCRIPTOR_VERSION,
-    label: `artbird/${target.name}`,
+    label: `${options.labelPrefix ?? "agentbrowse"}/${target.name}`,
     base_url: baseUrl,
     username: options.username ?? "kernel",
     password: options.password ?? "admin",

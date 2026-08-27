@@ -37,12 +37,12 @@ pub fn validate(descriptor: Descriptor) !void {
 
 test "parse connection descriptor" {
     const source =
-        \\{"version":1,"label":"artbird/local","base_url":"http://127.0.0.1:18080","username":"kernel","password":"secret","read_only":true}
+        \\{"version":1,"label":"remote/local","base_url":"http://127.0.0.1:18080","username":"kernel","password":"secret","read_only":true}
     ;
     const parsed = try parse(std.testing.allocator, source);
     defer parsed.deinit();
     try std.testing.expectEqual(current_version, parsed.value.version);
-    try std.testing.expectEqualStrings("artbird/local", parsed.value.label);
+    try std.testing.expectEqualStrings("remote/local", parsed.value.label);
     try std.testing.expect(parsed.value.read_only);
 }
 

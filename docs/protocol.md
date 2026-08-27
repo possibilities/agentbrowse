@@ -3,7 +3,7 @@
 The compatibility target is Kernel's customized Neko client at
 `kernel/kernel-images` commit
 `57858c774681c646c238043d5cb75a9ff61797c6`. The local observation below was
-reconfirmed against the runtime-only artbird container on 2026-08-26. Values
+reconfirmed against a runtime-only remote browser container on 2026-08-26. Values
 that identify a session, authenticate a peer, or fingerprint DTLS are omitted.
 
 The native client opens `ws://127.0.0.1:<slot>/ws` through the SSH tunnel with
@@ -15,7 +15,7 @@ client. The useful order is:
 2. `signal/provide` supplies the remote offer and ICE configuration.
 3. The client creates its peer and outbound `data` channel, applies the offer,
    and sends `signal/answer` plus trickled `signal/candidate` events.
-4. ICE connects directly to artbird's Tailnet address and per-target UDP mux
+4. ICE connects directly to the browser host's configured network address and per-target UDP mux
    port; DTLS/SRTP and SCTP become ready.
 5. A VP8 video track and Opus audio track arrive. Version 1 renders video and
    deliberately does not play audio.
@@ -35,7 +35,7 @@ m=audio 9 UDP/TLS/RTP/SAVPF 111
 a=rtpmap:111 opus/48000/2
 m=application 9 UDP/DTLS/SCTP webrtc-datachannel
 a=sctp-port:5000
-candidate:<redacted> 1 udp <priority> <artbird-tailnet-ip> <slot-udp-port> typ host
+candidate:<redacted> 1 udp <priority> <browser-host-address> <slot-udp-port> typ host
 ```
 
 The binary input packet layouts and golden bytes live in

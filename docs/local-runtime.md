@@ -1,6 +1,6 @@
-# Artbird browser runtime
+# Remote browser runtime
 
-The `agentbrowse` CLI manages named Kernel/Neko browser targets on Artbird
+The `agentbrowse` CLI manages named Kernel/Neko browser targets on a configured host
 without modifying the `kernel-images` checkout. Each name maps to a numeric
 slot, which gives it unique CDP, loopback HTTP, and WebRTC UDP ports.
 
@@ -12,30 +12,30 @@ tools/live-view status testing
 
 Slot 0 maps CDP to port 9222, Live View HTTP to 18080, and WebRTC UDP to
 56000. Each additional slot increments all three ports. CDP and WebRTC bind
-only to Artbird's Tailnet address; Live View HTTP binds only to Artbird
-loopback.
+only to the configured network address; Live View HTTP binds only to the
+browser host's loopback interface.
 
 The create result contains the CDP URL used by `agent-browser`:
 
 ```sh
-agent-browser --cdp http://ARTBIRD_TAILNET_IP:9223 open https://example.com
+agent-browser --cdp http://BROWSER_HOST_ADDRESS:9223 open https://example.com
 ```
 
-The same runtime is available through the Artbird provider. Configure
-agent-browser with an `artbird` plugin whose command is `agentbrowse`, whose
+The same runtime is available through the browser provider. Configure
+agent-browser with a plugin whose name matches `provider.name`, whose command is `agentbrowse`, whose
 arguments are `["provider"]`, and whose capability is `browser.provider`.
 Then the agent-browser session owns the Browser target lifecycle:
 
 ```sh
-agent-browser --session research --provider artbird open https://example.com
-agent-browser --session research --provider artbird close
+agent-browser --session research --provider remote-browser open https://example.com
+agent-browser --session research --provider remote-browser close
 ```
 
 `browser.launch` reuses the target named for the agent-browser session or
 allocates its first free slot. `browser.close` destroys that target
 unconditionally. The provider is a short-lived standard-input/standard-output
 process, not a server; CDP continues to flow directly between agent-browser
-and Artbird.
+and the configured browser host.
 
 Open that Browser target in the native GUI using the original agent-browser
 session name:
@@ -76,7 +76,7 @@ process.
 `agentbrowse destroy NAME` removes only that named, ownership-verified
 container and its generated local target metadata. The pinned image remains
 available. `create` validates an existing container's image, labels, CDP,
-WebRTC settings, Tailnet-only direct binds, and loopback-only HTTP bind before
+WebRTC settings, configured-address direct binds, and loopback-only HTTP bind before
 reusing it. It fails closed on drift.
 
 `AGENTBROWSE_NEKO_LOG_LEVEL=trace` can be supplied when creating a fresh

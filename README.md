@@ -4,7 +4,7 @@
 language keeps its normal build files at the repository root. It currently
 contains:
 
-- a Bun/TypeScript CLI that creates Kernel browser targets on Artbird;
+- a Bun/TypeScript CLI that creates Kernel browser targets on a configured host;
 - a Zig Live View core with AppKit and OpenTUI frontend adapters for
   interacting with those targets through Kernel/Neko.
 
@@ -16,6 +16,22 @@ Install the Bun dependencies and expose the checkout's CLI:
 bun install
 bun link
 ```
+
+Copy [`config.example.json`](config.example.json) to
+`~/.config/agentbrowse/config.json` and replace its example deployment values.
+The file owns host-specific choices: Docker context and identity, SSH host,
+network address discovery, image source, browser timezone, provider identity,
+and Live View connection settings. `AGENTBROWSE_CONFIG` selects another
+absolute path. Environment variables documented in
+[`docs/configuration.md`](docs/configuration.md)
+override the file for automation, but agentbrowse has no built-in host,
+network, checkout, or timezone preference.
+
+`remote.networkAddress` can hold a stable IPv4 address. For a dynamic address,
+omit it and set `remote.networkAddressCommand` to a command that prints the
+host's IPv4 address; agentbrowse runs that configured command through
+`remote.host`. Keep the config private (`chmod 600`) because it can contain Live
+View credentials.
 
 Each named browser target uses a numeric slot. The slot selects its CDP,
 loopback Live View HTTP, and WebRTC UDP ports:
@@ -40,15 +56,15 @@ ones. A `!` beside the state means more than one target records the same slot.
 `create` refuses a slot already recorded by another managed target before it
 asks Docker to start a container.
 
-The command prints the target's tailnet-only CDP endpoint. Use it directly
+The command prints the target's configured network CDP endpoint. Use it directly
 with `agent-browser`:
 
 ```sh
-agent-browser --cdp http://ARTBIRD_TAILNET_IP:9223 open https://example.com
-agent-browser --cdp http://ARTBIRD_TAILNET_IP:9223 snapshot -i
+agent-browser --cdp http://BROWSER_HOST_ADDRESS:9223 open https://example.com
+agent-browser --cdp http://BROWSER_HOST_ADDRESS:9223 snapshot -i
 ```
 
-## Use Artbird as an agent-browser provider
+## Use agentbrowse as an agent-browser provider
 
 Configure agent-browser to run the `agentbrowse provider` subcommand as a
 `browser.provider` plugin. Add this entry to the `plugins` array in the
@@ -59,7 +75,7 @@ use:
 {
   "plugins": [
     {
-      "name": "artbird",
+      "name": "remote-browser",
       "command": "agentbrowse",
       "args": ["provider"],
       "capabilities": ["browser.provider"]
@@ -68,16 +84,17 @@ use:
 }
 ```
 
-Launch an agent-browser session through Artbird:
+Launch an agent-browser session through the configured provider:
 
 ```sh
-agent-browser --session research --provider artbird open https://example.com
-agent-browser --session research --provider artbird snapshot -i
-agent-browser --session research --provider artbird close
+agent-browser --session research --provider remote-browser open https://example.com
+agent-browser --session research --provider remote-browser snapshot -i
+agent-browser --session research --provider remote-browser close
 ```
 
-Set `AGENT_BROWSER_PROVIDER=artbird` to omit `--provider artbird` from each
-command.
+Set `AGENT_BROWSER_PROVIDER=remote-browser` to omit `--provider remote-browser`
+from each command. The plugin name must match `provider.name` in the agentbrowse
+config.
 
 The provider uses the agent-browser session name as the Browser target name
 when it already matches the target grammar. Other valid agent-browser session
@@ -89,7 +106,7 @@ provider received the launch request.
 No provider server runs locally. agent-browser starts `agentbrowse provider`
 for one `plugin.manifest`, `browser.launch`, or `browser.close` request; the
 subcommand responds over standard output and exits. The agent-browser daemon
-then connects directly to the returned Tailnet-only CDP URL.
+then connects directly to the returned network-reachable CDP URL.
 
 For an editable fleet installation, run `scripts/install.sh --install`. It
 installs frozen Bun dependencies, links `~/.local/bin/agentbrowse` to this
@@ -104,9 +121,10 @@ agentbrowse destroy testing
 ```
 
 Pass `--json` to either lifecycle command for a stable
-`{schema_version,ok,error,data}` envelope. The CLI defaults to the SHA-tagged
-image matching `~/src/kernel-images`; `--image` or `AGENTBROWSE_IMAGE` selects
-an already-loaded image explicitly.
+`{schema_version,ok,error,data}` envelope. With `images.sourceDirectory`
+configured, the CLI selects the SHA-tagged image matching that checkout;
+`images.defaultImage`, `--image`, or `AGENTBROWSE_IMAGE` selects an
+already-loaded image explicitly.
 
 ## Native Live View
 
@@ -116,7 +134,7 @@ Open a provider-managed Browser target by its agent-browser session name:
 agentbrowse view
 ```
 
-`view` applies the same stable session-to-target mapping as the Artbird
+`view` applies the same stable session-to-target mapping as the configured
 provider, then owns the Live View SSH tunnel until the GUI closes. The Browser
 target must already exist; create it first with an agent-browser command such
 as `agent-browser open https://example.com`. Pass a session name to both
@@ -234,7 +252,7 @@ WebRTC framework is resolved exactly as it is in the packaged application. The
 bundle and nested framework receive ad-hoc signatures for local execution; no
 distribution identity or notarization credential is used.
 
-For an Artbird browser target, the root helper passes the descriptor to that
+For a configured browser target, the root helper passes the descriptor to that
 bundled executable directly:
 
 ```sh

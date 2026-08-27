@@ -1,6 +1,5 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
-
+import type { AgentbrowseConfig } from "../config/deployment.ts";
+import { requireConfigured } from "../config/deployment.ts";
 import { CliError } from "./errors.ts";
 import { CHROMIUM_FLAGS, type Target } from "./model.ts";
 
@@ -20,7 +19,7 @@ export interface PortBinding {
 export interface RunBrowserInput {
   target: Target;
   image: string;
-  tailnetIp: string;
+  networkAddress: string;
   nekoLogLevel: string;
 }
 
@@ -34,7 +33,7 @@ export interface ManagedContainerRecord {
 
 export interface FarmBackend {
   verifyHost(signal?: AbortSignal): Promise<void>;
-  resolveTailnetIp(signal?: AbortSignal): Promise<string>;
+  resolveNetworkAddress(signal?: AbortSignal): Promise<string>;
   resolveImage(override?: string): Promise<string>;
   imageExists(image: string): Promise<boolean>;
   listManagedContainers(signal?: AbortSignal): Promise<readonly ManagedContainerRecord[]>;
@@ -45,10 +44,19 @@ export interface FarmBackend {
   removeContainer(container: string): Promise<void>;
 }
 
-interface CommandResult {
+export interface CommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+}
+
+export type BackendCommand = (
+  args: readonly string[],
+  signal?: AbortSignal,
+) => Promise<CommandResult>;
+
+export interface DockerFarmBackendDependencies {
+  readonly command?: BackendCommand;
 }
 
 interface DockerInspect {
@@ -63,7 +71,10 @@ interface DockerInspect {
   };
 }
 
-async function command(args: readonly string[], signal?: AbortSignal): Promise<CommandResult> {
+async function defaultCommand(
+  args: readonly string[],
+  signal?: AbortSignal,
+): Promise<CommandResult> {
   signal?.throwIfAborted();
   const child = Bun.spawn([...args], {
     env: process.env,
@@ -84,6 +95,49 @@ async function command(args: readonly string[], signal?: AbortSignal): Promise<C
 function failure(commandName: string, result: CommandResult): CliError {
   const detail = result.stderr || result.stdout || `exit ${result.exitCode}`;
   return new CliError("command_failed", `${commandName} failed: ${detail}`);
+}
+
+function remoteFailure(commandName: string, result: CommandResult): CliError {
+  const detail = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  if (
+    /permission denied|authentication failed|no supported authentication methods|publickey/.test(
+      detail,
+    )
+  ) {
+    return new CliError("browser_host_authentication_failed", "Browser host authentication failed");
+  }
+  if (
+    /could not resolve hostname|name or service not known|nodename nor servname provided|temporary failure in name resolution|lookup .+ no such host/.test(
+      detail,
+    )
+  ) {
+    return new CliError("browser_host_unresolved", "Browser host could not be resolved");
+  }
+  if (
+    /cannot connect to (the )?docker daemon|is the docker daemon running|docker daemon is not running|error response from daemon/.test(
+      detail,
+    )
+  ) {
+    return new CliError("browser_service_unavailable", "Browser service is unavailable");
+  }
+  if (/connection refused/.test(detail)) {
+    return new CliError(
+      "browser_host_not_accepting_connections",
+      "Browser host is not accepting connections",
+    );
+  }
+  if (
+    /no route to host|network is unreachable|host is down|operation timed out|connection timed out|i\/o timeout|context deadline exceeded/.test(
+      detail,
+    )
+  ) {
+    return browserHostUnreachable();
+  }
+  return failure(commandName, result);
+}
+
+function browserHostUnreachable(): CliError {
+  return new CliError("browser_host_unreachable", "Browser host is offline or unreachable");
 }
 
 function isIpv4(value: string): boolean {
@@ -107,65 +161,108 @@ function normalizedBindings(inspect: DockerInspect): Record<string, readonly Por
 
 export class DockerFarmBackend implements FarmBackend {
   readonly context: string;
-  readonly remoteHost: string;
-  readonly sourceDir: string;
+  readonly remoteHost: string | null;
+  readonly sourceDir: string | null;
+  private readonly runCommand: BackendCommand;
 
-  constructor(readonly env: Readonly<Record<string, string | undefined>> = process.env) {
-    this.context = env.AGENTBROWSE_DOCKER_CONTEXT ?? "artbird";
-    this.remoteHost = env.AGENTBROWSE_REMOTE_HOST ?? "artbird";
-    this.sourceDir = env.AGENTBROWSE_KERNEL_IMAGES ?? join(homedir(), "src", "kernel-images");
+  constructor(
+    readonly config: AgentbrowseConfig,
+    dependencies: DockerFarmBackendDependencies = {},
+  ) {
+    this.context = requireConfigured(
+      config.docker.context,
+      "docker.context",
+      "AGENTBROWSE_DOCKER_CONTEXT",
+      config.path,
+    );
+    this.remoteHost = config.remote.host;
+    this.sourceDir = config.images.sourceDirectory;
+    this.runCommand = dependencies.command ?? defaultCommand;
   }
 
   async verifyHost(signal?: AbortSignal): Promise<void> {
-    const context = await command(
+    const context = await this.runCommand(
       ["docker", "context", "inspect", this.context, "--format", "{{ .Endpoints.docker.Host }}"],
       signal,
     );
     if (context.exitCode !== 0) throw failure("docker context inspect", context);
-    if (context.stdout !== "ssh://artbird") {
+    if (
+      this.config.docker.expectedEndpoint !== null &&
+      context.stdout !== this.config.docker.expectedEndpoint
+    ) {
       throw new CliError(
         "wrong_docker_context",
-        `Docker context ${this.context} targets ${context.stdout || "nothing"}, not ssh://artbird`,
+        `Docker context ${this.context} does not target its configured endpoint`,
       );
     }
 
-    const engine = await command(
+    const engine = await this.discoveryCommand(
       ["docker", "--context", this.context, "info", "--format", "{{ .Name }}"],
       signal,
     );
-    if (engine.exitCode !== 0) throw failure("docker info", engine);
-    if (engine.stdout !== "artbird") {
+    if (engine.exitCode !== 0) throw remoteFailure("docker info", engine);
+    if (
+      this.config.docker.expectedEngine !== null &&
+      engine.stdout !== this.config.docker.expectedEngine
+    ) {
       throw new CliError(
         "wrong_docker_engine",
-        `Docker context ${this.context} reached ${engine.stdout || "an unnamed engine"}, not artbird`,
+        `Docker context ${this.context} reached a different engine than configured`,
       );
     }
   }
 
-  async resolveTailnetIp(signal?: AbortSignal): Promise<string> {
-    const configured = this.env.AGENTBROWSE_ARTBIRD_IP;
-    if (configured !== undefined) {
+  async resolveNetworkAddress(signal?: AbortSignal): Promise<string> {
+    const configured = this.config.remote.networkAddress;
+    if (configured !== null) {
       if (!isIpv4(configured)) {
-        throw new CliError("invalid_tailnet_ip", `invalid Artbird IPv4 address: ${configured}`);
+        throw new CliError(
+          "invalid_network_address",
+          `invalid browser network address: ${configured}`,
+        );
       }
       return configured;
     }
-    const result = await command(
-      ["ssh", "-o", "BatchMode=yes", this.remoteHost, "tailscale ip -4"],
+    const remoteHost = requireConfigured(
+      this.remoteHost,
+      "remote.host",
+      "AGENTBROWSE_REMOTE_HOST",
+      this.config.path,
+    );
+    const addressCommand = requireConfigured(
+      this.config.remote.networkAddressCommand,
+      "remote.networkAddressCommand",
+      "AGENTBROWSE_NETWORK_ADDRESS_COMMAND",
+      this.config.path,
+    );
+    const result = await this.discoveryCommand(
+      ["ssh", "-o", "BatchMode=yes", remoteHost, addressCommand],
       signal,
     );
-    if (result.exitCode !== 0) throw failure("Artbird Tailnet address lookup", result);
+    if (result.exitCode !== 0) throw remoteFailure("browser network address lookup", result);
     const ip = result.stdout.split("\n")[0] ?? "";
     if (!isIpv4(ip)) {
-      throw new CliError("invalid_tailnet_ip", "could not resolve Artbird's Tailnet IPv4 address");
+      throw new CliError(
+        "invalid_network_address",
+        "Browser host returned an invalid network address",
+      );
     }
     return ip;
   }
 
   async resolveImage(override?: string): Promise<string> {
-    const configured = override ?? this.env.AGENTBROWSE_IMAGE;
-    if (configured !== undefined && configured.trim() !== "") return configured;
-    const revision = await command([
+    const configured = override ?? this.config.images.defaultImage;
+    if (configured !== undefined && configured !== null && configured.trim() !== "") {
+      return configured;
+    }
+    if (this.sourceDir === null) {
+      throw new CliError(
+        "kernel_images_not_configured",
+        "Browser image source is not configured",
+        `set images.sourceDirectory in ${this.config.path}, set AGENTBROWSE_KERNEL_IMAGES, or select an image with --image`,
+      );
+    }
+    const revision = await this.runCommand([
       "git",
       "-C",
       this.sourceDir,
@@ -177,14 +274,21 @@ export class DockerFarmBackend implements FarmBackend {
       throw new CliError(
         "kernel_images_unavailable",
         `kernel-images checkout is unavailable at ${this.sourceDir}`,
-        "set --image or AGENTBROWSE_IMAGE to an image already loaded on Artbird",
+        "set --image or AGENTBROWSE_IMAGE to an image already loaded on the browser host",
       );
     }
     return `agentbrowse/kernel-headful:${revision.stdout}`;
   }
 
   async imageExists(image: string): Promise<boolean> {
-    const result = await command(["docker", "--context", this.context, "image", "inspect", image]);
+    const result = await this.runCommand([
+      "docker",
+      "--context",
+      this.context,
+      "image",
+      "inspect",
+      image,
+    ]);
     return result.exitCode === 0;
   }
 
@@ -196,7 +300,7 @@ export class DockerFarmBackend implements FarmBackend {
       "{{.State}}",
       "{{.Status}}",
     ].join("\t");
-    const result = await command(
+    const result = await this.discoveryCommand(
       [
         "docker",
         "--context",
@@ -213,7 +317,7 @@ export class DockerFarmBackend implements FarmBackend {
       ],
       signal,
     );
-    if (result.exitCode !== 0) throw failure("docker container list", result);
+    if (result.exitCode !== 0) throw remoteFailure("docker container list", result);
     if (result.stdout === "") return [];
 
     return result.stdout.split("\n").map((line) => {
@@ -234,7 +338,7 @@ export class DockerFarmBackend implements FarmBackend {
   }
 
   async inspectContainer(container: string): Promise<ContainerState | undefined> {
-    const result = await command([
+    const result = await this.runCommand([
       "docker",
       "--context",
       this.context,
@@ -274,7 +378,7 @@ export class DockerFarmBackend implements FarmBackend {
   }
 
   async runBrowser(input: RunBrowserInput): Promise<void> {
-    const { target, image, tailnetIp, nekoLogLevel } = input;
+    const { target, image, networkAddress, nekoLogLevel } = input;
     const args = [
       "docker",
       "--context",
@@ -301,17 +405,15 @@ export class DockerFarmBackend implements FarmBackend {
       "--publish",
       `127.0.0.1:${target.httpPort}:8080`,
       "--publish",
-      `${tailnetIp}:${target.webrtcPort}:${target.webrtcPort}/udp`,
+      `${networkAddress}:${target.webrtcPort}:${target.webrtcPort}/udp`,
       "--publish",
-      `${tailnetIp}:${target.cdpPort}:9222`,
+      `${networkAddress}:${target.cdpPort}:9222`,
       "--env",
       "DISPLAY_NUM=1",
       "--env",
       "HEIGHT=1080",
       "--env",
       "WIDTH=1920",
-      "--env",
-      "TZ=America/New_York",
       "--env",
       "RUN_AS_ROOT=false",
       "--env",
@@ -321,17 +423,20 @@ export class DockerFarmBackend implements FarmBackend {
       "--env",
       `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`,
       "--env",
-      `NEKO_WEBRTC_NAT1TO1=${tailnetIp}`,
+      `NEKO_WEBRTC_NAT1TO1=${networkAddress}`,
       "--env",
       `NEKO_LOG_LEVEL=${nekoLogLevel}`,
+      ...(this.config.browser.timezone === null
+        ? []
+        : ["--env", `TZ=${this.config.browser.timezone}`]),
       image,
     ];
-    const result = await command(args);
+    const result = await this.runCommand(args);
     if (result.exitCode !== 0) throw failure("docker run", result);
   }
 
   async startContainer(container: string): Promise<void> {
-    const result = await command(["docker", "--context", this.context, "start", container]);
+    const result = await this.runCommand(["docker", "--context", this.context, "start", container]);
     if (result.exitCode !== 0) throw failure("docker start", result);
   }
 
@@ -347,7 +452,7 @@ export class DockerFarmBackend implements FarmBackend {
       "until curl --fail --silent --max-time 3 http://127.0.0.1:8080/ >/dev/null && " +
       "curl --fail --silent --max-time 3 http://127.0.0.1:9222/json/version >/dev/null; " +
       `do attempt=$((attempt + 1)); [ "$attempt" -ge ${timeoutSeconds} ] && exit 1; sleep 1; done`;
-    const result = await command([
+    const result = await this.runCommand([
       "docker",
       "--context",
       this.context,
@@ -366,7 +471,46 @@ export class DockerFarmBackend implements FarmBackend {
   }
 
   async removeContainer(container: string): Promise<void> {
-    const result = await command(["docker", "--context", this.context, "rm", "--force", container]);
+    const result = await this.runCommand([
+      "docker",
+      "--context",
+      this.context,
+      "rm",
+      "--force",
+      container,
+    ]);
     if (result.exitCode !== 0) throw failure("docker rm", result);
+  }
+
+  private async discoveryCommand(
+    args: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<CommandResult> {
+    if (signal === undefined) return await this.runCommand(args);
+    signal.throwIfAborted();
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    let timedOut = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        const error = browserHostUnreachable();
+        controller.abort(error);
+        reject(error);
+      }, this.config.discovery.commandTimeoutMs);
+    });
+    try {
+      return await Promise.race([this.runCommand(args, controller.signal), deadline]);
+    } catch (error) {
+      if (signal.aborted) signal.throwIfAborted();
+      if (timedOut) throw browserHostUnreachable();
+      throw error;
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 }

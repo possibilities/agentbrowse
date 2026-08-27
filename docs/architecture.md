@@ -37,7 +37,7 @@ stale-result suppression; it has no rendering policy.
 Selecting a target opens one `LiveViewTunnel`. The tunnel reserves an ephemeral
 loopback port, starts an SSH local forward to the target's Live View HTTP port,
 probes readiness, and owns the SSH child until disconnect. WebSocket signaling
-uses that forward; WebRTC uses the target's tailnet-reachable UDP candidate.
+uses that forward; WebRTC uses the target's configured network-reachable UDP candidate.
 The connection descriptor is passed to native code as bounded bytes and is
 never placed in argv or logs.
 

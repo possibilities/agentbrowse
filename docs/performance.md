@@ -2,7 +2,7 @@
 
 ## AppKit baseline
 
-The first local measurement used the 1920×1080@25 VP8 Artbird target on an
+The first local measurement used a 1920×1080@25 VP8 remote target on an
 Apple-silicon Mac running macOS 26.5.2. With a mostly static Chromium page, the
 native process settled near 118 MiB resident memory, 18–22% of one CPU core,
 and 17 threads after more than ten minutes. These are development (`Debug`)

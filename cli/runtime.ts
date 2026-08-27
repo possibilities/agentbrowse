@@ -1,6 +1,6 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
+import { loadAgentbrowseConfig } from "../config/deployment.ts";
 import { DockerFarmBackend } from "./backend.ts";
 import { BrowserFarm } from "./farm.ts";
 
@@ -12,9 +12,10 @@ export function runtimeDir(env: Readonly<Record<string, string | undefined>>): s
 export function browserFarm(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): BrowserFarm {
+  const config = loadAgentbrowseConfig(env);
   return new BrowserFarm(
-    new DockerFarmBackend(env),
+    new DockerFarmBackend(config),
     runtimeDir(env),
-    env.AGENTBROWSE_NEKO_LOG_LEVEL ?? "info",
+    config.browser.nekoLogLevel,
   );
 }
