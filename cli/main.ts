@@ -14,14 +14,14 @@ Usage:
   agentbrowse list [--json]
   agentbrowse destroy NAME [--json]
   agentbrowse provider
-  agentbrowse view SESSION
+  agentbrowse view [SESSION]
 
 Commands:
   create   Create or start one CDP + Live View browser target
   list     List every browser target managed by agentbrowse
   destroy  Delete one exactly owned browser target and its runtime metadata
   provider Handle one agent-browser plugin protocol request over standard I/O
-  view     Open an agent-browser session's Browser target in native Live View
+  view     Open a session's Browser target; uses the default session if omitted
 
 Options:
   --slot N     Port slot from 0 to 999; required by create
@@ -80,12 +80,10 @@ export function parseArgs(argv: readonly string[]): Parsed {
   }
   if (command === "view") {
     if (json) throw new UsageError("view does not accept --json");
+    if (args.length > 2) throw new UsageError(`unexpected argument: ${args[2]}`);
     const session = args[1];
-    if (session === undefined || session.startsWith("--")) {
-      throw new UsageError("view requires an agent-browser session name");
-    }
-    if (args.length !== 2) throw new UsageError(`unexpected argument: ${args[2]}`);
-    return { command, session, json: false };
+    if (session?.startsWith("--")) throw new UsageError(`unexpected argument: ${session}`);
+    return { command, session: session ?? "default", json: false };
   }
   if (command === "list") {
     if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);

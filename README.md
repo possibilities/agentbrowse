@@ -113,13 +113,14 @@ an already-loaded image explicitly.
 Open a provider-managed Browser target by its agent-browser session name:
 
 ```sh
-agentbrowse view research
+agentbrowse view
 ```
 
 `view` applies the same stable session-to-target mapping as the Artbird
 provider, then owns the Live View SSH tunnel until the GUI closes. The Browser
 target must already exist; create it first with an agent-browser command such
-as `agent-browser --session research open https://example.com`.
+as `agent-browser open https://example.com`. Pass a session name to both
+commands when using a session other than `default`.
 
 The application receives one connection descriptor on standard input and
 connects immediately. It deliberately has no connection chooser:
