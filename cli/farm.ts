@@ -259,11 +259,12 @@ export class BrowserFarm {
     return result;
   }
 
-  async list(): Promise<readonly BrowserListEntry[]> {
-    await this.backend.verifyHost();
+  async list(signal?: AbortSignal): Promise<readonly BrowserListEntry[]> {
+    signal?.throwIfAborted();
+    await this.backend.verifyHost(signal);
     const [tailnetIp, managed] = await Promise.all([
-      this.backend.resolveTailnetIp(),
-      this.backend.listManagedContainers(),
+      this.backend.resolveTailnetIp(signal),
+      this.backend.listManagedContainers(signal),
     ]);
     const slotCounts = new Map<number, number>();
     for (const browser of managed) {

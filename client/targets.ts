@@ -7,14 +7,15 @@ export interface BrowserTargetChoice extends BrowserListEntry {
 }
 
 export interface BrowserTargetSource {
-  list(): Promise<readonly BrowserListEntry[]>;
+  list(signal?: AbortSignal): Promise<readonly BrowserListEntry[]>;
 }
 
 /** Discover Browser targets through the typed farm API, never CLI JSON. */
 export async function listBrowserTargets(
   source: BrowserTargetSource = browserFarm(),
+  signal?: AbortSignal,
 ): Promise<readonly BrowserTargetChoice[]> {
-  return (await source.list()).map((target) => {
+  return (await source.list(signal)).map((target) => {
     const disabledReason = target.slotConflict
       ? `slot ${target.slot} conflict`
       : target.state !== "running"
