@@ -1,0 +1,5 @@
+.deps/
+.zig-cache/
+zig-out/
+*.xcframework.zip
+*.dSYM/
