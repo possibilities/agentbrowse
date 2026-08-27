@@ -1,7 +1,7 @@
 {
   "name": "agentbrowse",
   "version": "0.1.0",
-  "description": "Create Kernel browsers on Artbird and view them with native frontends",
+  "description": "Create remote Kernel browsers and view them with native frontends",
   "private": true,
   "license": "MIT",
   "repository": {
@@ -22,7 +22,7 @@
     "agentbrowse": "bun run cli/main.ts",
     "native:build": "tools/fetch-webrtc && zig build live-view-lib",
     "opentui:example": "bun run examples/opentui-browser.ts",
-    "format": "biome check --write cli client src examples test",
+    "format": "biome check --write cli client config src examples test tools",
     "lint": "biome check .",
     "typecheck": "tsc --noEmit",
     "test": "bun test",

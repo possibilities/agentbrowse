@@ -1,7 +1,7 @@
 import { createServer } from "node:net";
-
 import type { BrowserListEntry } from "../cli/farm.ts";
 import { targetFor } from "../cli/model.ts";
+import { loadAgentbrowseConfig, requireConfigured } from "../config/deployment.ts";
 
 const STDERR_LIMIT = 8 * 1024;
 const READY_TIMEOUT_MS = 5_000;
@@ -80,7 +80,15 @@ export class LiveViewTunnel {
     options.signal?.throwIfAborted();
     const localPort = await dependencies.allocatePort();
     options.signal?.throwIfAborted();
-    const remoteHost = options.remoteHost ?? process.env.AGENTBROWSE_REMOTE_HOST ?? "artbird";
+    const config = options.remoteHost === undefined ? loadAgentbrowseConfig() : null;
+    const remoteHost =
+      options.remoteHost ??
+      requireConfigured(
+        config!.remote.host,
+        "remote.host",
+        "AGENTBROWSE_REMOTE_HOST",
+        config!.path,
+      );
     const args = sshArguments(remoteHost, localPort, targetFor(target.name, target.slot).httpPort);
     const child = dependencies.spawn(args);
     const stderrPromise = captureStderr(child.stderr, STDERR_LIMIT);

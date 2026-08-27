@@ -53,7 +53,7 @@ test("connection descriptors point at the per-session local tunnel", () => {
   const descriptor = connectionDescriptor(entries[0]!, "http://127.0.0.1:49152");
   expect(descriptor).toEqual({
     version: 1,
-    label: "artbird/ready",
+    label: "agentbrowse/ready",
     base_url: "http://127.0.0.1:49152",
     username: "kernel",
     password: "admin",
@@ -65,7 +65,7 @@ test("connection descriptors point at the per-session local tunnel", () => {
 });
 
 test("SSH forwarding uses an ephemeral local port and hardened liveness options", () => {
-  expect(sshArguments("artbird", 49152, 18081)).toEqual([
+  expect(sshArguments("browser-host", 49152, 18081)).toEqual([
     "ssh",
     "-N",
     "-T",
@@ -79,7 +79,7 @@ test("SSH forwarding uses an ephemeral local port and hardened liveness options"
     "ServerAliveCountMax=3",
     "-L",
     "127.0.0.1:49152:127.0.0.1:18081",
-    "artbird",
+    "browser-host",
   ]);
 });
 
@@ -112,6 +112,7 @@ test("aborting tunnel startup reaps the SSH child before rejecting", async () =>
   };
   const controller = new AbortController();
   const opening = LiveViewTunnel.open(entries[0]!, {
+    remoteHost: "browser-host",
     signal: controller.signal,
     dependencies: {
       allocatePort: async () => 49_152,

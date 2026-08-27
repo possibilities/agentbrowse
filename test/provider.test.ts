@@ -46,9 +46,9 @@ test("provider advertises the browser provider manifest", async () => {
     protocol: PROTOCOL,
     success: true,
     manifest: {
-      name: "artbird",
+      name: "agentbrowse",
       capabilities: ["browser.provider"],
-      description: "Manage Kernel browser targets on Artbird",
+      description: "Manage remote Kernel browser targets",
     },
   });
 });
@@ -58,7 +58,7 @@ test("browser.launch provisions the session target and returns cleanup data", as
   const response = JSON.parse(
     await handleProviderRequest(
       request("browser.launch", "browser.provider", {
-        provider: "artbird",
+        provider: "remote-browser",
         session: "demo",
         launchOptions: { engine: "chrome", headed: true },
       }),

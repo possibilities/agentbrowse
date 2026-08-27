@@ -69,7 +69,7 @@ class FakeBackend implements FarmBackend {
     this.verified += 1;
   }
 
-  async resolveTailnetIp(): Promise<string> {
+  async resolveNetworkAddress(): Promise<string> {
     return this.ip;
   }
 
@@ -95,7 +95,7 @@ class FakeBackend implements FarmBackend {
       input.target.name,
       input.target.slot,
       input.image,
-      input.tailnetIp,
+      input.networkAddress,
     );
   }
 

@@ -7,7 +7,7 @@ import { runProvider } from "./provider.ts";
 import { browserFarm } from "./runtime.ts";
 import { runView } from "./view.ts";
 
-const HELP = `agentbrowse: create Kernel browsers on Artbird
+const HELP = `agentbrowse: create remote Kernel browsers
 
 Usage:
   agentbrowse create NAME --slot N [--image REF] [--json]
@@ -25,7 +25,7 @@ Commands:
 
 Options:
   --slot N     Port slot from 0 to 999; required by create
-  --image REF  Kernel image already loaded on Artbird
+  --image REF  Kernel image already loaded on the configured browser host
   --json       Emit the stable machine envelope
   -h, --help   Show this help
 `;
@@ -240,8 +240,8 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
     }
   }
 
-  const farm = browserFarm(env);
   try {
+    const farm = browserFarm(env);
     if (parsed.command === "create") {
       const result = await farm.create({
         name: parsed.name,

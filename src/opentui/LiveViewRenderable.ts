@@ -8,10 +8,10 @@ import {
   type PasteEvent,
   type RenderContext,
 } from "@opentui/core";
-
 import { type ConnectionDescriptorOptions, connectionDescriptor } from "../../client/connection.ts";
 import type { BrowserTargetChoice } from "../../client/targets.ts";
 import { LiveViewTunnel, type TunnelOptions } from "../../client/tunnel.ts";
+import { loadAgentbrowseConfig } from "../../config/deployment.ts";
 import {
   type CellPixelSize,
   type FittedFrameGeometry,
@@ -224,7 +224,13 @@ export class LiveViewRenderable extends ImageRenderable {
         await tunnel.close();
         return;
       }
-      const descriptor = connectionDescriptor(target, tunnel.baseUrl, this.connectionOptions);
+      const liveViewConfig = loadAgentbrowseConfig().liveView;
+      const descriptor = connectionDescriptor(target, tunnel.baseUrl, {
+        labelPrefix: this.connectionOptions.labelPrefix ?? liveViewConfig.labelPrefix,
+        username: this.connectionOptions.username ?? liveViewConfig.username,
+        password: this.connectionOptions.password ?? liveViewConfig.password,
+        readOnly: this.connectionOptions.readOnly ?? liveViewConfig.readOnly,
+      });
       session = NativeLiveViewSession.create(descriptor, this.nativeLibraryPath);
       session.connect();
       this.tunnel = tunnel;

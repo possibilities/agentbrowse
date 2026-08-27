@@ -3,9 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly ROOT_DIR
-readonly DOCKER_CONTEXT="${AGENTBROWSE_DOCKER_CONTEXT:-artbird}"
-readonly REMOTE_HOST="${AGENTBROWSE_REMOTE_HOST:-artbird}"
-readonly RUNTIME_DIR="${AGENTBROWSE_RUNTIME_DIR:-${TMPDIR:-/tmp}/agentbrowse-live-view-${UID}}"
+CONFIG_VALUES="$(bun "$ROOT_DIR/tools/runtime-config.ts" shell)" || exit 1
+IFS=$'\t' read -r DOCKER_CONTEXT REMOTE_HOST RUNTIME_DIR <<<"$CONFIG_VALUES"
+readonly DOCKER_CONTEXT REMOTE_HOST RUNTIME_DIR
 readonly APP_EXECUTABLE="${ROOT_DIR}/zig-out/Kernel Live View.app/Contents/MacOS/kernel-live-view"
 
 NAME=""
@@ -26,7 +26,7 @@ Usage: tools/live-view <command> NAME
 Commands:
   status NAME      Show the browser container and service state.
   descriptor NAME  Emit its connection descriptor as JSON.
-  launch NAME      Tunnel to Artbird and run the built AppKit executable.
+  launch NAME      Tunnel to the configured browser host and run the AppKit app.
 
 Create targets with `agentbrowse create NAME --slot N` and remove them with
 `agentbrowse destroy NAME`. Provider users should prefer the wrapper command
@@ -122,8 +122,7 @@ wait_for_tunnel() {
 }
 
 emit_descriptor() {
-  printf '{"version":1,"label":"artbird/%s","base_url":"http://127.0.0.1:%s","username":"kernel","password":"admin","read_only":false}\n' \
-    "$NAME" "$HTTP_PORT"
+  bun "$ROOT_DIR/tools/runtime-config.ts" descriptor "$NAME" "$HTTP_PORT"
 }
 
 launch_target() {

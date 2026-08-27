@@ -79,7 +79,7 @@ export function verifyManagedContainer(
   state: ContainerState,
   target: Target,
   image: string,
-  tailnetIp: string,
+  networkAddress: string,
 ): void {
   if (state.labels["dev.agentbrowse.managed"] !== "true") {
     drift(`${target.container} is not managed by agentbrowse`);
@@ -103,16 +103,16 @@ export function verifyManagedContainer(
   if (!hasEnvironment(state, `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`)) {
     drift(`${target.container} uses a different WebRTC mux port`);
   }
-  if (!hasEnvironment(state, `NEKO_WEBRTC_NAT1TO1=${tailnetIp}`)) {
+  if (!hasEnvironment(state, `NEKO_WEBRTC_NAT1TO1=${networkAddress}`)) {
     drift(`${target.container} uses a different WebRTC NAT address`);
   }
   if (!hasBinding(state, "8080/tcp", "127.0.0.1", target.httpPort)) {
     drift(`${target.container} uses a different Live View HTTP bind`);
   }
-  if (!hasBinding(state, `${target.webrtcPort}/udp`, tailnetIp, target.webrtcPort)) {
+  if (!hasBinding(state, `${target.webrtcPort}/udp`, networkAddress, target.webrtcPort)) {
     drift(`${target.container} uses a different WebRTC bind`);
   }
-  if (!hasBinding(state, "9222/tcp", tailnetIp, target.cdpPort)) {
+  if (!hasBinding(state, "9222/tcp", networkAddress, target.cdpPort)) {
     drift(`${target.container} uses a different CDP bind`);
   }
 }
@@ -195,27 +195,27 @@ export class BrowserFarm {
         "choose another slot or destroy the occupying browser target",
       );
     }
-    const [tailnetIp, image] = await Promise.all([
-      this.backend.resolveTailnetIp(),
+    const [networkAddress, image] = await Promise.all([
+      this.backend.resolveNetworkAddress(),
       this.backend.resolveImage(options.image),
     ]);
     const existing = await this.backend.inspectContainer(target.container);
     let created = false;
     if (existing !== undefined) {
-      verifyManagedContainer(existing, target, image, tailnetIp);
+      verifyManagedContainer(existing, target, image, networkAddress);
       if (!existing.running) await this.backend.startContainer(target.container);
     } else {
       if (!(await this.backend.imageExists(image))) {
         throw new CliError(
           "image_missing",
-          `image ${image} is not present on Artbird`,
+          `image ${image} is not present on the browser host`,
           "build or load the Kernel image, or select one with --image",
         );
       }
       await this.backend.runBrowser({
         target,
         image,
-        tailnetIp,
+        networkAddress,
         nekoLogLevel: this.nekoLogLevel,
       });
       created = true;
@@ -228,7 +228,7 @@ export class BrowserFarm {
         throw new CliError(
           "browser_not_ready",
           `${target.container} was created but did not become ready: ${(error as Error).message}`,
-          `inspect it with docker --context artbird logs ${target.container}, then run agentbrowse destroy ${target.name}`,
+          `inspect ${target.container} logs on the configured browser host, then run agentbrowse destroy ${target.name}`,
         );
       }
       throw error;
@@ -237,7 +237,7 @@ export class BrowserFarm {
     return {
       ...target,
       image,
-      cdpUrl: `http://${tailnetIp}:${target.cdpPort}`,
+      cdpUrl: `http://${networkAddress}:${target.cdpPort}`,
       liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
       created,
     };
@@ -251,7 +251,7 @@ export class BrowserFarm {
         throw new CliError(
           "browser_not_ready",
           `${result.container} was created but did not become ready: ${(error as Error).message}`,
-          `inspect it with docker --context artbird logs ${result.container}, then run agentbrowse destroy ${result.name}`,
+          `inspect ${result.container} logs on the configured browser host, then run agentbrowse destroy ${result.name}`,
         );
       }
       throw error;
@@ -262,8 +262,8 @@ export class BrowserFarm {
   async list(signal?: AbortSignal): Promise<readonly BrowserListEntry[]> {
     signal?.throwIfAborted();
     await this.backend.verifyHost(signal);
-    const [tailnetIp, managed] = await Promise.all([
-      this.backend.resolveTailnetIp(signal),
+    const [networkAddress, managed] = await Promise.all([
+      this.backend.resolveNetworkAddress(signal),
       this.backend.listManagedContainers(signal),
     ]);
     const slotCounts = new Map<number, number>();
@@ -275,7 +275,7 @@ export class BrowserFarm {
         const target = targetFor(browser.name, browser.slot);
         return {
           ...browser,
-          cdpUrl: `http://${tailnetIp}:${target.cdpPort}`,
+          cdpUrl: `http://${networkAddress}:${target.cdpPort}`,
           liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
           slotConflict: (slotCounts.get(browser.slot) ?? 0) > 1,
         };
@@ -342,7 +342,7 @@ export class BrowserFarm {
     }
     throw new CliError(
       "no_free_slots",
-      "all Artbird browser target slots from 0 to 999 are in use",
+      "all browser target slots from 0 to 999 are in use",
       "destroy an unused browser target before launching another agent-browser session",
     );
   }
@@ -372,7 +372,7 @@ export class BrowserFarm {
         if (Date.now() >= deadline) {
           throw new CliError(
             "provider_allocation_busy",
-            "another Artbird provider launch is still allocating a browser target",
+            "another provider launch is still allocating a browser target",
             "retry the agent-browser command",
           );
         }

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "docker": {
+    "context": "remote-browser",
+    "expectedEndpoint": "ssh://remote-browser",
+    "expectedEngine": "remote-browser"
+  },
+  "remote": {
+    "host": "remote-browser",
+    "networkAddress": "192.0.2.10"
+  },
+  "images": {
+    "sourceDirectory": "/absolute/path/to/kernel-images"
+  },
+  "browser": {
+    "timezone": "UTC"
+  },
+  "provider": {
+    "name": "remote-browser",
+    "description": "Manage remote Kernel browser targets"
+  },
+  "liveView": {
+    "labelPrefix": "remote-browser",
+    "username": "kernel",
+    "password": "replace-me",
+    "readOnly": false
+  },
+  "discovery": {
+    "commandTimeoutMs": 2000
+  }
+}

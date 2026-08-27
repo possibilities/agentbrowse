@@ -7,7 +7,7 @@ there is no connection chooser in the application.
 ```json
 {
   "version": 1,
-  "label": "artbird/local",
+  "label": "remote/local",
   "base_url": "http://127.0.0.1:18080",
   "username": "kernel",
   "password": "replace-me",

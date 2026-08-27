@@ -1,3 +1,4 @@
+import { loadAgentbrowseConfig } from "../config/deployment.ts";
 import type { BrowserFarm, CreateResult, DestroyResult } from "./farm.ts";
 import { providerTargetName } from "./model.ts";
 import { browserFarm } from "./runtime.ts";
@@ -7,6 +8,16 @@ const CAPABILITY = "browser.provider";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
 type ProviderFarm = Pick<BrowserFarm, "provision" | "destroy">;
+
+export interface ProviderIdentity {
+  readonly name: string;
+  readonly description: string;
+}
+
+const DEFAULT_PROVIDER_IDENTITY: ProviderIdentity = {
+  name: "agentbrowse",
+  description: "Manage remote Kernel browser targets",
+};
 
 interface PluginRequest {
   protocol: string;
@@ -66,7 +77,9 @@ function launchSession(request: PluginRequest): string {
   if (isRecord(launchOptions)) {
     const engine = launchOptions.engine;
     if (engine !== undefined && engine !== "chrome") {
-      throw new Error(`Artbird browser targets require the chrome engine, not ${String(engine)}`);
+      throw new Error(
+        `agentbrowse browser targets require the chrome engine, not ${String(engine)}`,
+      );
     }
   }
   return session;
@@ -107,15 +120,19 @@ function closeResponse(result: DestroyResult): string {
   });
 }
 
-export async function handleProviderRequest(source: string, farm: ProviderFarm): Promise<string> {
+export async function handleProviderRequest(
+  source: string,
+  farm: ProviderFarm,
+  identity: ProviderIdentity = DEFAULT_PROVIDER_IDENTITY,
+): Promise<string> {
   try {
     const input = parseRequest(source);
     if (input.type === "plugin.manifest") {
       return success({
         manifest: {
-          name: "artbird",
+          name: identity.name,
           capabilities: [CAPABILITY],
-          description: "Manage Kernel browser targets on Artbird",
+          description: identity.description,
         },
       });
     }
@@ -135,6 +152,12 @@ export async function handleProviderRequest(source: string, farm: ProviderFarm):
 export async function runProvider(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<number> {
-  process.stdout.write(await handleProviderRequest(await Bun.stdin.text(), browserFarm(env)));
+  const source = await Bun.stdin.text();
+  try {
+    const config = loadAgentbrowseConfig(env);
+    process.stdout.write(await handleProviderRequest(source, browserFarm(env), config.provider));
+  } catch (error) {
+    process.stdout.write(failure(error));
+  }
   return 0;
 }
