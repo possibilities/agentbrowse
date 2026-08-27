@@ -25,9 +25,8 @@ Usage: tools/live-view <command> NAME
 
 Commands:
   status NAME      Show the browser container and service state.
-  tunnel NAME      Keep its loopback HTTP/WebSocket tunnel open.
   descriptor NAME  Emit its connection descriptor as JSON.
-  launch NAME      Pipe its descriptor into the built AppKit executable.
+  launch NAME      Tunnel to Artbird and run the built AppKit executable.
 
 Create targets with `agentbrowse create NAME --slot N` and remove them with
 `agentbrowse destroy NAME`. This helper only connects the native Live View UI.
@@ -79,15 +78,46 @@ show_status() {
   fi
 }
 
-open_tunnel() {
+TUNNEL_PID=""
+
+close_tunnel() {
+  if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    kill "$TUNNEL_PID" 2>/dev/null || true
+    wait "$TUNNEL_PID" 2>/dev/null || true
+  fi
+  TUNNEL_PID=""
+}
+
+start_tunnel() {
   printf 'Forwarding http://127.0.0.1:%s to %s through %s\n' "$HTTP_PORT" "$CONTAINER" "$REMOTE_HOST"
-  printf 'Keep this command running; press Ctrl-C to close the tunnel.\n'
-  exec ssh -N \
+  ssh -N \
     -o BatchMode=yes \
     -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 \
     -L "127.0.0.1:${HTTP_PORT}:127.0.0.1:${HTTP_PORT}" \
-    "$REMOTE_HOST"
+    "$REMOTE_HOST" </dev/null &
+  TUNNEL_PID=$!
+}
+
+wait_for_tunnel() {
+  local attempts=0 tunnel_status
+  while [[ "$attempts" -lt 50 ]]; do
+    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+      if wait "$TUNNEL_PID"; then
+        tunnel_status=0
+      else
+        tunnel_status=$?
+      fi
+      die "SSH tunnel exited before becoming ready (status ${tunnel_status})"
+    fi
+    if curl --fail --silent --connect-timeout 1 --max-time 2 \
+      "http://127.0.0.1:${HTTP_PORT}/" >/dev/null; then
+      return
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  die "SSH tunnel did not become ready within 5 seconds"
 }
 
 emit_descriptor() {
@@ -97,9 +127,13 @@ emit_descriptor() {
 
 launch_target() {
   [[ -x "$APP_EXECUTABLE" ]] || die "app is not built; run 'tools/fetch-webrtc && zig build'"
-  curl --fail --silent --connect-timeout 2 --max-time 3 \
-    "http://127.0.0.1:${HTTP_PORT}/" >/dev/null ||
-    die "tunnel is unavailable; run 'tools/live-view tunnel $NAME' in another terminal"
+  container_running || die "$CONTAINER is not running"
+  trap close_tunnel EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  start_tunnel
+  wait_for_tunnel
   emit_descriptor | "$APP_EXECUTABLE" --connection-stdin
 }
 
@@ -110,11 +144,6 @@ case "$command_name" in
     [[ -n "$target_name" ]] || die "status requires a target name"
     load_config "$target_name"
     show_status
-    ;;
-  tunnel)
-    [[ -n "$target_name" ]] || die "tunnel requires a target name"
-    load_config "$target_name"
-    open_tunnel
     ;;
   descriptor)
     [[ -n "$target_name" ]] || die "descriptor requires a target name"

@@ -66,9 +66,11 @@ The application receives one connection descriptor on standard input and
 connects immediately. It deliberately has no connection chooser:
 
 ```sh
-tools/live-view tunnel testing
 tools/live-view launch testing
 ```
+
+`launch` opens the SSH forwarding connection needed by Live View, waits for
+it to become ready, and closes it when the application exits.
 
 For a descriptor supplied by another integration:
 
@@ -108,7 +110,6 @@ bundled executable directly:
 
 ```sh
 agentbrowse create testing --slot 1
-tools/live-view tunnel testing
 tools/live-view launch testing
 ```
 
