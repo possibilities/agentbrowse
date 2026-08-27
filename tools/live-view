@@ -29,7 +29,8 @@ Commands:
   launch NAME      Tunnel to Artbird and run the built AppKit executable.
 
 Create targets with `agentbrowse create NAME --slot N` and remove them with
-`agentbrowse destroy NAME`. This helper only connects the native Live View UI.
+`agentbrowse destroy NAME`. Provider users should prefer the wrapper command
+`agentbrowse view SESSION`; this helper only connects the native Live View UI.
 EOF
 }
 
