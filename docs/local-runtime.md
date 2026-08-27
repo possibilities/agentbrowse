@@ -21,6 +21,22 @@ The create result contains the CDP URL used by `agent-browser`:
 agent-browser --cdp http://ARTBIRD_TAILNET_IP:9223 open https://example.com
 ```
 
+The same runtime is available through the Artbird provider. Configure
+agent-browser with an `artbird` plugin whose command is `agentbrowse`, whose
+arguments are `["provider"]`, and whose capability is `browser.provider`.
+Then the agent-browser session owns the Browser target lifecycle:
+
+```sh
+agent-browser --session research --provider artbird open https://example.com
+agent-browser --session research --provider artbird close
+```
+
+`browser.launch` reuses the target named for the agent-browser session or
+allocates its first free slot. `browser.close` destroys that target
+unconditionally. The provider is a short-lived standard-input/standard-output
+process, not a server; CDP continues to flow directly between agent-browser
+and Artbird.
+
 Launch the native app. The command opens the HTTP/WebSocket tunnel, waits for
 it to become ready, and emits the sensitive connection descriptor into a
 pipe; the descriptor never appears in the process arguments:

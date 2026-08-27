@@ -1,17 +1,10 @@
 #!/usr/bin/env bun
 
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-import { DockerFarmBackend } from "./backend.ts";
 import { CliError, UsageError } from "./errors.ts";
-import {
-  BrowserFarm,
-  type BrowserListEntry,
-  type CreateResult,
-  type DestroyResult,
-} from "./farm.ts";
+import type { BrowserListEntry, CreateResult, DestroyResult } from "./farm.ts";
 import { parseSlot, SCHEMA_VERSION } from "./model.ts";
+import { runProvider } from "./provider.ts";
+import { browserFarm } from "./runtime.ts";
 
 const HELP = `agentbrowse: create Kernel browsers on Artbird
 
@@ -19,11 +12,13 @@ Usage:
   agentbrowse create NAME --slot N [--image REF] [--json]
   agentbrowse list [--json]
   agentbrowse destroy NAME [--json]
+  agentbrowse provider
 
 Commands:
   create   Create or start one CDP + Live View browser target
   list     List every browser target managed by agentbrowse
   destroy  Delete one exactly owned browser target and its runtime metadata
+  provider Handle one agent-browser plugin protocol request over standard I/O
 
 Options:
   --slot N     Port slot from 0 to 999; required by create
@@ -50,6 +45,7 @@ type Parsed =
   | ParsedCreate
   | ParsedDestroy
   | { command: "list"; json: boolean }
+  | { command: "provider"; json: false }
   | { command: "help"; json: boolean };
 
 function takeValue(args: readonly string[], index: number, flag: string): string {
@@ -67,6 +63,11 @@ export function parseArgs(argv: readonly string[]): Parsed {
     return { command: "help", json };
   }
   const command = args[0];
+  if (command === "provider") {
+    if (json) throw new UsageError("provider does not accept --json");
+    if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
+    return { command, json: false };
+  }
   if (command === "list") {
     if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
     return { command, json };
@@ -102,11 +103,6 @@ export function parseArgs(argv: readonly string[]): Parsed {
   }
   if (slot === undefined) throw new UsageError("create requires --slot N");
   return { command, name, slot, ...(image === undefined ? {} : { image }), json };
-}
-
-function runtimeDir(env: Readonly<Record<string, string | undefined>>): string {
-  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  return env.AGENTBROWSE_RUNTIME_DIR ?? join(tmpdir(), `agentbrowse-live-view-${uid}`);
 }
 
 function success(data: unknown): string {
@@ -215,9 +211,9 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
     process.stdout.write(HELP);
     return 0;
   }
+  if (parsed.command === "provider") return await runProvider(env);
 
-  const backend = new DockerFarmBackend(env);
-  const farm = new BrowserFarm(backend, runtimeDir(env), env.AGENTBROWSE_NEKO_LOG_LEVEL ?? "info");
+  const farm = browserFarm(env);
   try {
     if (parsed.command === "create") {
       const result = await farm.create({

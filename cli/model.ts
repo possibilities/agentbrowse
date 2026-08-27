@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import { CliError, UsageError } from "./errors.ts";
@@ -40,6 +41,20 @@ export function validateName(name: string): void {
   if (!/^[a-z][a-z0-9-]{0,31}$/.test(name)) {
     throw new UsageError(`name must match [a-z][a-z0-9-]{0,31}: ${name}`);
   }
+}
+
+export function providerTargetName(session: string): string {
+  if (/^[a-z][a-z0-9-]{0,31}$/.test(session)) return session;
+
+  let stem = session
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (stem === "") stem = "session";
+  if (!/^[a-z]/.test(stem)) stem = `s-${stem}`;
+  stem = stem.slice(0, 23).replace(/-+$/g, "");
+  const digest = createHash("sha256").update(session).digest("hex").slice(0, 8);
+  return `${stem}-${digest}`;
 }
 
 export function validateSlot(slot: number): void {
