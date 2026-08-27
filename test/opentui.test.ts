@@ -19,7 +19,12 @@ import {
   openTuiModifierSnapshot,
   X11_MODIFIER_KEYSYMS,
 } from "../src/opentui/keysym.ts";
-import { hostRamp, mixHexColors, RAMP_FALLBACK } from "../src/opentui/palette.ts";
+import {
+  hostRamp,
+  mixHexColors,
+  RAMP_FALLBACK,
+  startupSurfaceBackground,
+} from "../src/opentui/palette.ts";
 
 const browserEntries: BrowserListEntry[] = [
   {
@@ -265,4 +270,19 @@ test("fxnk palette derives grayscale roles from the host canvas", () => {
   expect(light.background).toBe("#f0f0f0");
   expect(light.foreground).toBe("#101010");
   expect(light.dim).toBe("#808080");
+});
+
+test("a pending startup palette preserves the terminal's native background", () => {
+  expect(startupSurfaceBackground(null, true)).toBe("transparent");
+  expect(startupSurfaceBackground(null, false)).toBe(RAMP_FALLBACK.background);
+  expect(
+    startupSurfaceBackground(
+      {
+        defaultForeground: "#f0f0f0",
+        defaultBackground: "#0d1117",
+        palette: [],
+      } as never,
+      false,
+    ),
+  ).toBe("#0d1117");
 });

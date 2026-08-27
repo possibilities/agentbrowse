@@ -54,6 +54,14 @@ export function hostRamp(colors: TerminalColors | null): Ramp {
   };
 }
 
+/** Keep the first frame on the terminal's exact native canvas while its RGB is unknown. */
+export function startupSurfaceBackground(
+  colors: TerminalColors | null,
+  palettePending: boolean,
+): string {
+  return palettePending ? "transparent" : hostRamp(colors).background;
+}
+
 export function mixHexColors(base: string, tint: string, amount: number): string {
   const channel = (offset: number) => {
     const from = Number.parseInt(base.slice(offset, offset + 2), 16);
