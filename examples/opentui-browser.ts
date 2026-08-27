@@ -28,6 +28,8 @@ import {
 
 const PICKER_TITLE = " browser ";
 const PICKER_MAX_WIDTH = 68;
+export const FXNK_MODAL_PADDING_X = 1;
+const PICKER_BORDER_CELLS_X = 2;
 
 class OpenTuiBrowserApp {
   private readonly stage: BoxRenderable;
@@ -99,7 +101,7 @@ class OpenTuiBrowserApp {
       height: 3,
       marginLeft: -16,
       marginTop: -1,
-      paddingX: 1,
+      paddingX: FXNK_MODAL_PADDING_X,
       border: true,
       borderStyle: "single",
       borderColor: this.ramp.focus,
@@ -114,7 +116,7 @@ class OpenTuiBrowserApp {
       id: "agentbrowse-browser-picker-rows",
       width: "100%",
       height: "100%",
-      content: " loading…",
+      content: "loading…",
       fg: this.ramp.dim,
       bg: this.ramp.background,
       wrapMode: "none",
@@ -231,11 +233,7 @@ class OpenTuiBrowserApp {
 
     const maxRows = Math.max(1, this.renderer.height - 4);
     const rows = pickerRows(state, maxRows, this.ramp);
-    const widest = Math.max(PICKER_TITLE.length, ...rows.plain.map((row) => row.length));
-    const width = Math.max(
-      1,
-      Math.min(PICKER_MAX_WIDTH, Math.max(28, widest + 4), this.renderer.width - 2),
-    );
+    const width = pickerModalWidth(rows.plain, this.renderer.width);
     const height = Math.max(3, rows.plain.length + 2);
     this.pickerBox.width = width;
     this.pickerBox.height = height;
@@ -289,24 +287,24 @@ class OpenTuiBrowserApp {
   }
 }
 
-function pickerRows(
+export function pickerRows(
   state: BrowserPickerState,
   maxRows: number,
   ramp: FxnkRamp,
 ): { styled: StyledText; plain: string[] } {
   if (state.loading) {
-    return { styled: new StyledText([fg(ramp.dim)(" loading…")]), plain: [" loading…"] };
+    return { styled: new StyledText([fg(ramp.dim)("loading…")]), plain: ["loading…"] };
   }
   if (state.error) {
     return {
-      styled: new StyledText([bold(fg(ramp.accent)(` ${state.error}`))]),
-      plain: [` ${state.error}`],
+      styled: new StyledText([bold(fg(ramp.accent)(state.error))]),
+      plain: [state.error],
     };
   }
   if (state.choices.length === 0) {
     return {
-      styled: new StyledText([fg(ramp.dim)(" no browser targets")]),
-      plain: [" no browser targets"],
+      styled: new StyledText([fg(ramp.dim)("no browser targets")]),
+      plain: ["no browser targets"],
     };
   }
 
@@ -330,6 +328,15 @@ function pickerRows(
     }
   }
   return { styled: new StyledText(chunks), plain };
+}
+
+export function pickerModalWidth(rows: readonly string[], viewportWidth: number): number {
+  const widest = Math.max(PICKER_TITLE.length, ...rows.map((row) => row.length));
+  const horizontalFrameCells = PICKER_BORDER_CELLS_X + 2 * FXNK_MODAL_PADDING_X;
+  return Math.max(
+    1,
+    Math.min(PICKER_MAX_WIDTH, Math.max(28, widest + horizontalFrameCells), viewportWidth - 2),
+  );
 }
 
 function pickerWindowStart(length: number, selectedIndex: number, maxRows: number): number {
