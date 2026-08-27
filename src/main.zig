@@ -24,6 +24,7 @@ pub fn main(init: std.process.Init) !void {
 
     const live_session = try klv.session.Session.create(std.heap.page_allocator, parsed.value);
     defer live_session.deinit();
+    try klv.appkit.attach(live_session);
     live_session.connect();
-    try live_session.run();
+    try klv.appkit.run(live_session);
 }

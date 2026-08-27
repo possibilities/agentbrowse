@@ -10,11 +10,15 @@ pub const Stats = struct {
 pub const Queue = struct {
     mutex: std.atomic.Mutex = .unlocked,
     latest: ?*frame_mod.Frame = null,
+    generation: u64 = 0,
     stats: Stats = .{},
 
     pub fn publish(self: *Queue, next: *frame_mod.Frame) void {
         lock(&self.mutex);
         const replaced = self.latest;
+        self.generation +%= 1;
+        if (self.generation == 0) self.generation = 1;
+        next.generation = self.generation;
         self.latest = next;
         self.stats.published += 1;
         if (replaced != null) self.stats.replaced += 1;
@@ -23,12 +27,23 @@ pub const Queue = struct {
     }
 
     pub fn acquireLatest(self: *Queue) ?frame_mod.Lease {
+        return self.acquireLatestAfter(0);
+    }
+
+    pub fn acquireLatestAfter(self: *Queue, generation: u64) ?frame_mod.Lease {
         lock(&self.mutex);
         defer self.mutex.unlock();
         const latest = self.latest orelse return null;
+        if (latest.generation <= generation) return null;
         latest.retain();
         self.stats.acquired += 1;
         return .{ .frame = latest };
+    }
+
+    pub fn latestGeneration(self: *Queue) u64 {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        return if (self.latest) |latest| latest.generation else 0;
     }
 
     pub fn snapshotStats(self: *Queue) Stats {
@@ -61,6 +76,11 @@ test "latest frame wins and leases outlive replacement" {
     const second = try frame_mod.Frame.create(std.testing.allocator, 1, 1, .i420, 2, .{ 1, 1, 1 }, .{ 1, 0, 0 }, &.{2});
     queue.publish(second);
     try std.testing.expectEqual(@as(i64, 1), lease.frame.timestamp_us);
+    try std.testing.expectEqual(@as(u64, 1), lease.frame.generation);
+    try std.testing.expect(queue.acquireLatestAfter(2) == null);
+    var latest = queue.acquireLatestAfter(1).?;
+    defer latest.release();
+    try std.testing.expectEqual(@as(u64, 2), latest.frame.generation);
     const stats = queue.snapshotStats();
     try std.testing.expectEqual(@as(u64, 2), stats.published);
     try std.testing.expectEqual(@as(u64, 1), stats.replaced);

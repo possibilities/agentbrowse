@@ -12,20 +12,29 @@
   "bin": {
     "agentbrowse": "./cli/main.ts"
   },
+  "exports": {
+    "./opentui": "./src/opentui/index.ts"
+  },
   "engines": {
     "bun": ">=1.3.14"
   },
   "scripts": {
     "agentbrowse": "bun run cli/main.ts",
-    "format": "biome check --write cli test",
+    "native:build": "tools/fetch-webrtc && zig build live-view-lib",
+    "opentui:example": "bun run examples/opentui-browser.ts",
+    "format": "biome check --write cli client src examples test",
     "lint": "biome check .",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "check:ts": "bun run lint && bun run typecheck && bun run test",
     "check": "bun run check:ts && zig build test"
   },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.6 <0.6.0"
+  },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
+    "@opentui/core": "0.5.8",
     "@types/bun": "1.3.14",
     "bun-types": "1.3.14",
     "typescript": "5.9.3"
