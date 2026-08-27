@@ -41,12 +41,14 @@ Open that Browser target in the native GUI using the original agent-browser
 session name:
 
 ```sh
-agentbrowse view research
+agentbrowse view
 ```
 
 `view` applies the provider's stable session-to-target mapping and owns the
 Live View SSH tunnel until the GUI closes. It does not provision a target, so
-the agent-browser session must already have launched one.
+the agent-browser session must already have launched one. With no session
+argument, it opens agent-browser's `default` session; pass a name to open a
+different session.
 
 Launch the native app. The command opens the HTTP/WebSocket tunnel, waits for
 it to become ready, and emits the sensitive connection descriptor into a

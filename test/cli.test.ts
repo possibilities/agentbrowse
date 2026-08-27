@@ -28,6 +28,11 @@ test("parse create, list, destroy, provider, and view commands", () => {
     session: "Demo_Worktree",
     json: false,
   });
+  expect(parseArgs(["view"])).toEqual({
+    command: "view",
+    session: "default",
+    json: false,
+  });
 });
 
 test("create requires an explicit slot", () => {
@@ -40,7 +45,7 @@ test("unknown command and extra destroy flags are usage faults", () => {
   expect(() => parseArgs(["list", "extra"])).toThrow(UsageError);
   expect(() => parseArgs(["provider", "extra"])).toThrow(UsageError);
   expect(() => parseArgs(["provider", "--json"])).toThrow(UsageError);
-  expect(() => parseArgs(["view"])).toThrow(UsageError);
   expect(() => parseArgs(["view", "testing", "extra"])).toThrow(UsageError);
+  expect(() => parseArgs(["view", "--unknown"])).toThrow(UsageError);
   expect(() => parseArgs(["view", "testing", "--json"])).toThrow(UsageError);
 });
