@@ -11,6 +11,8 @@ export interface BrowserPickerState {
 
 export type BrowserPickerListener = (state: BrowserPickerState) => void;
 
+export const DEFAULT_BROWSER_DISCOVERY_TIMEOUT_MS = 5_000;
+
 /** Async Browser-target discovery with stale-result suppression and disabled rows. */
 export class BrowserPickerController {
   private pickerState: BrowserPickerState = {
@@ -21,10 +23,12 @@ export class BrowserPickerController {
     error: null,
   };
   private generation = 0;
+  private activeDiscovery: AbortController | null = null;
 
   constructor(
     private readonly source?: BrowserTargetSource,
     private readonly listener?: BrowserPickerListener,
+    private readonly discoveryTimeoutMs = DEFAULT_BROWSER_DISCOVERY_TIMEOUT_MS,
   ) {}
 
   public state(): BrowserPickerState {
@@ -33,6 +37,16 @@ export class BrowserPickerController {
 
   public async open(): Promise<void> {
     const generation = ++this.generation;
+    this.cancelDiscovery();
+    const controller = new AbortController();
+    this.activeDiscovery = controller;
+    const timeout = setTimeout(() => {
+      controller.abort(
+        new Error(
+          `Browser target discovery timed out after ${formatDuration(this.discoveryTimeoutMs)}`,
+        ),
+      );
+    }, this.discoveryTimeoutMs);
     this.publish({
       ...this.pickerState,
       open: true,
@@ -40,7 +54,10 @@ export class BrowserPickerController {
       error: null,
     });
     try {
-      const choices = await listBrowserTargets(this.source);
+      const choices = await abortable(
+        listBrowserTargets(this.source, controller.signal),
+        controller.signal,
+      );
       if (generation !== this.generation || !this.pickerState.open) return;
       this.publish({
         open: true,
@@ -58,11 +75,15 @@ export class BrowserPickerController {
         selectedIndex: -1,
         error: errorMessage(error),
       });
+    } finally {
+      clearTimeout(timeout);
+      if (this.activeDiscovery === controller) this.activeDiscovery = null;
     }
   }
 
   public close(): void {
     this.generation += 1;
+    this.cancelDiscovery();
     if (!this.pickerState.open) return;
     this.publish({ ...this.pickerState, open: false, loading: false });
   }
@@ -99,8 +120,27 @@ export class BrowserPickerController {
     this.pickerState = state;
     this.listener?.(this.state());
   }
+
+  private cancelDiscovery(): void {
+    this.activeDiscovery?.abort(new Error("Browser target discovery cancelled"));
+    this.activeDiscovery = null;
+  }
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatDuration(milliseconds: number): string {
+  if (milliseconds % 1_000 === 0) return `${milliseconds / 1_000} seconds`;
+  return `${milliseconds} ms`;
+}
+
+function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }

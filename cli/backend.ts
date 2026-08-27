@@ -33,11 +33,11 @@ export interface ManagedContainerRecord {
 }
 
 export interface FarmBackend {
-  verifyHost(): Promise<void>;
-  resolveTailnetIp(): Promise<string>;
+  verifyHost(signal?: AbortSignal): Promise<void>;
+  resolveTailnetIp(signal?: AbortSignal): Promise<string>;
   resolveImage(override?: string): Promise<string>;
   imageExists(image: string): Promise<boolean>;
-  listManagedContainers(): Promise<readonly ManagedContainerRecord[]>;
+  listManagedContainers(signal?: AbortSignal): Promise<readonly ManagedContainerRecord[]>;
   inspectContainer(container: string): Promise<ContainerState | undefined>;
   runBrowser(input: RunBrowserInput): Promise<void>;
   startContainer(container: string): Promise<void>;
@@ -63,18 +63,21 @@ interface DockerInspect {
   };
 }
 
-async function command(args: readonly string[]): Promise<CommandResult> {
+async function command(args: readonly string[], signal?: AbortSignal): Promise<CommandResult> {
+  signal?.throwIfAborted();
   const child = Bun.spawn([...args], {
     env: process.env,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    ...(signal === undefined ? {} : { signal }),
   });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
   ]);
+  signal?.throwIfAborted();
   return { exitCode, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
@@ -113,15 +116,11 @@ export class DockerFarmBackend implements FarmBackend {
     this.sourceDir = env.AGENTBROWSE_KERNEL_IMAGES ?? join(homedir(), "src", "kernel-images");
   }
 
-  async verifyHost(): Promise<void> {
-    const context = await command([
-      "docker",
-      "context",
-      "inspect",
-      this.context,
-      "--format",
-      "{{ .Endpoints.docker.Host }}",
-    ]);
+  async verifyHost(signal?: AbortSignal): Promise<void> {
+    const context = await command(
+      ["docker", "context", "inspect", this.context, "--format", "{{ .Endpoints.docker.Host }}"],
+      signal,
+    );
     if (context.exitCode !== 0) throw failure("docker context inspect", context);
     if (context.stdout !== "ssh://artbird") {
       throw new CliError(
@@ -130,14 +129,10 @@ export class DockerFarmBackend implements FarmBackend {
       );
     }
 
-    const engine = await command([
-      "docker",
-      "--context",
-      this.context,
-      "info",
-      "--format",
-      "{{ .Name }}",
-    ]);
+    const engine = await command(
+      ["docker", "--context", this.context, "info", "--format", "{{ .Name }}"],
+      signal,
+    );
     if (engine.exitCode !== 0) throw failure("docker info", engine);
     if (engine.stdout !== "artbird") {
       throw new CliError(
@@ -147,7 +142,7 @@ export class DockerFarmBackend implements FarmBackend {
     }
   }
 
-  async resolveTailnetIp(): Promise<string> {
+  async resolveTailnetIp(signal?: AbortSignal): Promise<string> {
     const configured = this.env.AGENTBROWSE_ARTBIRD_IP;
     if (configured !== undefined) {
       if (!isIpv4(configured)) {
@@ -155,13 +150,10 @@ export class DockerFarmBackend implements FarmBackend {
       }
       return configured;
     }
-    const result = await command([
-      "ssh",
-      "-o",
-      "BatchMode=yes",
-      this.remoteHost,
-      "tailscale ip -4",
-    ]);
+    const result = await command(
+      ["ssh", "-o", "BatchMode=yes", this.remoteHost, "tailscale ip -4"],
+      signal,
+    );
     if (result.exitCode !== 0) throw failure("Artbird Tailnet address lookup", result);
     const ip = result.stdout.split("\n")[0] ?? "";
     if (!isIpv4(ip)) {
@@ -196,7 +188,7 @@ export class DockerFarmBackend implements FarmBackend {
     return result.exitCode === 0;
   }
 
-  async listManagedContainers(): Promise<readonly ManagedContainerRecord[]> {
+  async listManagedContainers(signal?: AbortSignal): Promise<readonly ManagedContainerRecord[]> {
     const format = [
       '{{.Label "dev.agentbrowse.target"}}',
       '{{.Label "dev.agentbrowse.slot"}}',
@@ -204,20 +196,23 @@ export class DockerFarmBackend implements FarmBackend {
       "{{.State}}",
       "{{.Status}}",
     ].join("\t");
-    const result = await command([
-      "docker",
-      "--context",
-      this.context,
-      "container",
-      "list",
-      "--all",
-      "--filter",
-      "label=dev.agentbrowse.managed=true",
-      "--filter",
-      "label=dev.agentbrowse.role=kernel-browser",
-      "--format",
-      format,
-    ]);
+    const result = await command(
+      [
+        "docker",
+        "--context",
+        this.context,
+        "container",
+        "list",
+        "--all",
+        "--filter",
+        "label=dev.agentbrowse.managed=true",
+        "--filter",
+        "label=dev.agentbrowse.role=kernel-browser",
+        "--format",
+        format,
+      ],
+      signal,
+    );
     if (result.exitCode !== 0) throw failure("docker container list", result);
     if (result.stdout === "") return [];
 

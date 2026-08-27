@@ -212,15 +212,46 @@ test("Browser-target picker skips disabled rows and closes before choosing", asy
 
 test("closing a Browser-target picker suppresses an in-flight discovery result", async () => {
   let resolveList!: (entries: readonly BrowserListEntry[]) => void;
+  let discoverySignal: AbortSignal | undefined;
   const pending = new Promise<readonly BrowserListEntry[]>((resolve) => {
     resolveList = resolve;
   });
-  const picker = new BrowserPickerController({ list: () => pending });
+  const picker = new BrowserPickerController({
+    list: (signal) => {
+      discoverySignal = signal;
+      return pending;
+    },
+  });
   const opening = picker.open();
   picker.close();
+  expect(discoverySignal?.aborted).toBe(true);
   resolveList(browserEntries);
   await opening;
   expect(picker.state()).toMatchObject({ open: false, choices: [] });
+});
+
+test("a stalled Browser-target discovery becomes a bounded picker error", async () => {
+  let discoverySignal: AbortSignal | undefined;
+  const picker = new BrowserPickerController(
+    {
+      list: (signal) => {
+        discoverySignal = signal;
+        return new Promise<readonly BrowserListEntry[]>(() => {});
+      },
+    },
+    undefined,
+    5,
+  );
+
+  await picker.open();
+
+  expect(discoverySignal?.aborted).toBe(true);
+  expect(picker.state()).toMatchObject({
+    open: true,
+    loading: false,
+    choices: [],
+    error: "Browser target discovery timed out after 5 ms",
+  });
 });
 
 test("fxnk palette derives grayscale roles from the host canvas", () => {
