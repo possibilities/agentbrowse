@@ -25,7 +25,8 @@ agentbrowse create testing --slot 1
 ```
 
 Chromium starts maximized within the remote desktop while retaining its tab
-strip and address bar.
+strip and address bar. The non-interactive Chrome for Testing banner is hidden
+so the page receives the full remaining viewport.
 
 List every browser target carrying agentbrowse ownership labels:
 

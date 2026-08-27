@@ -11,7 +11,7 @@ import type {
 } from "../cli/backend.ts";
 import { CliError } from "../cli/errors.ts";
 import { BrowserFarm } from "../cli/farm.ts";
-import { configPath, targetFor } from "../cli/model.ts";
+import { CHROMIUM_FLAGS, configPath, targetFor } from "../cli/model.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -39,7 +39,7 @@ function managedState(name: string, slot: number, image: string, ip: string): Co
     },
     environment: [
       "ENABLE_WEBRTC=true",
-      "CHROMIUM_FLAGS=--start-maximized",
+      `CHROMIUM_FLAGS=${CHROMIUM_FLAGS}`,
       `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`,
       `NEKO_WEBRTC_NAT1TO1=${ip}`,
     ],
@@ -163,18 +163,18 @@ test("create fails closed when an existing container drifts", async () => {
   expect(backend.runs).toHaveLength(0);
 });
 
-test("create rejects a browser that does not start maximized", async () => {
+test("create rejects a browser with different window flags", async () => {
   const backend = new FakeBackend();
   const state = managedState("testing", 2, backend.image, backend.ip);
   backend.existing = {
     ...state,
-    environment: state.environment.filter((value) => value !== "CHROMIUM_FLAGS=--start-maximized"),
+    environment: state.environment.filter((value) => value !== `CHROMIUM_FLAGS=${CHROMIUM_FLAGS}`),
   };
   const farm = new BrowserFarm(backend, runtimeDir());
 
   await expect(farm.create({ name: "testing", slot: 2 })).rejects.toMatchObject({
     code: "browser_drift",
-    message: "agentbrowse-browser-testing does not start Chromium maximized",
+    message: "agentbrowse-browser-testing uses different Chromium window flags",
   });
   expect(backend.runs).toHaveLength(0);
 });

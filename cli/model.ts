@@ -6,6 +6,7 @@ export const SCHEMA_VERSION = 1;
 export const HTTP_BASE_PORT = 18080;
 export const WEBRTC_BASE_PORT = 56000;
 export const CDP_BASE_PORT = 9222;
+export const CHROMIUM_FLAGS = "--start-maximized --disable-infobars";
 
 export interface Target {
   name: string;

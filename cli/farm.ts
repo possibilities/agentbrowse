@@ -10,6 +10,7 @@ import type {
 import { CliError } from "./errors.ts";
 import {
   type BrowserDescription,
+  CHROMIUM_FLAGS,
   configPath,
   parseTargetConfig,
   renderTargetConfig,
@@ -86,8 +87,8 @@ export function verifyManagedContainer(
   if (!hasEnvironment(state, "ENABLE_WEBRTC=true")) {
     drift(`${target.container} does not enable Live View`);
   }
-  if (!hasEnvironment(state, "CHROMIUM_FLAGS=--start-maximized")) {
-    drift(`${target.container} does not start Chromium maximized`);
+  if (!hasEnvironment(state, `CHROMIUM_FLAGS=${CHROMIUM_FLAGS}`)) {
+    drift(`${target.container} uses different Chromium window flags`);
   }
   if (!hasEnvironment(state, `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`)) {
     drift(`${target.container} uses a different WebRTC mux port`);

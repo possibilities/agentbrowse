@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { CliError } from "./errors.ts";
-import type { Target } from "./model.ts";
+import { CHROMIUM_FLAGS, type Target } from "./model.ts";
 
 export interface ContainerState {
   image: string;
@@ -320,7 +320,7 @@ export class DockerFarmBackend implements FarmBackend {
       "--env",
       "RUN_AS_ROOT=false",
       "--env",
-      "CHROMIUM_FLAGS=--start-maximized",
+      `CHROMIUM_FLAGS=${CHROMIUM_FLAGS}`,
       "--env",
       "ENABLE_WEBRTC=true",
       "--env",
