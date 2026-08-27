@@ -38,5 +38,8 @@
     "@types/bun": "1.3.14",
     "bun-types": "1.3.14",
     "typescript": "5.9.3"
+  },
+  "overrides": {
+    "@opentui/core-darwin-arm64": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.1/opentui-core-darwin-arm64-0.5.8-agentbrowse.1.tgz"
   }
 }

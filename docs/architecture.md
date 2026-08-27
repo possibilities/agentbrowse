@@ -48,8 +48,8 @@ thread, normally at 15 FPS, and sends input through synchronous session calls.
 This keeps WebRTC and NSURLSession worker threads on the native side of the
 runtime boundary.
 
-`LiveViewRenderable` subclasses OpenTUI's public `ImageRenderable`; no OpenTUI
-fork or native plugin is required. For each new generation it:
+`LiveViewRenderable` subclasses OpenTUI's public `ImageRenderable`; it requires
+no private API or native plugin. For each new generation it:
 
 1. fits the rotated source aspect ratio to the available terminal cells using
    the terminal's measured pixel resolution when available;
@@ -57,6 +57,23 @@ fork or native plugin is required. For each new generation it:
    RGBA buffer;
 3. hands the buffer to `NativeImage`, which `ImageRenderable` retains; and
 4. releases the frame lease immediately.
+
+The OpenTUI 0.5.8 native Kitty renderer does require one downstream correction
+for continuously changing images. Its stock replacement path deletes the
+current Kitty image, transmits the next pixels, then places the image again.
+Ghostty can present the cleared cell background between those commands, which
+makes a healthy video stream strobe black. The pinned
+`possibilities/opentui` `carry/kitty-image-replacement` build preserves the
+placement and image ID, retransmits replacement pixels under that identity,
+and retains destructive deletes for actual removal or protocol changes. The
+source and release artifact are fixed in `config/opentui-carry.json`.
+
+This pin is dependency-root policy. agentbrowse applies it for its own example
+and tests, but package-manager overrides do not propagate through a dependency.
+Every embedding OpenTUI application must apply the same native-package override
+at its root until upstream OpenTUI ships the correction. The adapter contract
+itself remains entirely on OpenTUI's public API, so removing the carry later is
+a dependency change rather than an integration rewrite.
 
 The same fitted rectangle maps cell-center pointer coordinates back through
 the inverse frame rotation. Keyboard events become X11 keysyms, including
