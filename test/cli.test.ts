@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { UsageError } from "../cli/errors.ts";
 import { parseArgs } from "../cli/main.ts";
 
-test("parse create, list, and destroy commands", () => {
+test("parse create, list, destroy, and provider commands", () => {
   expect(parseArgs(["create", "testing", "--slot", "4", "--json"])).toEqual({
     command: "create",
     name: "testing",
@@ -19,6 +19,10 @@ test("parse create, list, and destroy commands", () => {
     command: "list",
     json: true,
   });
+  expect(parseArgs(["provider"])).toEqual({
+    command: "provider",
+    json: false,
+  });
 });
 
 test("create requires an explicit slot", () => {
@@ -29,4 +33,6 @@ test("unknown command and extra destroy flags are usage faults", () => {
   expect(() => parseArgs(["unknown"])).toThrow(UsageError);
   expect(() => parseArgs(["destroy", "testing", "--slot", "3"])).toThrow(UsageError);
   expect(() => parseArgs(["list", "extra"])).toThrow(UsageError);
+  expect(() => parseArgs(["provider", "extra"])).toThrow(UsageError);
+  expect(() => parseArgs(["provider", "--json"])).toThrow(UsageError);
 });

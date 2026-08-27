@@ -1,5 +1,5 @@
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import type {
   ContainerState,
@@ -23,6 +23,12 @@ export interface CreateOptions {
   name: string;
   slot: number;
   image?: string;
+  readyTimeoutSeconds?: number;
+}
+
+export interface ProvisionOptions {
+  name: string;
+  image?: string;
 }
 
 export interface CreateResult extends BrowserDescription {
@@ -40,6 +46,10 @@ export interface BrowserListEntry extends ManagedContainerRecord {
   liveViewUrl: string;
   slotConflict: boolean;
 }
+
+const PROVIDER_READY_TIMEOUT_SECONDS = 45;
+const PROVIDER_LOCK_WAIT_MS = 10_000;
+const PROVIDER_LOCK_STALE_MS = 90_000;
 
 function hasBinding(
   state: ContainerState,
@@ -140,10 +150,41 @@ export class BrowserFarm {
   ) {}
 
   async create(options: CreateOptions): Promise<CreateResult> {
+    const result = await this.prepareCreate(options);
+    return await this.waitForCreate(result, options.readyTimeoutSeconds ?? 120);
+  }
+
+  async provision(options: ProvisionOptions): Promise<CreateResult> {
+    const result = await this.withProviderAllocationLock(async () => {
+      validateName(options.name);
+      await this.backend.verifyHost();
+      const [recorded, managed] = await Promise.all([
+        this.readTarget(options.name),
+        this.backend.listManagedContainers(),
+      ]);
+      const existing = managed.find((browser) => browser.name === options.name);
+      const usedSlots = new Set(managed.map((browser) => browser.slot));
+      const slot = existing?.slot ?? recorded?.slot ?? this.firstFreeSlot(usedSlots);
+      return await this.prepareCreate(
+        {
+          name: options.name,
+          slot,
+          ...(options.image === undefined ? {} : { image: options.image }),
+        },
+        managed,
+      );
+    });
+    return await this.waitForCreate(result, PROVIDER_READY_TIMEOUT_SECONDS);
+  }
+
+  private async prepareCreate(
+    options: CreateOptions,
+    knownManaged?: readonly ManagedContainerRecord[],
+  ): Promise<CreateResult> {
     const target = targetFor(options.name, options.slot);
     await this.verifyRecordedTarget(target);
-    await this.backend.verifyHost();
-    const managed = await this.backend.listManagedContainers();
+    if (knownManaged === undefined) await this.backend.verifyHost();
+    const managed = knownManaged ?? (await this.backend.listManagedContainers());
     const occupant = managed.find(
       (browser) => browser.slot === target.slot && browser.container !== target.container,
     );
@@ -182,7 +223,6 @@ export class BrowserFarm {
 
     try {
       await this.writeTarget(target);
-      await this.backend.waitReady(target.container);
     } catch (error) {
       if (created) {
         throw new CliError(
@@ -201,6 +241,22 @@ export class BrowserFarm {
       liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
       created,
     };
+  }
+
+  private async waitForCreate(result: CreateResult, timeoutSeconds: number): Promise<CreateResult> {
+    try {
+      await this.backend.waitReady(result.container, timeoutSeconds);
+    } catch (error) {
+      if (result.created) {
+        throw new CliError(
+          "browser_not_ready",
+          `${result.container} was created but did not become ready: ${(error as Error).message}`,
+          `inspect it with docker --context artbird logs ${result.container}, then run agentbrowse destroy ${result.name}`,
+        );
+      }
+      throw error;
+    }
+    return result;
   }
 
   async list(): Promise<readonly BrowserListEntry[]> {
@@ -277,5 +333,56 @@ export class BrowserFarm {
 
   private async removeTarget(name: string): Promise<void> {
     await rm(configPath(this.runtimeDir, name), { force: true });
+  }
+
+  private firstFreeSlot(usedSlots: ReadonlySet<number>): number {
+    for (let slot = 0; slot <= 999; slot += 1) {
+      if (!usedSlots.has(slot)) return slot;
+    }
+    throw new CliError(
+      "no_free_slots",
+      "all Artbird browser target slots from 0 to 999 are in use",
+      "destroy an unused browser target before launching another agent-browser session",
+    );
+  }
+
+  private async withProviderAllocationLock<T>(operation: () => Promise<T>): Promise<T> {
+    await mkdir(this.runtimeDir, { recursive: true, mode: 0o700 });
+    await chmod(this.runtimeDir, 0o700);
+    const path = join(this.runtimeDir, ".provider-allocation.lock");
+    const deadline = Date.now() + PROVIDER_LOCK_WAIT_MS;
+
+    while (true) {
+      try {
+        await mkdir(path, { mode: 0o700 });
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        try {
+          const details = await stat(path);
+          if (Date.now() - details.mtimeMs > PROVIDER_LOCK_STALE_MS) {
+            await rm(path, { recursive: true, force: true });
+            continue;
+          }
+        } catch (lockError) {
+          if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw lockError;
+        }
+        if (Date.now() >= deadline) {
+          throw new CliError(
+            "provider_allocation_busy",
+            "another Artbird provider launch is still allocating a browser target",
+            "retry the agent-browser command",
+          );
+        }
+        await Bun.sleep(50);
+      }
+    }
+
+    try {
+      return await operation();
+    } finally {
+      await rm(path, { recursive: true, force: true });
+    }
   }
 }

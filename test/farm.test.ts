@@ -61,6 +61,7 @@ class FakeBackend implements FarmBackend {
   verified = 0;
   started: string[] = [];
   waited: string[] = [];
+  waitTimeouts: number[] = [];
   removed: string[] = [];
   runs: RunBrowserInput[] = [];
 
@@ -102,8 +103,9 @@ class FakeBackend implements FarmBackend {
     this.started.push(container);
   }
 
-  async waitReady(container: string): Promise<void> {
+  async waitReady(container: string, timeoutSeconds = 120): Promise<void> {
     this.waited.push(container);
+    this.waitTimeouts.push(timeoutSeconds);
   }
 
   async removeContainer(container: string): Promise<void> {
@@ -147,6 +149,71 @@ test("create reuses an exactly matching managed container", async () => {
   expect(result.created).toBe(false);
   expect(backend.runs).toHaveLength(0);
   expect(backend.started).toEqual(["agentbrowse-browser-testing"]);
+});
+
+test("provider provisioning reuses its named browser target and its slot", async () => {
+  const backend = new FakeBackend();
+  backend.managed = [
+    {
+      name: "testing",
+      slot: 7,
+      container: "agentbrowse-browser-testing",
+      state: "running",
+      status: "Up 1 minute",
+    },
+  ];
+  backend.existing = managedState("testing", 7, backend.image, backend.ip);
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  const result = await farm.provision({ name: "testing" });
+
+  expect(result).toMatchObject({ name: "testing", slot: 7, created: false });
+  expect(backend.runs).toHaveLength(0);
+  expect(backend.waitTimeouts).toEqual([45]);
+});
+
+test("provider provisioning allocates the first unoccupied slot", async () => {
+  const backend = new FakeBackend();
+  backend.managed = [
+    {
+      name: "first",
+      slot: 0,
+      container: "agentbrowse-browser-first",
+      state: "running",
+      status: "Up 1 minute",
+    },
+    {
+      name: "third",
+      slot: 2,
+      container: "agentbrowse-browser-third",
+      state: "running",
+      status: "Up 1 minute",
+    },
+  ];
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  const result = await farm.provision({ name: "testing" });
+
+  expect(result).toMatchObject({ name: "testing", slot: 1, created: true });
+  expect(backend.runs[0]?.target.slot).toBe(1);
+  expect(backend.waitTimeouts).toEqual([45]);
+});
+
+test("provider provisioning refuses when every slot is occupied", async () => {
+  const backend = new FakeBackend();
+  backend.managed = Array.from({ length: 1000 }, (_, slot) => ({
+    name: `target-${slot}`,
+    slot,
+    container: `agentbrowse-browser-target-${slot}`,
+    state: "running",
+    status: "Up 1 minute",
+  }));
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  await expect(farm.provision({ name: "testing" })).rejects.toMatchObject({
+    code: "no_free_slots",
+  });
+  expect(backend.runs).toHaveLength(0);
 });
 
 test("create fails closed when an existing container drifts", async () => {

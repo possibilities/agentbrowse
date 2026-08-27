@@ -5,6 +5,12 @@ both a Chrome DevTools Protocol endpoint and the services needed for Live View.
 Its numeric slot deterministically assigns its host ports.
 _Avoid: browser session, Docker target._
 
+**Artbird provider** — The short-lived `agentbrowse provider` process that
+implements agent-browser's `browser.provider` protocol over standard input and
+output. It provisions or reuses one Browser target for a launch request and
+destroys that target for the matching close request.
+_Avoid: provider server, agent-browser-plugin-artbird._
+
 **Live View session** — One authenticated connection to a Kernel/Neko endpoint,
 including its WebSocket control plane, WebRTC peer, control ownership, decoded
 frames, and input state.

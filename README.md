@@ -48,6 +48,54 @@ agent-browser --cdp http://ARTBIRD_TAILNET_IP:9223 open https://example.com
 agent-browser --cdp http://ARTBIRD_TAILNET_IP:9223 snapshot -i
 ```
 
+## Use Artbird as an agent-browser provider
+
+Configure agent-browser to run the `agentbrowse provider` subcommand as a
+`browser.provider` plugin. Add this entry to the `plugins` array in the
+project's `agent-browser.json`, or in `~/.agent-browser/config.json` for global
+use:
+
+```json
+{
+  "plugins": [
+    {
+      "name": "artbird",
+      "command": "agentbrowse",
+      "args": ["provider"],
+      "capabilities": ["browser.provider"]
+    }
+  ]
+}
+```
+
+Launch an agent-browser session through Artbird:
+
+```sh
+agent-browser --session research --provider artbird open https://example.com
+agent-browser --session research --provider artbird snapshot -i
+agent-browser --session research --provider artbird close
+```
+
+Set `AGENT_BROWSER_PROVIDER=artbird` to omit `--provider artbird` from each
+command.
+
+The provider uses the agent-browser session name as the Browser target name
+when it already matches the target grammar. Other valid agent-browser session
+names receive a stable safe target name. A launch reuses the matching target
+when it already exists or allocates the first free slot and creates it. Close
+always destroys the target, including one that was already running when the
+provider received the launch request.
+
+No provider server runs locally. agent-browser starts `agentbrowse provider`
+for one `plugin.manifest`, `browser.launch`, or `browser.close` request; the
+subcommand responds over standard output and exits. The agent-browser daemon
+then connects directly to the returned Tailnet-only CDP URL.
+
+For an editable fleet installation, run `scripts/install.sh --install`. It
+installs frozen Bun dependencies, links `~/.local/bin/agentbrowse` to this
+checkout, and records the deployed Git commit under
+`~/.local/state/agentbrowse/deployed-sha`.
+
 Delete only that exact, ownership-labeled container when finished. Its pinned
 Kernel image is preserved:
 

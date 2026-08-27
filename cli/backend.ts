@@ -41,7 +41,7 @@ export interface FarmBackend {
   inspectContainer(container: string): Promise<ContainerState | undefined>;
   runBrowser(input: RunBrowserInput): Promise<void>;
   startContainer(container: string): Promise<void>;
-  waitReady(container: string): Promise<void>;
+  waitReady(container: string, timeoutSeconds?: number): Promise<void>;
   removeContainer(container: string): Promise<void>;
 }
 
@@ -340,12 +340,18 @@ export class DockerFarmBackend implements FarmBackend {
     if (result.exitCode !== 0) throw failure("docker start", result);
   }
 
-  async waitReady(container: string): Promise<void> {
+  async waitReady(container: string, timeoutSeconds = 120): Promise<void> {
+    if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 120) {
+      throw new CliError(
+        "invalid_ready_timeout",
+        `browser readiness timeout must be from 1 to 120 seconds: ${timeoutSeconds}`,
+      );
+    }
     const probe =
       "attempt=0; " +
       "until curl --fail --silent --max-time 3 http://127.0.0.1:8080/ >/dev/null && " +
       "curl --fail --silent --max-time 3 http://127.0.0.1:9222/json/version >/dev/null; " +
-      'do attempt=$((attempt + 1)); [ "$attempt" -ge 120 ] && exit 1; sleep 1; done';
+      `do attempt=$((attempt + 1)); [ "$attempt" -ge ${timeoutSeconds} ] && exit 1; sleep 1; done`;
     const result = await command([
       "docker",
       "--context",
@@ -359,7 +365,7 @@ export class DockerFarmBackend implements FarmBackend {
     if (result.exitCode !== 0) {
       throw new CliError(
         "browser_not_ready",
-        `${container} did not make CDP and Live View ready within 120 seconds`,
+        `${container} did not make CDP and Live View ready within ${timeoutSeconds} seconds`,
       );
     }
   }
