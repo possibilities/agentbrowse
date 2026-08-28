@@ -182,8 +182,13 @@ tunnel.
 The reusable surface is independent of that picker:
 
 ```ts
-import { createCliRenderer } from "@opentui/core";
-import { listBrowserTargets, LiveViewRenderable } from "agentbrowse/opentui";
+import {
+  listBrowserTargets,
+  LiveViewRenderable,
+  loadOpenTuiCore,
+} from "agentbrowse/opentui";
+
+const { createCliRenderer } = await loadOpenTuiCore();
 
 const renderer = await createCliRenderer({ targetFps: 15, maxFps: 30 });
 const liveView = new LiveViewRenderable(renderer, {
@@ -212,8 +217,9 @@ keyboard, pointer, scroll, and paste input, and releases held input on every
 focus or lifecycle boundary. Hosts keep ownership of layout, command routing,
 and Browser-target selection. See `examples/opentui-browser.ts` for the complete
 fxnk Ramp picker and `docs/architecture.md` for the runtime and ownership
-boundaries. `@opentui/core` is a peer dependency so the host and this adapter
-always share one renderable and native-image runtime.
+boundaries. `@opentui/core` is a peer dependency. Hosts should obtain it through
+`loadOpenTuiCore()` so source-linked checkouts and installed packages both use
+the adapter's exact renderable and native-image runtime.
 
 On macOS arm64, this checkout pins OpenTUI's native package to the
 `possibilities/opentui` `carry/kitty-image-replacement` build. OpenTUI 0.5.8

@@ -2,6 +2,7 @@ export * from "../../client/connection.ts";
 export * from "../../client/targets.ts";
 export * from "../../client/tunnel.ts";
 export * from "./browser-picker.ts";
+export * from "./core.ts";
 export * from "./geometry.ts";
 export * from "./keysym.ts";
 export * from "./LiveViewRenderable.ts";

@@ -3,6 +3,7 @@ import { ImageRenderable } from "@opentui/core";
 import {
   BrowserPickerController as ExportedBrowserPickerController,
   LiveViewRenderable,
+  loadOpenTuiCore,
 } from "agentbrowse/opentui";
 
 import type { BrowserListEntry } from "../cli/farm.ts";
@@ -62,8 +63,10 @@ const browserEntries: BrowserListEntry[] = [
   },
 ];
 
-test("package subpath preserves module and OpenTUI runtime identity", () => {
+test("package subpath preserves module and OpenTUI runtime identity", async () => {
+  const core = await loadOpenTuiCore();
   expect(ExportedBrowserPickerController).toBe(BrowserPickerController);
+  expect(core.ImageRenderable).toBe(ImageRenderable);
   expect(Object.getPrototypeOf(LiveViewRenderable.prototype).constructor).toBe(ImageRenderable);
 });
 
