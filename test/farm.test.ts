@@ -7,11 +7,21 @@ import type {
   ContainerState,
   FarmBackend,
   ManagedContainerRecord,
+  ManagedProfileRecord,
+  ProfileConsumerRecord,
+  ProfileState,
   RunBrowserInput,
 } from "../cli/backend.ts";
 import { CliError } from "../cli/errors.ts";
 import { BrowserFarm } from "../cli/farm.ts";
-import { CHROMIUM_FLAGS, configPath, targetFor } from "../cli/model.ts";
+import {
+  type BrowserProfile,
+  CHROMIUM_FLAGS,
+  configPath,
+  PROFILE_MOUNT_PATH,
+  PROFILE_SCHEMA_VERSION,
+  targetFor,
+} from "../cli/model.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -27,14 +37,21 @@ function runtimeDir(): string {
   return directory;
 }
 
-function managedState(name: string, slot: number, image: string, ip: string): ContainerState {
-  const target = targetFor(name, slot);
+function managedState(
+  name: string,
+  slot: number,
+  image: string,
+  ip: string,
+  profile = name,
+): ContainerState {
+  const target = targetFor(name, slot, profile);
   return {
     image,
     labels: {
       "dev.agentbrowse.managed": "true",
       "dev.agentbrowse.role": "kernel-browser",
       "dev.agentbrowse.target": name,
+      "dev.agentbrowse.profile": profile,
       "dev.agentbrowse.slot": String(slot),
     },
     environment: [
@@ -49,6 +66,27 @@ function managedState(name: string, slot: number, image: string, ip: string): Co
       [`${target.webrtcPort}/udp`]: [{ hostIp: ip, hostPort: String(target.webrtcPort) }],
       "9222/tcp": [{ hostIp: ip, hostPort: String(target.cdpPort) }],
     },
+    mounts: [
+      {
+        type: "volume",
+        name: `agentbrowse-profile-${profile}`,
+        destination: PROFILE_MOUNT_PATH,
+        writable: true,
+      },
+    ],
+  };
+}
+
+function profileState(profile: BrowserProfile): ProfileState {
+  return {
+    volume: profile.volume,
+    driver: "local",
+    labels: {
+      "dev.agentbrowse.managed": "true",
+      "dev.agentbrowse.role": "browser-profile",
+      "dev.agentbrowse.profile": profile.name,
+      "dev.agentbrowse.profile.schema": String(PROFILE_SCHEMA_VERSION),
+    },
   };
 }
 
@@ -56,13 +94,17 @@ class FakeBackend implements FarmBackend {
   readonly ip = "100.64.0.8";
   readonly image = "agentbrowse/kernel-headful:test";
   existing: ContainerState | undefined;
+  existingContainer: string | undefined;
   imagePresent = true;
   managed: ManagedContainerRecord[] = [];
+  profiles = new Map<string, ProfileState>();
+  profileConsumers = new Map<string, ProfileConsumerRecord[]>();
   verified = 0;
   started: string[] = [];
   waited: string[] = [];
   waitTimeouts: number[] = [];
   removed: string[] = [];
+  removedProfiles: string[] = [];
   runs: RunBrowserInput[] = [];
 
   async verifyHost(): Promise<void> {
@@ -81,21 +123,50 @@ class FakeBackend implements FarmBackend {
     return this.imagePresent;
   }
 
+  async listManagedProfiles(): Promise<readonly ManagedProfileRecord[]> {
+    return [...this.profiles.entries()].map(([name, state]) => ({
+      name,
+      volume: state.volume,
+    }));
+  }
+
+  async inspectProfile(profile: BrowserProfile): Promise<ProfileState | undefined> {
+    return this.profiles.get(profile.name);
+  }
+
+  async createProfile(profile: BrowserProfile): Promise<void> {
+    this.profiles.set(profile.name, profileState(profile));
+  }
+
+  async listProfileConsumers(profile: BrowserProfile): Promise<readonly ProfileConsumerRecord[]> {
+    return this.profileConsumers.get(profile.name) ?? [];
+  }
+
+  async removeProfile(profile: BrowserProfile): Promise<void> {
+    this.removedProfiles.push(profile.name);
+    this.profiles.delete(profile.name);
+  }
+
   async listManagedContainers(): Promise<readonly ManagedContainerRecord[]> {
     return this.managed;
   }
 
-  async inspectContainer(): Promise<ContainerState | undefined> {
+  async inspectContainer(container: string): Promise<ContainerState | undefined> {
+    if (this.existingContainer !== undefined && container !== this.existingContainer) {
+      return undefined;
+    }
     return this.existing;
   }
 
   async runBrowser(input: RunBrowserInput): Promise<void> {
     this.runs.push(input);
+    this.existingContainer = input.target.container;
     this.existing = managedState(
       input.target.name,
       input.target.slot,
       input.image,
       input.networkAddress,
+      input.profile.name,
     );
   }
 
@@ -110,7 +181,10 @@ class FakeBackend implements FarmBackend {
 
   async removeContainer(container: string): Promise<void> {
     this.removed.push(container);
-    this.existing = undefined;
+    if (this.existingContainer === undefined || this.existingContainer === container) {
+      this.existing = undefined;
+      this.existingContainer = undefined;
+    }
   }
 }
 
@@ -122,6 +196,7 @@ test("create launches a combined CDP and Live View target and records it", async
 
   expect(result).toMatchObject({
     name: "testing",
+    profile: "testing",
     slot: 3,
     container: "agentbrowse-browser-testing",
     image: backend.image,
@@ -131,7 +206,8 @@ test("create launches a combined CDP and Live View target and records it", async
   });
   expect(backend.runs).toHaveLength(1);
   expect(backend.runs[0]).toMatchObject({
-    target: { cdpPort: 9225, httpPort: 18083, webrtcPort: 56003 },
+    target: { profile: "testing", cdpPort: 9225, httpPort: 18083, webrtcPort: 56003 },
+    profile: { name: "testing", volume: "agentbrowse-profile-testing" },
     nekoLogLevel: "info",
   });
   expect(readFileSync(configPath(directory, "testing"), "utf8")).toContain("CDP_PORT=9225");
@@ -151,23 +227,29 @@ test("create reuses an exactly matching managed container", async () => {
   expect(backend.started).toEqual(["agentbrowse-browser-testing"]);
 });
 
-test("provider provisioning reuses its named browser target and its slot", async () => {
+test("provider provisioning reuses the target currently bound to its profile", async () => {
   const backend = new FakeBackend();
   backend.managed = [
     {
-      name: "testing",
+      name: "testing-deadbeef",
+      profile: "testing",
       slot: 7,
-      container: "agentbrowse-browser-testing",
+      container: "agentbrowse-browser-testing-deadbeef",
       state: "running",
       status: "Up 1 minute",
     },
   ];
-  backend.existing = managedState("testing", 7, backend.image, backend.ip);
+  backend.existing = managedState("testing-deadbeef", 7, backend.image, backend.ip, "testing");
   const farm = new BrowserFarm(backend, runtimeDir());
 
-  const result = await farm.provision({ name: "testing" });
+  const result = await farm.provisionProfile({ profile: "testing" });
 
-  expect(result).toMatchObject({ name: "testing", slot: 7, created: false });
+  expect(result).toMatchObject({
+    name: "testing-deadbeef",
+    profile: "testing",
+    slot: 7,
+    created: false,
+  });
   expect(backend.runs).toHaveLength(0);
   expect(backend.waitTimeouts).toEqual([45]);
 });
@@ -177,6 +259,7 @@ test("provider provisioning allocates the first unoccupied slot", async () => {
   backend.managed = [
     {
       name: "first",
+      profile: "first",
       slot: 0,
       container: "agentbrowse-browser-first",
       state: "running",
@@ -184,17 +267,23 @@ test("provider provisioning allocates the first unoccupied slot", async () => {
     },
     {
       name: "third",
+      profile: "third",
       slot: 2,
       container: "agentbrowse-browser-third",
       state: "running",
       status: "Up 1 minute",
     },
   ];
-  const farm = new BrowserFarm(backend, runtimeDir());
+  const farm = new BrowserFarm(backend, runtimeDir(), "info", () => "deadbeefcafebabe");
 
-  const result = await farm.provision({ name: "testing" });
+  const result = await farm.provisionProfile({ profile: "testing" });
 
-  expect(result).toMatchObject({ name: "testing", slot: 1, created: true });
+  expect(result).toMatchObject({
+    name: "testing-deadbeefcafebabe",
+    profile: "testing",
+    slot: 1,
+    created: true,
+  });
   expect(backend.runs[0]?.target.slot).toBe(1);
   expect(backend.waitTimeouts).toEqual([45]);
 });
@@ -203,6 +292,7 @@ test("provider provisioning refuses when every slot is occupied", async () => {
   const backend = new FakeBackend();
   backend.managed = Array.from({ length: 1000 }, (_, slot) => ({
     name: `target-${slot}`,
+    profile: `target-${slot}`,
     slot,
     container: `agentbrowse-browser-target-${slot}`,
     state: "running",
@@ -210,7 +300,7 @@ test("provider provisioning refuses when every slot is occupied", async () => {
   }));
   const farm = new BrowserFarm(backend, runtimeDir());
 
-  await expect(farm.provision({ name: "testing" })).rejects.toMatchObject({
+  await expect(farm.provisionProfile({ profile: "testing" })).rejects.toMatchObject({
     code: "no_free_slots",
   });
   expect(backend.runs).toHaveLength(0);
@@ -246,11 +336,28 @@ test("create rejects a browser with different window flags", async () => {
   expect(backend.runs).toHaveLength(0);
 });
 
+test("create rejects a target without the exact writable Browser profile mount", async () => {
+  const backend = new FakeBackend();
+  const state = managedState("testing", 2, backend.image, backend.ip);
+  backend.existing = {
+    ...state,
+    mounts: state.mounts.map((mount) => ({ ...mount, writable: false })),
+  };
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  await expect(farm.create({ name: "testing", slot: 2 })).rejects.toMatchObject({
+    code: "browser_drift",
+    message: expect.stringContaining("writable browser profile mount"),
+  });
+  expect(backend.runs).toHaveLength(0);
+});
+
 test("create rejects a slot occupied by another managed browser", async () => {
   const backend = new FakeBackend();
   backend.managed = [
     {
       name: "existing",
+      profile: "existing",
       slot: 2,
       container: "agentbrowse-browser-existing",
       state: "running",
@@ -271,6 +378,7 @@ test("list sorts browsers and marks duplicate slots", async () => {
   backend.managed = [
     {
       name: "second",
+      profile: "second",
       slot: 4,
       container: "agentbrowse-browser-second",
       state: "running",
@@ -278,6 +386,7 @@ test("list sorts browsers and marks duplicate slots", async () => {
     },
     {
       name: "first",
+      profile: "first",
       slot: 3,
       container: "agentbrowse-browser-first",
       state: "created",
@@ -285,6 +394,7 @@ test("list sorts browsers and marks duplicate slots", async () => {
     },
     {
       name: "collision",
+      profile: "collision",
       slot: 4,
       container: "agentbrowse-browser-collision",
       state: "created",
@@ -305,6 +415,136 @@ test("list sorts browsers and marks duplicate slots", async () => {
   expect(result[2]?.slotConflict).toBe(true);
 });
 
+test("manual create can bind a target name to a separate durable Browser profile", async () => {
+  const backend = new FakeBackend();
+  const directory = runtimeDir();
+  const farm = new BrowserFarm(backend, directory);
+
+  const result = await farm.create({ name: "one-run", profile: "signed-in", slot: 6 });
+
+  expect(result).toMatchObject({ name: "one-run", profile: "signed-in", created: true });
+  expect(backend.runs[0]?.profile).toEqual({
+    name: "signed-in",
+    volume: "agentbrowse-profile-signed-in",
+  });
+  expect(readFileSync(configPath(directory, "one-run"), "utf8")).toContain("PROFILE=signed-in");
+});
+
+test("a stopped target prevents another target from mounting the same Browser profile", async () => {
+  const backend = new FakeBackend();
+  backend.managed = [
+    {
+      name: "old-incarnation",
+      profile: "testing",
+      slot: 4,
+      container: "agentbrowse-browser-old-incarnation",
+      state: "exited",
+      status: "Exited (0)",
+    },
+  ];
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  await expect(
+    farm.create({ name: "new-incarnation", profile: "testing", slot: 5 }),
+  ).rejects.toMatchObject({
+    code: "profile_in_use",
+    message: expect.stringContaining("old-incarnation (exited)"),
+  });
+  expect(backend.runs).toHaveLength(0);
+});
+
+test("a foreign volume consumer prevents Browser profile reuse", async () => {
+  const backend = new FakeBackend();
+  backend.profileConsumers.set("testing", [
+    { container: "foreign-debug-container", state: "exited" },
+  ]);
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  await expect(
+    farm.create({ name: "testing-deadbeef", profile: "testing", slot: 5 }),
+  ).rejects.toMatchObject({
+    code: "profile_in_use",
+    message: expect.stringContaining("foreign-debug-container (exited)"),
+  });
+  expect(backend.runs).toHaveLength(0);
+});
+
+test("profile lifecycle is explicit and deletion refuses every mounted consumer", async () => {
+  const backend = new FakeBackend();
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  expect(await farm.createProfile("testing")).toEqual({
+    name: "testing",
+    volume: "agentbrowse-profile-testing",
+    created: true,
+  });
+  expect((await farm.createProfile("testing")).created).toBe(false);
+
+  backend.profileConsumers.set("testing", [
+    { container: "agentbrowse-browser-testing-deadbeef", state: "running" },
+  ]);
+  expect(await farm.listProfiles()).toEqual([
+    {
+      name: "testing",
+      volume: "agentbrowse-profile-testing",
+      consumers: ["agentbrowse-browser-testing-deadbeef"],
+    },
+  ]);
+
+  await expect(farm.deleteProfile("testing")).rejects.toMatchObject({
+    code: "profile_in_use",
+  });
+  backend.profileConsumers.set("testing", []);
+  expect(await farm.deleteProfile("testing")).toEqual({
+    name: "testing",
+    volume: "agentbrowse-profile-testing",
+    deleted: true,
+  });
+  expect(backend.removedProfiles).toEqual(["testing"]);
+  expect((await farm.deleteProfile("testing")).deleted).toBe(false);
+});
+
+test("profile lifecycle refuses a same-named volume with drifted ownership", async () => {
+  const backend = new FakeBackend();
+  const profile = { name: "testing", volume: "agentbrowse-profile-testing" };
+  backend.profiles.set("testing", {
+    ...profileState(profile),
+    labels: { "dev.agentbrowse.managed": "false" },
+  });
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  await expect(farm.createProfile("testing")).rejects.toMatchObject({ code: "profile_drift" });
+  await expect(farm.deleteProfile("testing")).rejects.toMatchObject({ code: "profile_drift" });
+  expect(backend.removedProfiles).toHaveLength(0);
+});
+
+test("relaunch gives one durable profile a fresh exact target identity", async () => {
+  const backend = new FakeBackend();
+  const tokens = ["1111111111111111", "2222222222222222"];
+  const directory = runtimeDir();
+  const farm = new BrowserFarm(backend, directory, "info", () => tokens.shift()!);
+
+  const first = await farm.provisionProfile({ profile: "testing" });
+  expect(first).toMatchObject({ name: "testing-1111111111111111", profile: "testing" });
+  await farm.destroy(first.name);
+  expect(backend.profiles.has("testing")).toBe(true);
+  expect(() => readFileSync(configPath(directory, first.name), "utf8")).toThrow();
+
+  const second = await farm.provisionProfile({ profile: "testing" });
+  expect(second).toMatchObject({ name: "testing-2222222222222222", profile: "testing" });
+  expect(second.name).not.toBe(first.name);
+  expect(backend.removed).toEqual(["agentbrowse-browser-testing-1111111111111111"]);
+
+  expect(await farm.destroy(first.name)).toEqual({
+    name: "testing-1111111111111111",
+    profile: null,
+    container: "agentbrowse-browser-testing-1111111111111111",
+    destroyed: false,
+  });
+  expect(backend.removed).toEqual(["agentbrowse-browser-testing-1111111111111111"]);
+  expect(backend.existingContainer).toBe("agentbrowse-browser-testing-2222222222222222");
+});
+
 test("destroy verifies ownership before removing the exact container", async () => {
   const backend = new FakeBackend();
   const directory = runtimeDir();
@@ -315,10 +555,12 @@ test("destroy verifies ownership before removing the exact container", async () 
 
   expect(result).toEqual({
     name: "testing",
+    profile: "testing",
     container: "agentbrowse-browser-testing",
     destroyed: true,
   });
   expect(backend.removed).toEqual(["agentbrowse-browser-testing"]);
+  expect(backend.profiles.has("testing")).toBe(true);
   expect(() => readFileSync(configPath(directory, "testing"), "utf8")).toThrow();
 });
 
@@ -342,6 +584,7 @@ test("destroy is idempotent when both metadata and container are absent", async 
 
   expect(await farm.destroy("missing")).toEqual({
     name: "missing",
+    profile: null,
     container: "agentbrowse-browser-missing",
     destroyed: false,
   });
@@ -355,6 +598,7 @@ test("destroy recovers ownership from labels when local metadata is absent", asy
 
   expect(await farm.destroy("testing")).toEqual({
     name: "testing",
+    profile: "testing",
     container: "agentbrowse-browser-testing",
     destroyed: true,
   });

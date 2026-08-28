@@ -8,9 +8,17 @@ export const HTTP_BASE_PORT = 18080;
 export const WEBRTC_BASE_PORT = 56000;
 export const CDP_BASE_PORT = 9222;
 export const CHROMIUM_FLAGS = "--start-fullscreen --disable-infobars";
+export const PROFILE_SCHEMA_VERSION = 1;
+export const PROFILE_MOUNT_PATH = "/home/kernel/user-data";
+
+export interface BrowserProfile {
+  name: string;
+  volume: string;
+}
 
 export interface Target {
   name: string;
+  profile: string;
   slot: number;
   container: string;
   httpPort: number;
@@ -24,11 +32,18 @@ export interface BrowserDescription extends Target {
   liveViewUrl: string;
 }
 
-export function targetFor(name: string, slot: number): Target {
+export function profileFor(name: string): BrowserProfile {
   validateName(name);
+  return { name, volume: `agentbrowse-profile-${name}` };
+}
+
+export function targetFor(name: string, slot: number, profile = name): Target {
+  validateName(name);
+  validateName(profile);
   validateSlot(slot);
   return {
     name,
+    profile,
     slot,
     container: `agentbrowse-browser-${name}`,
     httpPort: HTTP_BASE_PORT + slot,
@@ -43,7 +58,7 @@ export function validateName(name: string): void {
   }
 }
 
-export function providerTargetName(session: string): string {
+export function providerProfileName(session: string): string {
   if (/^[a-z][a-z0-9-]{0,31}$/.test(session)) return session;
 
   let stem = session
@@ -55,6 +70,15 @@ export function providerTargetName(session: string): string {
   stem = stem.slice(0, 23).replace(/-+$/g, "");
   const digest = createHash("sha256").update(session).digest("hex").slice(0, 8);
   return `${stem}-${digest}`;
+}
+
+export function incarnatedTargetName(profile: string, token: string): string {
+  validateName(profile);
+  if (!/^[a-f0-9]{16}$/.test(token)) {
+    throw new UsageError(`incarnation token must be 16 lowercase hex characters: ${token}`);
+  }
+  const stem = profile.slice(0, 15).replace(/-+$/g, "");
+  return `${stem}-${token}`;
 }
 
 export function validateSlot(slot: number): void {
@@ -90,11 +114,12 @@ export function parseTargetConfig(source: string): Target {
   }
 
   const name = values.get("NAME");
+  const profile = values.get("PROFILE") ?? name;
   const slotValue = values.get("SLOT");
-  if (name === undefined || slotValue === undefined) {
+  if (name === undefined || profile === undefined || slotValue === undefined) {
     throw new CliError("invalid_target_config", "target metadata is incomplete");
   }
-  const expected = targetFor(name, parseSlot(slotValue));
+  const expected = targetFor(name, parseSlot(slotValue), profile);
   const recorded = {
     container: values.get("CONTAINER"),
     httpPort: values.get("HTTP_PORT"),
@@ -115,6 +140,7 @@ export function parseTargetConfig(source: string): Target {
 export function renderTargetConfig(target: Target): string {
   return [
     `NAME=${target.name}`,
+    `PROFILE=${target.profile}`,
     `SLOT=${target.slot}`,
     `CONTAINER=${target.container}`,
     `HTTP_PORT=${target.httpPort}`,

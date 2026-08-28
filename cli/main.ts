@@ -1,7 +1,14 @@
 #!/usr/bin/env bun
 
 import { CliError, UsageError } from "./errors.ts";
-import type { BrowserListEntry, CreateResult, DestroyResult } from "./farm.ts";
+import type {
+  BrowserListEntry,
+  CreateResult,
+  DestroyResult,
+  ProfileCreateResult,
+  ProfileDeleteResult,
+  ProfileListEntry,
+} from "./farm.ts";
 import { parseSlot, SCHEMA_VERSION } from "./model.ts";
 import { runProvider } from "./provider.ts";
 import { browserFarm } from "./runtime.ts";
@@ -10,29 +17,35 @@ import { runView } from "./view.ts";
 const HELP = `agentbrowse: create remote Kernel browsers
 
 Usage:
-  agentbrowse create NAME --slot N [--image REF] [--json]
+  agentbrowse create NAME --slot N [--profile PROFILE] [--image REF] [--json]
   agentbrowse list [--json]
   agentbrowse destroy NAME [--json]
+  agentbrowse profile create NAME [--json]
+  agentbrowse profile list [--json]
+  agentbrowse profile delete NAME [--json]
   agentbrowse provider
   agentbrowse view [SESSION]
 
 Commands:
   create   Create or start one CDP + Live View browser target
   list     List every browser target managed by agentbrowse
-  destroy  Delete one exactly owned browser target and its runtime metadata
+  destroy  Delete one exactly owned browser target; preserve its Browser profile
+  profile  Create, list, or explicitly delete durable Browser profiles
   provider Handle one agent-browser plugin protocol request over standard I/O
   view     Open a session's Browser target; uses the default session if omitted
 
 Options:
-  --slot N     Port slot from 0 to 999; required by create
-  --image REF  Kernel image already loaded on the configured browser host
-  --json       Emit the stable machine envelope
-  -h, --help   Show this help
+  --slot N          Port slot from 0 to 999; required by create
+  --profile PROFILE Durable Browser profile; defaults to the target NAME
+  --image REF       Kernel image already loaded on the configured browser host
+  --json            Emit the stable machine envelope
+  -h, --help        Show this help
 `;
 
 interface ParsedCreate {
   command: "create";
   name: string;
+  profile?: string;
   slot: number;
   image?: string;
   json: boolean;
@@ -50,9 +63,32 @@ interface ParsedView {
   json: false;
 }
 
+interface ParsedProfileCreate {
+  command: "profile";
+  action: "create";
+  name: string;
+  json: boolean;
+}
+
+interface ParsedProfileList {
+  command: "profile";
+  action: "list";
+  json: boolean;
+}
+
+interface ParsedProfileDelete {
+  command: "profile";
+  action: "delete";
+  name: string;
+  json: boolean;
+}
+
 type Parsed =
   | ParsedCreate
   | ParsedDestroy
+  | ParsedProfileCreate
+  | ParsedProfileList
+  | ParsedProfileDelete
   | ParsedView
   | { command: "list"; json: boolean }
   | { command: "provider"; json: false }
@@ -89,6 +125,25 @@ export function parseArgs(argv: readonly string[]): Parsed {
     if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
     return { command, json };
   }
+  if (command === "profile") {
+    if (args.includes("-h") || args.includes("--help")) return { command: "help", json };
+    const action = args[1];
+    if (action === "list") {
+      if (args.length !== 2) throw new UsageError(`unexpected argument: ${args[2]}`);
+      return { command, action, json };
+    }
+    if (action !== "create" && action !== "delete") {
+      throw new UsageError(
+        action === undefined ? "profile requires an action" : `unknown profile action: ${action}`,
+      );
+    }
+    const profileName = args[2];
+    if (profileName === undefined || profileName.startsWith("--")) {
+      throw new UsageError(`profile ${action} requires a Browser profile name`);
+    }
+    if (args.length !== 3) throw new UsageError(`unexpected argument: ${args[3]}`);
+    return { command, action, name: profileName, json };
+  }
   const name = args[1];
   if (command !== "create" && command !== "destroy") {
     throw new UsageError(`unknown command: ${command}`);
@@ -103,11 +158,15 @@ export function parseArgs(argv: readonly string[]): Parsed {
   }
 
   let slot: number | undefined;
+  let profile: string | undefined;
   let image: string | undefined;
   for (let index = 2; index < args.length; index += 1) {
     const arg = args[index]!;
     if (arg === "--slot") {
       slot = parseSlot(takeValue(args, index, arg));
+      index += 1;
+    } else if (arg === "--profile") {
+      profile = takeValue(args, index, arg);
       index += 1;
     } else if (arg === "--image") {
       image = takeValue(args, index, arg);
@@ -119,7 +178,14 @@ export function parseArgs(argv: readonly string[]): Parsed {
     }
   }
   if (slot === undefined) throw new UsageError("create requires --slot N");
-  return { command, name, slot, ...(image === undefined ? {} : { image }), json };
+  return {
+    command,
+    name,
+    ...(profile === undefined ? {} : { profile }),
+    slot,
+    ...(image === undefined ? {} : { image }),
+    json,
+  };
 }
 
 function success(data: unknown): string {
@@ -129,6 +195,7 @@ function success(data: unknown): string {
 function createPayload(result: CreateResult): Record<string, unknown> {
   return {
     name: result.name,
+    profile: result.profile,
     slot: result.slot,
     container: result.container,
     image: result.image,
@@ -159,6 +226,7 @@ function failure(error: CliError): string {
 function humanCreate(result: CreateResult): string {
   const verb = result.created ? "Created" : "Ready";
   return `${verb} browser target ${result.name}
+  Browser profile: ${result.profile}
   Container: ${result.container}
   Image: ${result.image}
   CDP: ${result.cdpUrl}
@@ -174,7 +242,9 @@ View:
 
 function humanDestroy(result: DestroyResult): string {
   return result.destroyed
-    ? `Deleted ${result.container}; its Kernel image was preserved\n`
+    ? result.profile === null
+      ? `Deleted ${result.container}; its Kernel image was preserved\n`
+      : `Deleted ${result.container}; Browser profile ${result.profile} and its Kernel image were preserved\n`
     : `${result.container} was already absent; removed its runtime metadata\n`;
 }
 
@@ -182,6 +252,7 @@ function listPayload(results: readonly BrowserListEntry[]): Record<string, unkno
   return {
     browsers: results.map((browser) => ({
       name: browser.name,
+      profile: browser.profile,
       slot: browser.slot,
       container: browser.container,
       state: browser.state,
@@ -198,12 +269,13 @@ function humanList(results: readonly BrowserListEntry[]): string {
   if (results.length === 0) return "No agentbrowse browser targets found\n";
   const rows = results.map((browser) => [
     browser.name,
+    browser.profile ?? "-",
     String(browser.slot),
     browser.slotConflict ? `${browser.state} !` : browser.state,
     browser.cdpUrl,
     browser.liveViewUrl,
   ]);
-  const headings = ["NAME", "SLOT", "STATE", "CDP", "LIVE VIEW"];
+  const headings = ["NAME", "PROFILE", "SLOT", "STATE", "CDP", "LIVE VIEW"];
   const widths = headings.map((heading, index) =>
     Math.max(heading.length, ...rows.map((row) => row[index]!.length)),
   );
@@ -213,6 +285,39 @@ function humanList(results: readonly BrowserListEntry[]): string {
       .join("  ")
       .trimEnd();
   return `${renderRow(headings)}\n${rows.map(renderRow).join("\n")}\n`;
+}
+
+function humanProfileCreate(result: ProfileCreateResult): string {
+  return `${result.created ? "Created" : "Ready"} Browser profile ${result.name} (${result.volume})\n`;
+}
+
+function profileListPayload(results: readonly ProfileListEntry[]): Record<string, unknown> {
+  return { profiles: results, count: results.length };
+}
+
+function humanProfileList(results: readonly ProfileListEntry[]): string {
+  if (results.length === 0) return "No agentbrowse Browser profiles found\n";
+  const rows = results.map((profile) => [
+    profile.name,
+    profile.volume,
+    profile.consumers.length === 0 ? "-" : profile.consumers.join(","),
+  ]);
+  const headings = ["NAME", "VOLUME", "CONSUMERS"];
+  const widths = headings.map((heading, index) =>
+    Math.max(heading.length, ...rows.map((row) => row[index]!.length)),
+  );
+  const renderRow = (row: readonly string[]): string =>
+    row
+      .map((value, index) => value.padEnd(widths[index]!))
+      .join("  ")
+      .trimEnd();
+  return `${renderRow(headings)}\n${rows.map(renderRow).join("\n")}\n`;
+}
+
+function humanProfileDelete(result: ProfileDeleteResult): string {
+  return result.deleted
+    ? `Deleted Browser profile ${result.name} (${result.volume})\n`
+    : `Browser profile ${result.name} was already absent\n`;
 }
 
 export async function run(argv: readonly string[], env = process.env): Promise<number> {
@@ -245,6 +350,7 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
     if (parsed.command === "create") {
       const result = await farm.create({
         name: parsed.name,
+        ...(parsed.profile === undefined ? {} : { profile: parsed.profile }),
         slot: parsed.slot,
         ...(parsed.image === undefined ? {} : { image: parsed.image }),
       });
@@ -252,6 +358,19 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
     } else if (parsed.command === "list") {
       const result = await farm.list();
       process.stdout.write(parsed.json ? success(listPayload(result)) : humanList(result));
+    } else if (parsed.command === "profile") {
+      if (parsed.action === "create") {
+        const result = await farm.createProfile(parsed.name);
+        process.stdout.write(parsed.json ? success(result) : humanProfileCreate(result));
+      } else if (parsed.action === "list") {
+        const result = await farm.listProfiles();
+        process.stdout.write(
+          parsed.json ? success(profileListPayload(result)) : humanProfileList(result),
+        );
+      } else {
+        const result = await farm.deleteProfile(parsed.name);
+        process.stdout.write(parsed.json ? success(result) : humanProfileDelete(result));
+      }
     } else {
       const result = await farm.destroy(parsed.name);
       process.stdout.write(parsed.json ? success(result) : humanDestroy(result));

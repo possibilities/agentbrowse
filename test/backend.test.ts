@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { type BackendCommand, type CommandResult, DockerFarmBackend } from "../cli/backend.ts";
+import { profileFor, targetFor } from "../cli/model.ts";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
 
 const ok = (stdout = ""): CommandResult => ({ exitCode: 0, stdout, stderr: "" });
@@ -124,4 +125,42 @@ test("unknown remote failures retain their diagnostic detail", async () => {
     code: "command_failed",
     message: "docker info failed: unexpected remote response",
   });
+});
+
+test("browser launch mounts the exact durable profile volume writable", async () => {
+  const seen: string[][] = [];
+  const docker = backend(async (args) => {
+    seen.push([...args]);
+    return ok("container-id");
+  });
+  const target = targetFor("testing-deadbeef", 3, "testing");
+  const profile = profileFor("testing");
+
+  await docker.runBrowser({
+    target,
+    profile,
+    image: "agentbrowse/kernel-headful:test",
+    networkAddress: "100.64.0.8",
+    nekoLogLevel: "info",
+  });
+
+  expect(seen).toHaveLength(1);
+  expect(seen[0]).toContain("dev.agentbrowse.profile=testing");
+  const mountIndex = seen[0]!.indexOf("--mount");
+  expect(seen[0]?.[mountIndex + 1]).toBe(
+    "type=volume,src=agentbrowse-profile-testing,dst=/home/kernel/user-data",
+  );
+});
+
+test("managed profile discovery parses only exact labeled volumes", async () => {
+  const docker = backend(async (args) => {
+    if (args[3] === "volume" && args[4] === "list") {
+      return ok("signed-in\tagentbrowse-profile-signed-in");
+    }
+    return ok();
+  });
+
+  expect(await docker.listManagedProfiles()).toEqual([
+    { name: "signed-in", volume: "agentbrowse-profile-signed-in" },
+  ]);
 });

@@ -4,7 +4,8 @@
 language keeps its normal build files at the repository root. It currently
 contains:
 
-- a Bun/TypeScript CLI that creates Kernel browser targets on a configured host;
+- a Bun/TypeScript CLI that creates Kernel browser targets backed by durable
+  Browser profiles on a configured host;
 - a Zig Live View core with AppKit and OpenTUI frontend adapters for
   interacting with those targets through Kernel/Neko.
 
@@ -33,11 +34,20 @@ host's IPv4 address; agentbrowse runs that configured command through
 `remote.host`. Keep the config private (`chmod 600`) because it can contain Live
 View credentials.
 
-Each named browser target uses a numeric slot. The slot selects its CDP,
-loopback Live View HTTP, and WebRTC UDP ports:
+Browser profiles and Browser targets have separate lifetimes. A Browser profile
+is a durable Docker volume containing Chromium cookies, local storage,
+IndexedDB, and authentication state. A Browser target is one Kernel container
+incarnation that mounts that profile. Destroying a target preserves its
+profile; deleting a profile is always an explicit operation.
+
+Each named Browser target uses a numeric slot. The slot selects its CDP,
+loopback Live View HTTP, and WebRTC UDP ports. By default, manual creation uses
+the target name as its profile name; `--profile` binds an independently named
+profile instead:
 
 ```sh
 agentbrowse create testing --slot 1
+agentbrowse create one-run --profile signed-in --slot 2
 ```
 
 Chromium starts in ordinary browser fullscreen so the page fills the remote
@@ -51,10 +61,25 @@ agentbrowse list
 agentbrowse list --json
 ```
 
-The list includes stopped and failed-created containers as well as running
-ones. A `!` beside the state means more than one target records the same slot.
-`create` refuses a slot already recorded by another managed target before it
-asks Docker to start a container.
+The list includes each target's profile, plus stopped and failed-created
+containers as well as running ones. A `!` beside the state means more than one
+target records the same slot. `create` refuses a slot already recorded by
+another managed target before it asks Docker to start a container. It also
+refuses to mount a profile already consumed by any other container, including
+a stopped or foreign container.
+
+Profile creation is normally implicit. Use the profile commands to inspect or
+manage the durable state directly:
+
+```sh
+agentbrowse profile create signed-in
+agentbrowse profile list
+agentbrowse profile list --json
+agentbrowse profile delete signed-in
+```
+
+Deletion fails while any container still mounts the profile. It permanently
+removes that profile's browser state and cannot be undone.
 
 The command prints the target's configured network CDP endpoint. Use it directly
 with `agent-browser`:
@@ -96,12 +121,14 @@ Set `AGENT_BROWSER_PROVIDER=remote-browser` to omit `--provider remote-browser`
 from each command. The plugin name must match `provider.name` in the agentbrowse
 config.
 
-The provider uses the agent-browser session name as the Browser target name
-when it already matches the target grammar. Other valid agent-browser session
-names receive a stable safe target name. A launch reuses the matching target
-when it already exists or allocates the first free slot and creates it. Close
-always destroys the target, including one that was already running when the
-provider received the launch request.
+The provider maps the agent-browser session name to a stable Browser profile;
+session names outside agentbrowse's name grammar receive a stable safe profile
+name. A launch reuses the target currently bound to that profile or allocates
+the first free slot and creates a uniquely named target incarnation. Close
+always destroys that exact target, including one that was already running when
+the provider received the launch request, while preserving the profile. A
+later launch gets a new target name with the same cookies and authentication
+state, so an old target reference cannot silently resolve to the replacement.
 
 No provider server runs locally. agent-browser starts `agentbrowse provider`
 for one `plugin.manifest`, `browser.launch`, or `browser.close` request; the
@@ -113,14 +140,14 @@ installs frozen Bun dependencies, links `~/.local/bin/agentbrowse` to this
 checkout, and records the deployed Git commit under
 `~/.local/state/agentbrowse/deployed-sha`.
 
-Delete only that exact, ownership-labeled container when finished. Its pinned
-Kernel image is preserved:
+Delete only that exact, ownership-labeled container when finished. Its Browser
+profile and pinned Kernel image are preserved:
 
 ```sh
 agentbrowse destroy testing
 ```
 
-Pass `--json` to either lifecycle command for a stable
+Pass `--json` to the target or profile lifecycle commands for a stable
 `{schema_version,ok,error,data}` envelope. With `images.sourceDirectory`
 configured, the CLI selects the SHA-tagged image matching that checkout;
 `images.defaultImage`, `--image`, or `AGENTBROWSE_IMAGE` selects an
@@ -134,11 +161,11 @@ Open a provider-managed Browser target by its agent-browser session name:
 agentbrowse view
 ```
 
-`view` applies the same stable session-to-target mapping as the configured
-provider, then owns the Live View SSH tunnel until the GUI closes. The Browser
-target must already exist; create it first with an agent-browser command such
-as `agent-browser open https://example.com`. Pass a session name to both
-commands when using a session other than `default`.
+`view` applies the provider's stable session-to-profile mapping, resolves the
+profile's current Browser target, then owns the Live View SSH tunnel until the
+GUI closes. The Browser target must already exist; create it first with an
+agent-browser command such as `agent-browser open https://example.com`. Pass a
+session name to both commands when using a session other than `default`.
 
 The application receives one connection descriptor on standard input and
 connects immediately. It deliberately has no connection chooser:

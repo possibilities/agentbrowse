@@ -1,5 +1,10 @@
 # Context
 
+**Browser profile** — Durable browser state stored independently of any Browser target,
+including cookies, local storage, IndexedDB, and authentication. At most one Browser
+target may mount a Browser profile for writable use at a time.
+_Avoid: browser session, user profile, target._
+
 **Browser target** — One named Kernel headful container on the configured host, exposing
 both a Chrome DevTools Protocol endpoint and the services needed for Live View.
 Its numeric slot deterministically assigns its host ports.

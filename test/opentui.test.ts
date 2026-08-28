@@ -33,6 +33,7 @@ import {
 const browserEntries: BrowserListEntry[] = [
   {
     name: "one",
+    profile: "one",
     slot: 1,
     container: "agentbrowse-browser-one",
     state: "running",
@@ -43,6 +44,7 @@ const browserEntries: BrowserListEntry[] = [
   },
   {
     name: "stopped",
+    profile: "stopped",
     slot: 2,
     container: "agentbrowse-browser-stopped",
     state: "exited",
@@ -53,6 +55,7 @@ const browserEntries: BrowserListEntry[] = [
   },
   {
     name: "two",
+    profile: "two",
     slot: 3,
     container: "agentbrowse-browser-two",
     state: "running",

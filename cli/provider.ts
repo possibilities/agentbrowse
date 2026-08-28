@@ -1,13 +1,13 @@
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
 import type { BrowserFarm, CreateResult, DestroyResult } from "./farm.ts";
-import { providerTargetName } from "./model.ts";
+import { providerProfileName } from "./model.ts";
 import { browserFarm } from "./runtime.ts";
 
 const PROTOCOL = "agent-browser.plugin.v1";
 const CAPABILITY = "browser.provider";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
-type ProviderFarm = Pick<BrowserFarm, "provision" | "destroy">;
+type ProviderFarm = Pick<BrowserFarm, "provisionProfile" | "destroy">;
 
 export interface ProviderIdentity {
   readonly name: string;
@@ -92,10 +92,11 @@ function launchResponse(result: CreateResult): string {
       directPage: false,
       metadata: {
         browserTarget: result.name,
+        browserProfile: result.profile,
         slot: result.slot,
         liveViewUrl: result.liveViewUrl,
       },
-      cleanup: { browserTarget: result.name },
+      cleanup: { browserTarget: result.name, browserProfile: result.profile },
     },
   });
 }
@@ -115,6 +116,7 @@ function closeResponse(result: DestroyResult): string {
   return success({
     data: {
       browserTarget: result.name,
+      browserProfile: result.profile,
       destroyed: result.destroyed,
     },
   });
@@ -137,8 +139,8 @@ export async function handleProviderRequest(
       });
     }
     if (input.type === "browser.launch") {
-      const name = providerTargetName(launchSession(input));
-      return launchResponse(await farm.provision({ name }));
+      const profile = providerProfileName(launchSession(input));
+      return launchResponse(await farm.provisionProfile({ profile }));
     }
     if (input.type === "browser.close") {
       return closeResponse(await farm.destroy(closeTarget(input)));

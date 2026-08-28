@@ -8,6 +8,7 @@ import { LiveViewTunnel, sshArguments } from "../client/tunnel.ts";
 const entries: BrowserListEntry[] = [
   {
     name: "ready",
+    profile: "ready",
     slot: 1,
     container: "agentbrowse-browser-ready",
     state: "running",
@@ -18,6 +19,7 @@ const entries: BrowserListEntry[] = [
   },
   {
     name: "stopped",
+    profile: "stopped",
     slot: 2,
     container: "agentbrowse-browser-stopped",
     state: "exited",
@@ -28,6 +30,7 @@ const entries: BrowserListEntry[] = [
   },
   {
     name: "collision",
+    profile: "collision",
     slot: 3,
     container: "agentbrowse-browser-collision",
     state: "running",

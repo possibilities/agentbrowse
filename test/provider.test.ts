@@ -8,14 +8,18 @@ const PROTOCOL = "agent-browser.plugin.v1";
 class FakeProviderFarm {
   provisioned: string[] = [];
   destroyed: string[] = [];
+  profiles = new Map<string, string>();
   created = true;
 
-  async provision(options: { name: string }): Promise<CreateResult> {
-    this.provisioned.push(options.name);
+  async provisionProfile(options: { profile: string }): Promise<CreateResult> {
+    this.provisioned.push(options.profile);
+    const name = `${options.profile.slice(0, 15)}-deadbeefcafebabe`;
+    this.profiles.set(name, options.profile);
     return {
-      name: options.name,
+      name,
+      profile: options.profile,
       slot: 4,
-      container: `agentbrowse-browser-${options.name}`,
+      container: `agentbrowse-browser-${name}`,
       httpPort: 18084,
       webrtcPort: 56004,
       cdpPort: 9226,
@@ -28,7 +32,12 @@ class FakeProviderFarm {
 
   async destroy(name: string): Promise<DestroyResult> {
     this.destroyed.push(name);
-    return { name, container: `agentbrowse-browser-${name}`, destroyed: true };
+    return {
+      name,
+      profile: this.profiles.get(name) ?? "demo",
+      container: `agentbrowse-browser-${name}`,
+      destroyed: true,
+    };
   }
 }
 
@@ -53,7 +62,7 @@ test("provider advertises the browser provider manifest", async () => {
   });
 });
 
-test("browser.launch provisions the session target and returns cleanup data", async () => {
+test("browser.launch provisions the session profile and returns exact target cleanup data", async () => {
   const farm = new FakeProviderFarm();
   const response = JSON.parse(
     await handleProviderRequest(
@@ -74,16 +83,17 @@ test("browser.launch provisions the session target and returns cleanup data", as
       cdpUrl: "http://100.64.0.8:9226",
       directPage: false,
       metadata: {
-        browserTarget: "demo",
+        browserTarget: "demo-deadbeefcafebabe",
+        browserProfile: "demo",
         slot: 4,
         liveViewUrl: "http://127.0.0.1:18084",
       },
-      cleanup: { browserTarget: "demo" },
+      cleanup: { browserTarget: "demo-deadbeefcafebabe", browserProfile: "demo" },
     },
   });
 });
 
-test("browser.launch maps agent-browser session names outside the target grammar", async () => {
+test("browser.launch maps agent-browser session names outside the profile grammar", async () => {
   const farm = new FakeProviderFarm();
   await handleProviderRequest(
     request("browser.launch", "browser.provider", {
@@ -96,20 +106,26 @@ test("browser.launch maps agent-browser session names outside the target grammar
   expect(farm.provisioned[0]).toMatch(/^demo-worktree-[a-f0-9]{8}$/);
 });
 
-test("browser.close always destroys the browser target named by cleanup data", async () => {
+test("browser.close always destroys the exact browser target named by cleanup data", async () => {
   const farm = new FakeProviderFarm();
   const response = JSON.parse(
     await handleProviderRequest(
-      request("browser.close", "browser.provider", { browserTarget: "demo" }),
+      request("browser.close", "browser.provider", {
+        browserTarget: "demo-deadbeefcafebabe",
+      }),
       farm,
     ),
   );
 
-  expect(farm.destroyed).toEqual(["demo"]);
+  expect(farm.destroyed).toEqual(["demo-deadbeefcafebabe"]);
   expect(response).toMatchObject({
     protocol: PROTOCOL,
     success: true,
-    data: { browserTarget: "demo", destroyed: true },
+    data: {
+      browserTarget: "demo-deadbeefcafebabe",
+      browserProfile: "demo",
+      destroyed: true,
+    },
   });
 });
 
@@ -126,7 +142,10 @@ test("browser.launch returns cleanup data for an already-running target", async 
     ),
   );
 
-  expect(response.browser.cleanup).toEqual({ browserTarget: "demo" });
+  expect(response.browser.cleanup).toEqual({
+    browserTarget: "demo-deadbeefcafebabe",
+    browserProfile: "demo",
+  });
 });
 
 test("provider failures remain valid protocol responses", async () => {

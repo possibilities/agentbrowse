@@ -1,7 +1,20 @@
 import type { AgentbrowseConfig } from "../config/deployment.ts";
 import { requireConfigured } from "../config/deployment.ts";
 import { CliError } from "./errors.ts";
-import { CHROMIUM_FLAGS, type Target } from "./model.ts";
+import {
+  type BrowserProfile,
+  CHROMIUM_FLAGS,
+  PROFILE_MOUNT_PATH,
+  PROFILE_SCHEMA_VERSION,
+  type Target,
+} from "./model.ts";
+
+export interface ContainerMount {
+  type: string;
+  name: string | null;
+  destination: string;
+  writable: boolean;
+}
 
 export interface ContainerState {
   image: string;
@@ -9,6 +22,13 @@ export interface ContainerState {
   environment: readonly string[];
   running: boolean;
   bindings: Readonly<Record<string, readonly PortBinding[] | undefined>>;
+  mounts: readonly ContainerMount[];
+}
+
+export interface ProfileState {
+  volume: string;
+  driver: string;
+  labels: Readonly<Record<string, string>>;
 }
 
 export interface PortBinding {
@@ -18,6 +38,7 @@ export interface PortBinding {
 
 export interface RunBrowserInput {
   target: Target;
+  profile: BrowserProfile;
   image: string;
   networkAddress: string;
   nekoLogLevel: string;
@@ -25,10 +46,21 @@ export interface RunBrowserInput {
 
 export interface ManagedContainerRecord {
   name: string;
+  profile: string | null;
   slot: number;
   container: string;
   state: string;
   status: string;
+}
+
+export interface ManagedProfileRecord {
+  name: string;
+  volume: string;
+}
+
+export interface ProfileConsumerRecord {
+  container: string;
+  state: string;
 }
 
 export interface FarmBackend {
@@ -36,6 +68,14 @@ export interface FarmBackend {
   resolveNetworkAddress(signal?: AbortSignal): Promise<string>;
   resolveImage(override?: string): Promise<string>;
   imageExists(image: string): Promise<boolean>;
+  listManagedProfiles(signal?: AbortSignal): Promise<readonly ManagedProfileRecord[]>;
+  inspectProfile(profile: BrowserProfile): Promise<ProfileState | undefined>;
+  createProfile(profile: BrowserProfile): Promise<void>;
+  listProfileConsumers(
+    profile: BrowserProfile,
+    signal?: AbortSignal,
+  ): Promise<readonly ProfileConsumerRecord[]>;
+  removeProfile(profile: BrowserProfile): Promise<void>;
   listManagedContainers(signal?: AbortSignal): Promise<readonly ManagedContainerRecord[]>;
   inspectContainer(container: string): Promise<ContainerState | undefined>;
   runBrowser(input: RunBrowserInput): Promise<void>;
@@ -69,6 +109,18 @@ interface DockerInspect {
   HostConfig?: {
     PortBindings?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | null> | null;
   };
+  Mounts?: Array<{
+    Type?: string;
+    Name?: string;
+    Destination?: string;
+    RW?: boolean;
+  }> | null;
+}
+
+interface DockerVolumeInspect {
+  Name?: string;
+  Driver?: string;
+  Labels?: Record<string, string> | null;
 }
 
 async function defaultCommand(
@@ -157,6 +209,15 @@ function normalizedBindings(inspect: DockerInspect): Record<string, readonly Por
     }));
   }
   return output;
+}
+
+function normalizedMounts(inspect: DockerInspect): readonly ContainerMount[] {
+  return (inspect.Mounts ?? []).map((mount) => ({
+    type: mount.Type ?? "",
+    name: mount.Name ?? null,
+    destination: mount.Destination ?? "",
+    writable: mount.RW === true,
+  }));
 }
 
 export class DockerFarmBackend implements FarmBackend {
@@ -292,9 +353,146 @@ export class DockerFarmBackend implements FarmBackend {
     return result.exitCode === 0;
   }
 
+  async listManagedProfiles(signal?: AbortSignal): Promise<readonly ManagedProfileRecord[]> {
+    const format = ['{{.Label "dev.agentbrowse.profile"}}', "{{.Name}}"].join("\t");
+    const result = await this.discoveryCommand(
+      [
+        "docker",
+        "--context",
+        this.context,
+        "volume",
+        "list",
+        "--filter",
+        "label=dev.agentbrowse.managed=true",
+        "--filter",
+        "label=dev.agentbrowse.role=browser-profile",
+        "--format",
+        format,
+      ],
+      signal,
+    );
+    if (result.exitCode !== 0) throw remoteFailure("docker volume list", result);
+    if (result.stdout === "") return [];
+
+    return result.stdout.split("\n").map((line) => {
+      const [name, volume] = line.split("\t");
+      if (
+        name === undefined ||
+        !/^[a-z][a-z0-9-]{0,31}$/.test(name) ||
+        volume !== `agentbrowse-profile-${name}`
+      ) {
+        throw new CliError(
+          "invalid_docker_response",
+          "managed browser profile labels are malformed",
+        );
+      }
+      return { name, volume };
+    });
+  }
+
+  async inspectProfile(profile: BrowserProfile): Promise<ProfileState | undefined> {
+    const result = await this.runCommand([
+      "docker",
+      "--context",
+      this.context,
+      "volume",
+      "inspect",
+      profile.volume,
+    ]);
+    if (result.exitCode !== 0) {
+      if (result.stderr.includes("No such volume")) return undefined;
+      throw failure("docker volume inspect", result);
+    }
+    let rows: DockerVolumeInspect[];
+    try {
+      rows = JSON.parse(result.stdout) as DockerVolumeInspect[];
+    } catch {
+      throw new CliError(
+        "invalid_docker_response",
+        `Docker returned invalid inspect data for ${profile.volume}`,
+      );
+    }
+    const inspect = rows[0];
+    if (inspect?.Name === undefined || inspect.Driver === undefined) {
+      throw new CliError(
+        "invalid_docker_response",
+        `Docker returned incomplete inspect data for ${profile.volume}`,
+      );
+    }
+    return {
+      volume: inspect.Name,
+      driver: inspect.Driver,
+      labels: inspect.Labels ?? {},
+    };
+  }
+
+  async createProfile(profile: BrowserProfile): Promise<void> {
+    const result = await this.runCommand([
+      "docker",
+      "--context",
+      this.context,
+      "volume",
+      "create",
+      "--label",
+      "dev.agentbrowse.managed=true",
+      "--label",
+      "dev.agentbrowse.role=browser-profile",
+      "--label",
+      `dev.agentbrowse.profile=${profile.name}`,
+      "--label",
+      `dev.agentbrowse.profile.schema=${PROFILE_SCHEMA_VERSION}`,
+      profile.volume,
+    ]);
+    if (result.exitCode !== 0) throw failure("docker volume create", result);
+  }
+
+  async listProfileConsumers(
+    profile: BrowserProfile,
+    signal?: AbortSignal,
+  ): Promise<readonly ProfileConsumerRecord[]> {
+    const format = ["{{.Names}}", "{{.State}}"].join("\t");
+    const result = await this.discoveryCommand(
+      [
+        "docker",
+        "--context",
+        this.context,
+        "container",
+        "list",
+        "--all",
+        "--filter",
+        `volume=${profile.volume}`,
+        "--format",
+        format,
+      ],
+      signal,
+    );
+    if (result.exitCode !== 0) throw failure("docker container list", result);
+    if (result.stdout === "") return [];
+    return result.stdout.split("\n").map((line) => {
+      const [container, state] = line.split("\t");
+      if (container === undefined || container === "" || state === undefined || state === "") {
+        throw new CliError("invalid_docker_response", "browser profile consumers are malformed");
+      }
+      return { container, state };
+    });
+  }
+
+  async removeProfile(profile: BrowserProfile): Promise<void> {
+    const result = await this.runCommand([
+      "docker",
+      "--context",
+      this.context,
+      "volume",
+      "rm",
+      profile.volume,
+    ]);
+    if (result.exitCode !== 0) throw failure("docker volume rm", result);
+  }
+
   async listManagedContainers(signal?: AbortSignal): Promise<readonly ManagedContainerRecord[]> {
     const format = [
       '{{.Label "dev.agentbrowse.target"}}',
+      '{{.Label "dev.agentbrowse.profile"}}',
       '{{.Label "dev.agentbrowse.slot"}}',
       "{{.Names}}",
       "{{.State}}",
@@ -321,10 +519,12 @@ export class DockerFarmBackend implements FarmBackend {
     if (result.stdout === "") return [];
 
     return result.stdout.split("\n").map((line) => {
-      const [name, slotValue, container, state, status] = line.split("\t");
+      const [name, profileValue, slotValue, container, state, status] = line.split("\t");
       if (
         name === undefined ||
         !/^[a-z][a-z0-9-]{0,31}$/.test(name) ||
+        profileValue === undefined ||
+        (profileValue !== "" && !/^[a-z][a-z0-9-]{0,31}$/.test(profileValue)) ||
         slotValue === undefined ||
         !/^(0|[1-9][0-9]{0,2})$/.test(slotValue) ||
         container === undefined ||
@@ -333,7 +533,14 @@ export class DockerFarmBackend implements FarmBackend {
       ) {
         throw new CliError("invalid_docker_response", "managed browser labels are malformed");
       }
-      return { name, slot: Number(slotValue), container, state, status };
+      return {
+        name,
+        profile: profileValue === "" ? null : profileValue,
+        slot: Number(slotValue),
+        container,
+        state,
+        status,
+      };
     });
   }
 
@@ -374,11 +581,12 @@ export class DockerFarmBackend implements FarmBackend {
       environment: inspect.Config.Env ?? [],
       running: inspect.State?.Running === true,
       bindings: normalizedBindings(inspect),
+      mounts: normalizedMounts(inspect),
     };
   }
 
   async runBrowser(input: RunBrowserInput): Promise<void> {
-    const { target, image, networkAddress, nekoLogLevel } = input;
+    const { target, profile, image, networkAddress, nekoLogLevel } = input;
     const args = [
       "docker",
       "--context",
@@ -394,6 +602,8 @@ export class DockerFarmBackend implements FarmBackend {
       "--label",
       `dev.agentbrowse.target=${target.name}`,
       "--label",
+      `dev.agentbrowse.profile=${profile.name}`,
+      "--label",
       `dev.agentbrowse.slot=${target.slot}`,
       "--platform",
       "linux/amd64",
@@ -402,6 +612,8 @@ export class DockerFarmBackend implements FarmBackend {
       "/dev/shm:rw,size=2g",
       "--memory",
       "8g",
+      "--mount",
+      `type=volume,src=${profile.volume},dst=${PROFILE_MOUNT_PATH}`,
       "--publish",
       `127.0.0.1:${target.httpPort}:8080`,
       "--publish",
