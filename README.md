@@ -117,6 +117,15 @@ agent-browser --session research --provider remote-browser snapshot -i
 agent-browser --session research --provider remote-browser close
 ```
 
+Resolve a running agent-browser session to the exact Browser target incarnation
+that backs it. This is the safe identifier for Live View and Agentattention
+handoffs; the stable session or profile name is not a substitute:
+
+```sh
+agentbrowse resolve research
+agentbrowse resolve research --json
+```
+
 Set `AGENT_BROWSER_PROVIDER=remote-browser` to omit `--provider remote-browser`
 from each command. The plugin name must match `provider.name` in the agentbrowse
 config.
@@ -129,6 +138,12 @@ always destroys that exact target, including one that was already running when
 the provider received the launch request, while preserving the profile. A
 later launch gets a new target name with the same cookies and authentication
 state, so an old target reference cannot silently resolve to the replacement.
+
+The fleet's `browser` skill composes this provider lifecycle with agent-browser's
+version-matched command guide and Agentattention. A sign-in, MFA prompt, or
+captcha is prepared in the agent's current session and handed to the human as
+that exact live target; cookies written by the human remain in the Browser
+profile for later target incarnations.
 
 No provider server runs locally. agent-browser starts `agentbrowse provider`
 for one `plugin.manifest`, `browser.launch`, or `browser.close` request; the

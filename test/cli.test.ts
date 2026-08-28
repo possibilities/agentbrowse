@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { UsageError } from "../cli/errors.ts";
 import { parseArgs } from "../cli/main.ts";
 
-test("parse target, profile, provider, and view commands", () => {
+test("parse target, profile, provider, resolve, and view commands", () => {
   expect(
     parseArgs([
       "create",
@@ -51,6 +51,16 @@ test("parse target, profile, provider, and view commands", () => {
     command: "provider",
     json: false,
   });
+  expect(parseArgs(["resolve", "Demo_Worktree", "--json"])).toEqual({
+    command: "resolve",
+    session: "Demo_Worktree",
+    json: true,
+  });
+  expect(parseArgs(["resolve"])).toEqual({
+    command: "resolve",
+    session: "default",
+    json: false,
+  });
   expect(parseArgs(["view", "Demo_Worktree"])).toEqual({
     command: "view",
     session: "Demo_Worktree",
@@ -73,6 +83,8 @@ test("unknown command and extra destroy flags are usage faults", () => {
   expect(() => parseArgs(["list", "extra"])).toThrow(UsageError);
   expect(() => parseArgs(["provider", "extra"])).toThrow(UsageError);
   expect(() => parseArgs(["provider", "--json"])).toThrow(UsageError);
+  expect(() => parseArgs(["resolve", "testing", "extra"])).toThrow(UsageError);
+  expect(() => parseArgs(["resolve", "--unknown"])).toThrow(UsageError);
   expect(() => parseArgs(["view", "testing", "extra"])).toThrow(UsageError);
   expect(() => parseArgs(["view", "--unknown"])).toThrow(UsageError);
   expect(() => parseArgs(["view", "testing", "--json"])).toThrow(UsageError);

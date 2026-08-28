@@ -11,6 +11,7 @@ import type {
 } from "./farm.ts";
 import { parseSlot, SCHEMA_VERSION } from "./model.ts";
 import { runProvider } from "./provider.ts";
+import { type ResolvedProviderTarget, resolveProviderTarget } from "./resolve.ts";
 import { browserFarm } from "./runtime.ts";
 import { runView } from "./view.ts";
 
@@ -24,6 +25,7 @@ Usage:
   agentbrowse profile list [--json]
   agentbrowse profile delete NAME [--json]
   agentbrowse provider
+  agentbrowse resolve [SESSION] [--json]
   agentbrowse view [SESSION]
 
 Commands:
@@ -32,6 +34,7 @@ Commands:
   destroy  Delete one exactly owned browser target; preserve its Browser profile
   profile  Create, list, or explicitly delete durable Browser profiles
   provider Handle one agent-browser plugin protocol request over standard I/O
+  resolve  Resolve an agent-browser session to its exact current Browser target
   view     Open a session's Browser target; uses the default session if omitted
 
 Options:
@@ -41,6 +44,8 @@ Options:
   --json            Emit the stable machine envelope
   -h, --help        Show this help
 `;
+
+const TARGET_RESOLVE_TIMEOUT_MS = 15_000;
 
 interface ParsedCreate {
   command: "create";
@@ -61,6 +66,12 @@ interface ParsedView {
   command: "view";
   session: string;
   json: false;
+}
+
+interface ParsedResolve {
+  command: "resolve";
+  session: string;
+  json: boolean;
 }
 
 interface ParsedProfileCreate {
@@ -89,6 +100,7 @@ type Parsed =
   | ParsedProfileCreate
   | ParsedProfileList
   | ParsedProfileDelete
+  | ParsedResolve
   | ParsedView
   | { command: "list"; json: boolean }
   | { command: "provider"; json: false }
@@ -120,6 +132,12 @@ export function parseArgs(argv: readonly string[]): Parsed {
     const session = args[1];
     if (session?.startsWith("--")) throw new UsageError(`unexpected argument: ${session}`);
     return { command, session: session ?? "default", json: false };
+  }
+  if (command === "resolve") {
+    if (args.length > 2) throw new UsageError(`unexpected argument: ${args[2]}`);
+    const session = args[1];
+    if (session?.startsWith("--")) throw new UsageError(`unexpected argument: ${session}`);
+    return { command, session: session ?? "default", json };
   }
   if (command === "list") {
     if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
@@ -320,6 +338,24 @@ function humanProfileDelete(result: ProfileDeleteResult): string {
     : `Browser profile ${result.name} was already absent\n`;
 }
 
+function resolvePayload(result: ResolvedProviderTarget): Record<string, unknown> {
+  return {
+    session: result.session,
+    profile: result.profile,
+    target: {
+      name: result.target.name,
+      slot: result.target.slot,
+      container: result.target.container,
+      state: result.target.state,
+      status: result.target.status,
+    },
+  };
+}
+
+function humanResolve(result: ResolvedProviderTarget): string {
+  return `agent-browser session ${result.session}\n  Browser profile: ${result.profile}\n  Browser target: ${result.target.name}\n  Slot: ${result.target.slot}\n  State: ${result.target.state}\n`;
+}
+
 export async function run(argv: readonly string[], env = process.env): Promise<number> {
   const json = argv.includes("--json");
   let parsed: Parsed;
@@ -358,6 +394,23 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
     } else if (parsed.command === "list") {
       const result = await farm.list();
       process.stdout.write(parsed.json ? success(listPayload(result)) : humanList(result));
+    } else if (parsed.command === "resolve") {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => {
+        controller.abort(
+          new CliError(
+            "browser_target_resolve_timeout",
+            `resolving agent-browser session ${parsed.session} exceeded ${TARGET_RESOLVE_TIMEOUT_MS / 1_000} seconds`,
+            "check the configured browser host and retry",
+          ),
+        );
+      }, TARGET_RESOLVE_TIMEOUT_MS);
+      try {
+        const result = await resolveProviderTarget(parsed.session, farm, controller.signal);
+        process.stdout.write(parsed.json ? success(resolvePayload(result)) : humanResolve(result));
+      } finally {
+        clearTimeout(timeout);
+      }
     } else if (parsed.command === "profile") {
       if (parsed.action === "create") {
         const result = await farm.createProfile(parsed.name);

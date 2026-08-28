@@ -1,0 +1,6 @@
+interface:
+  display_name: "Browser"
+  short_description: "Drive durable browser sessions and hand off live pages"
+  default_prompt: "Use $browser to drive a durable browser session and hand human-only interaction off safely."
+policy:
+  allow_implicit_invocation: true

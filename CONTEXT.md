@@ -16,6 +16,11 @@ output. It provisions or reuses one Browser target for a launch request and
 destroys that target for the matching close request.
 _Avoid: provider server, deployment-specific provider names._
 
+**Agent-browser session** — A stable agent-browser driver name that the Browser
+provider maps to one Browser profile and, while running, one exact Browser target
+incarnation. Closing and relaunching it preserves the profile but changes the target.
+_Avoid: Browser session, target name, profile name._
+
 **Live View session** — One authenticated connection to a Kernel/Neko endpoint,
 including its WebSocket control plane, WebRTC peer, control ownership, decoded
 frames, and input state.
