@@ -84,7 +84,11 @@ test("stopped Apple service reports manual recovery without starting anything", 
   const calls: string[][] = [];
   const local = backend(async (args) => {
     calls.push([...args]);
-    return ok("apiserver is not running and not registered with launchd");
+    return {
+      exitCode: 1,
+      stdout: "apiserver is not running and not registered with launchd",
+      stderr: "",
+    };
   });
 
   await expect(local.verifyHost()).rejects.toMatchObject({

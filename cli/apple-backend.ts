@@ -76,6 +76,13 @@ export class AppleContainerFarmBackend implements FarmBackend {
   async verifyHost(signal?: AbortSignal): Promise<void> {
     const result = await this.runCommand([this.backendConfig.command, "system", "status"], signal);
     const output = `${result.stdout}\n${result.stderr}`.trim();
+    if (/apiserver is not running/i.test(output)) {
+      throw new CliError(
+        "apple_service_stopped",
+        "local Apple container service is disabled",
+        "run agentbrowse-infra enable, then prepare the locked image explicitly",
+      );
+    }
     if (result.exitCode !== 0) throw commandFailure("Apple container system status", result);
     if (!output.includes("apiserver is running")) {
       throw new CliError(
