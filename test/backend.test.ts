@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { type BackendCommand, type CommandResult, DockerFarmBackend } from "../cli/backend.ts";
-import { targetFor } from "../cli/model.ts";
+import { profileFor, targetFor } from "../cli/model.ts";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
 
 const ok = (stdout = ""): CommandResult => ({ exitCode: 0, stdout, stderr: "" });
@@ -159,6 +159,20 @@ test("browser launch mounts the exact durable profile volume writable", async ()
   expect(seen[1]?.[mountIndex + 1]).toBe(
     "type=volume,src=agentbrowse-profile-testing,dst=/home/kernel/user-data",
   );
+});
+
+test("missing profile inspection accepts Artbird's lowercase Docker response", async () => {
+  const docker = backend(async (args) =>
+    args[3] === "volume" && args[4] === "inspect"
+      ? {
+          exitCode: 1,
+          stdout: "",
+          stderr: "Error response from daemon: get agentbrowse-profile-new: no such volume",
+        }
+      : ok(),
+  );
+
+  expect(await docker.inspectProfile(profileFor("new"))).toBeUndefined();
 });
 
 test("managed profile discovery parses only exact labeled volumes", async () => {

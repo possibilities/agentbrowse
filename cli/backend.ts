@@ -444,7 +444,7 @@ export class DockerFarmBackend implements FarmBackend {
       profile.volume,
     ]);
     if (result.exitCode !== 0) {
-      if (result.stderr.includes("No such volume")) return undefined;
+      if (/no such volume/i.test(`${result.stderr}\n${result.stdout}`)) return undefined;
       throw commandFailure("docker volume inspect", result);
     }
     let rows: DockerVolumeInspect[];
