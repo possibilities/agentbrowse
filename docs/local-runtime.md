@@ -2,7 +2,7 @@
 
 `agentbrowse` manages durable Browser profiles and Kernel/Neko Browser targets
 across the configured ordered backend set. The installed version 2 deployment
-keeps Artbird's SSH-backed Docker engine first and an already-enabled Apple
+can keep an SSH-backed remote Docker engine first and an already-enabled Apple
 `container` session second.
 
 A Browser profile owns Chromium cookies, local storage, IndexedDB, and
@@ -74,6 +74,13 @@ Apple targets expose the container's Direct `192.168.64.x` address instead:
 CDP is port 9222, Live View HTTP is port 8080, and Neko's UDP mux is the
 slot-derived port inside the container. Apple publishes no host ports and is
 bounded to one 2-CPU, 6-GiB target.
+
+These bindings assume trusted backend networking. Docker Live View HTTP is
+reachable only through the managed SSH forward, and Apple targets use Apple's
+private container bridge. CDP and WebRTC trust the configured private network;
+CDP has no additional Agentbrowse authentication and must never face an
+untrusted network. Live View's public upstream `kernel`/`admin` compatibility
+defaults do not provide a security boundary.
 
 Open the matching target in AppKit with the original agent-browser session
 name, or name a target directly:

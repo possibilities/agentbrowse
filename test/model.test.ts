@@ -58,7 +58,7 @@ test("Browser profiles and target incarnations have separate identities", () => 
 test("runtime metadata round trips and rejects drift", () => {
   const target = targetFor("testing-deadbeef", 7, {
     profile: "testing",
-    backend: "artbird",
+    backend: "remote-docker",
     container: "agentbrowse-browser-testing-generation",
   });
   expect(parseTargetConfig(renderTargetConfig(target))).toEqual(target);

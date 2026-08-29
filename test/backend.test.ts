@@ -139,7 +139,7 @@ test("browser launch mounts the exact durable profile volume writable", async ()
   const seen: string[][] = [];
   const docker = backend(async (args) => {
     seen.push([...args]);
-    if (args[0] === "ssh") return ok("100.64.0.8");
+    if (args[0] === "ssh") return ok("192.0.2.10");
     return ok("container-id");
   });
   const target = targetFor("testing-deadbeef", 3, {
@@ -161,7 +161,7 @@ test("browser launch mounts the exact durable profile volume writable", async ()
   );
 });
 
-test("missing profile inspection accepts Artbird's lowercase Docker response", async () => {
+test("missing profile inspection accepts a remote Docker lowercase response", async () => {
   const docker = backend(async (args) =>
     args[3] === "volume" && args[4] === "inspect"
       ? {

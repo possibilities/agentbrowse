@@ -34,7 +34,7 @@ const browserEntries: BrowserListEntry[] = [
   {
     name: "one",
     profile: "one",
-    backend: "artbird",
+    backend: "remote-docker",
     slot: 1,
     container: "agentbrowse-browser-one",
     state: "running",
@@ -47,7 +47,7 @@ const browserEntries: BrowserListEntry[] = [
   {
     name: "stopped",
     profile: "stopped",
-    backend: "artbird",
+    backend: "remote-docker",
     slot: 2,
     container: "agentbrowse-browser-stopped",
     state: "exited",
@@ -60,7 +60,7 @@ const browserEntries: BrowserListEntry[] = [
   {
     name: "two",
     profile: "two",
-    backend: "artbird",
+    backend: "remote-docker",
     slot: 3,
     container: "agentbrowse-browser-two",
     state: "running",

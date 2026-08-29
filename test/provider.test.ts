@@ -16,16 +16,16 @@ class FakeProviderFarm {
     return {
       name,
       profile: options.profile,
-      backend: "artbird",
+      backend: "remote-docker",
       slot: 4,
       container: `agentbrowse-browser-${name}`,
       httpPort: 18084,
       webrtcPort: 56004,
       cdpPort: 9226,
       image: "agentbrowse/kernel-headful:test",
-      cdpUrl: "http://100.64.0.8:9226",
+      cdpUrl: "http://192.0.2.10:9226",
       liveViewUrl: "http://127.0.0.1:18084",
-      liveViewAccess: { mode: "ssh", remoteHost: "artbird", remotePort: 18084 },
+      liveViewAccess: { mode: "ssh", remoteHost: "browser-host", remotePort: 18084 },
       created: this.created,
     };
   }
@@ -39,7 +39,7 @@ class FakeProviderFarm {
     return {
       name,
       profile: profile ?? "demo",
-      backend: backend ?? "artbird",
+      backend: backend ?? "remote-docker",
       container: `agentbrowse-browser-${name}`,
       destroyed: true,
     };
@@ -85,17 +85,17 @@ test("browser.launch provisions the session profile and returns exact target cle
     protocol: PROTOCOL,
     success: true,
     browser: {
-      cdpUrl: "http://100.64.0.8:9226",
+      cdpUrl: "http://192.0.2.10:9226",
       directPage: false,
       metadata: {
-        backend: "artbird",
+        backend: "remote-docker",
         browserTarget: "demo-deadbeefcafebabe",
         browserProfile: "demo",
         slot: 4,
         liveViewUrl: "http://127.0.0.1:18084",
       },
       cleanup: {
-        backend: "artbird",
+        backend: "remote-docker",
         browserTarget: "demo-deadbeefcafebabe",
         browserProfile: "demo",
       },
@@ -158,7 +158,7 @@ test("browser.launch returns cleanup data for an already-running target", async 
   );
 
   expect(response.browser.cleanup).toEqual({
-    backend: "artbird",
+    backend: "remote-docker",
     browserTarget: "demo-deadbeefcafebabe",
     browserProfile: "demo",
   });

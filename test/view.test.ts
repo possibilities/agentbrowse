@@ -11,14 +11,14 @@ function target(
   return {
     name,
     profile,
-    backend: "artbird",
+    backend: "remote-docker",
     slot: 1,
     container: `agentbrowse-browser-${name}`,
     state,
     status: state,
-    cdpUrl: "http://100.64.0.8:9223",
+    cdpUrl: "http://192.0.2.10:9223",
     liveViewUrl: "http://127.0.0.1:18081",
-    liveViewAccess: { mode: "ssh", remoteHost: "artbird", remotePort: 18081 },
+    liveViewAccess: { mode: "ssh", remoteHost: "browser-host", remotePort: 18081 },
     slotConflict: false,
   };
 }

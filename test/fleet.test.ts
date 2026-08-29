@@ -193,31 +193,31 @@ function fleet(backends: readonly FleetBackend[], directory = runtimeDir()): Bro
 }
 
 test("available first backend wins without touching Apple", async () => {
-  const artbird = new FleetBackend("artbird");
+  const remoteDocker = new FleetBackend("remote-docker");
   const apple = new FleetBackend("apple-container-local");
-  const result = await fleet([artbird, apple]).provisionProfile({ profile: "testing" });
+  const result = await fleet([remoteDocker, apple]).provisionProfile({ profile: "testing" });
 
-  expect(result.backend).toBe("artbird");
-  expect(artbird.events).toContain("run");
+  expect(result.backend).toBe("remote-docker");
+  expect(remoteDocker.events).toContain("run");
   expect(apple.events).toEqual([]);
 });
 
-test("classified Artbird unavailability passively selects prepared Apple", async () => {
-  const artbird = new FleetBackend("artbird");
-  artbird.probeError = new CliError("browser_host_unreachable", "Artbird is offline");
+test("classified remote Docker unavailability passively selects prepared Apple", async () => {
+  const remoteDocker = new FleetBackend("remote-docker");
+  remoteDocker.probeError = new CliError("browser_host_unreachable", "Remote Docker is offline");
   const apple = new FleetBackend("apple-container-local");
 
-  const result = await fleet([artbird, apple]).provisionProfile({ profile: "testing" });
+  const result = await fleet([remoteDocker, apple]).provisionProfile({ profile: "testing" });
 
   expect(result.backend).toBe("apple-container-local");
-  expect(artbird.events).toEqual(["probe"]);
-  expect(artbird.probeSignals[0]).toBeInstanceOf(AbortSignal);
+  expect(remoteDocker.events).toEqual(["probe"]);
+  expect(remoteDocker.probeSignals[0]).toBeInstanceOf(AbortSignal);
   expect(apple.events).toContain("run");
 });
 
 test("two unavailable backends produce one bounded recovery and never start Apple", async () => {
-  const artbird = new FleetBackend("artbird");
-  artbird.probeError = new CliError("browser_host_unreachable", "Artbird is offline");
+  const remoteDocker = new FleetBackend("remote-docker");
+  remoteDocker.probeError = new CliError("browser_host_unreachable", "Remote Docker is offline");
   const apple = new FleetBackend("apple-container-local");
   apple.probeError = new CliError(
     "apple_service_stopped",
@@ -226,17 +226,17 @@ test("two unavailable backends produce one bounded recovery and never start Appl
   );
 
   await expect(
-    fleet([artbird, apple]).provisionProfile({ profile: "testing" }),
+    fleet([remoteDocker, apple]).provisionProfile({ profile: "testing" }),
   ).rejects.toMatchObject({
     code: "no_backend_available",
-    message: expect.stringContaining("artbird: Artbird is offline"),
+    message: expect.stringContaining("remote-docker: Remote Docker is offline"),
     recovery: "apple-container-local: run agentbrowse-infra enable",
   });
   expect(apple.events).toEqual(["probe"]);
 });
 
 test("authentication and image failures never fall through", async () => {
-  const authentication = new FleetBackend("artbird");
+  const authentication = new FleetBackend("remote-docker");
   authentication.probeError = new CliError(
     "browser_host_authentication_failed",
     "authentication failed",
@@ -249,7 +249,7 @@ test("authentication and image failures never fall through", async () => {
   });
   expect(apple.events).toEqual([]);
 
-  const wrongEngine = new FleetBackend("artbird");
+  const wrongEngine = new FleetBackend("remote-docker");
   wrongEngine.probeError = new CliError("wrong_docker_engine", "wrong engine");
   const engineApple = new FleetBackend("apple-container-local");
   await expect(
@@ -257,7 +257,7 @@ test("authentication and image failures never fall through", async () => {
   ).rejects.toMatchObject({ code: "wrong_docker_engine" });
   expect(engineApple.events).toEqual([]);
 
-  const image = new FleetBackend("artbird");
+  const image = new FleetBackend("remote-docker");
   image.imagePresent = false;
   const otherApple = new FleetBackend("apple-container-local");
   await expect(
@@ -269,50 +269,50 @@ test("authentication and image failures never fall through", async () => {
 });
 
 test("an availability-shaped error after possible mutation never falls through", async () => {
-  const artbird = new FleetBackend("artbird");
-  artbird.runError = new CliError("browser_host_unreachable", "connection lost after run");
+  const remoteDocker = new FleetBackend("remote-docker");
+  remoteDocker.runError = new CliError("browser_host_unreachable", "connection lost after run");
   const apple = new FleetBackend("apple-container-local");
 
   await expect(
-    fleet([artbird, apple]).provisionProfile({ profile: "testing" }),
+    fleet([remoteDocker, apple]).provisionProfile({ profile: "testing" }),
   ).rejects.toMatchObject({
     code: "browser_host_unreachable",
   });
-  expect(artbird.state).toBeDefined();
+  expect(remoteDocker.state).toBeDefined();
   expect(apple.events).toEqual([]);
 });
 
 test("a possible first mutation reserves the profile home across retries", async () => {
   const directory = runtimeDir();
-  const artbird = new FleetBackend("artbird");
-  artbird.runError = new CliError("browser_host_unreachable", "connection lost after run");
+  const remoteDocker = new FleetBackend("remote-docker");
+  remoteDocker.runError = new CliError("browser_host_unreachable", "connection lost after run");
   const apple = new FleetBackend("apple-container-local");
-  const local = fleet([artbird, apple], directory);
+  const local = fleet([remoteDocker, apple], directory);
 
   await expect(local.provisionProfile({ profile: "testing" })).rejects.toMatchObject({
     code: "browser_host_unreachable",
   });
 
-  artbird.runError = null;
-  artbird.probeError = new CliError("browser_host_unreachable", "Artbird is offline");
-  artbird.events.splice(0);
+  remoteDocker.runError = null;
+  remoteDocker.probeError = new CliError("browser_host_unreachable", "Remote Docker is offline");
+  remoteDocker.events.splice(0);
   apple.events.splice(0);
   await expect(local.provisionProfile({ profile: "testing" })).rejects.toMatchObject({
     code: "browser_host_unreachable",
   });
-  expect(artbird.events).toEqual(["probe"]);
+  expect(remoteDocker.events).toEqual(["probe"]);
   expect(apple.events).toEqual([]);
 });
 
 test("existing target drift never falls through", async () => {
-  const artbird = new FleetBackend("artbird");
-  await fleet([artbird]).provisionProfile({ profile: "testing" });
-  artbird.verifyError = new CliError("browser_drift", "ownership changed");
-  artbird.events.splice(0);
+  const remoteDocker = new FleetBackend("remote-docker");
+  await fleet([remoteDocker]).provisionProfile({ profile: "testing" });
+  remoteDocker.verifyError = new CliError("browser_drift", "ownership changed");
+  remoteDocker.events.splice(0);
   const apple = new FleetBackend("apple-container-local");
 
   await expect(
-    fleet([artbird, apple]).provisionProfile({ profile: "testing" }),
+    fleet([remoteDocker, apple]).provisionProfile({ profile: "testing" }),
   ).rejects.toMatchObject({
     code: "browser_drift",
   });
@@ -323,30 +323,30 @@ test("backend-bound receipt routes cleanup even when order changes", async () =>
   const directory = runtimeDir();
   const apple = new FleetBackend("apple-container-local");
   const launched = await fleet([apple], directory).provisionProfile({ profile: "testing" });
-  const artbird = new FleetBackend("artbird");
-  artbird.probeError = new CliError("browser_host_unreachable", "Artbird is offline");
+  const remoteDocker = new FleetBackend("remote-docker");
+  remoteDocker.probeError = new CliError("browser_host_unreachable", "Remote Docker is offline");
   apple.events.splice(0);
 
-  const result = await fleet([artbird, apple], directory).destroy(launched.name);
+  const result = await fleet([remoteDocker, apple], directory).destroy(launched.name);
 
   expect(result.backend).toBe("apple-container-local");
   expect(apple.events).toContain("remove");
-  expect(artbird.events).toEqual([]);
+  expect(remoteDocker.events).toEqual([]);
 });
 
 test("receiptless cleanup fails closed before listing an available backend", async () => {
   const apple = new FleetBackend("apple-container-local");
   const launched = await fleet([apple]).provisionProfile({ profile: "testing" });
-  const artbird = new FleetBackend("artbird");
-  artbird.probeError = new CliError("browser_host_unreachable", "Artbird is offline");
+  const remoteDocker = new FleetBackend("remote-docker");
+  remoteDocker.probeError = new CliError("browser_host_unreachable", "Remote Docker is offline");
   apple.events.splice(0);
 
-  await expect(fleet([apple, artbird]).destroy(launched.name)).rejects.toMatchObject({
+  await expect(fleet([apple, remoteDocker]).destroy(launched.name)).rejects.toMatchObject({
     code: "cleanup_backend_unavailable",
     message: expect.stringContaining("without a backend-bound receipt"),
   });
 
-  expect(artbird.events).toEqual(["probe"]);
+  expect(remoteDocker.events).toEqual(["probe"]);
   expect(apple.events).toEqual(["probe"]);
   expect(apple.state).toBeDefined();
 });
@@ -354,16 +354,16 @@ test("receiptless cleanup fails closed before listing an available backend", asy
 test("explicit backend cleanup ignores an unrelated unavailable backend", async () => {
   const apple = new FleetBackend("apple-container-local");
   const launched = await fleet([apple]).provisionProfile({ profile: "testing" });
-  const artbird = new FleetBackend("artbird");
-  artbird.probeError = new CliError("browser_host_unreachable", "Artbird is offline");
+  const remoteDocker = new FleetBackend("remote-docker");
+  remoteDocker.probeError = new CliError("browser_host_unreachable", "Remote Docker is offline");
   apple.events.splice(0);
 
-  const result = await fleet([artbird, apple]).destroy(launched.name, apple.id);
+  const result = await fleet([remoteDocker, apple]).destroy(launched.name, apple.id);
 
   expect(result.backend).toBe("apple-container-local");
   expect(result.destroyed).toBe(true);
   expect(apple.events).toContain("remove");
-  expect(artbird.events).toEqual([]);
+  expect(remoteDocker.events).toEqual([]);
 });
 
 test("local capacity refuses a second target before running another container", async () => {
@@ -380,30 +380,30 @@ test("local capacity refuses a second target before running another container", 
 
 test("a profile keeps its fallback backend home after its target closes", async () => {
   const directory = runtimeDir();
-  const artbird = new FleetBackend("artbird");
-  artbird.probeError = new CliError("browser_host_unreachable", "Artbird is offline");
+  const remoteDocker = new FleetBackend("remote-docker");
+  remoteDocker.probeError = new CliError("browser_host_unreachable", "Remote Docker is offline");
   const apple = new FleetBackend("apple-container-local");
-  const firstFleet = fleet([artbird, apple], directory);
+  const firstFleet = fleet([remoteDocker, apple], directory);
   const first = await firstFleet.provisionProfile({ profile: "signed-in" });
   expect(first.backend).toBe("apple-container-local");
   await firstFleet.destroy(first.name, first.backend, first.profile);
 
-  artbird.probeError = null;
-  artbird.events.splice(0);
+  remoteDocker.probeError = null;
+  remoteDocker.events.splice(0);
   apple.events.splice(0);
-  const second = await fleet([artbird, apple], directory).provisionProfile({
+  const second = await fleet([remoteDocker, apple], directory).provisionProfile({
     profile: "signed-in",
   });
 
   expect(second.backend).toBe("apple-container-local");
-  expect(artbird.events).toEqual([]);
+  expect(remoteDocker.events).toEqual([]);
   expect(apple.events[0]).toBe("probe");
 });
 
 test("a stale close cannot clear a newer exact target binding", async () => {
   const directory = runtimeDir();
-  const artbird = new FleetBackend("artbird");
-  const local = fleet([artbird], directory);
+  const remoteDocker = new FleetBackend("remote-docker");
+  const local = fleet([remoteDocker], directory);
   const first = await local.provisionProfile({ profile: "research" });
   await local.destroy(first.name, first.backend, first.profile);
   const second = await local.provisionProfile({ profile: "research" });
@@ -416,7 +416,7 @@ test("a stale close cannot clear a newer exact target binding", async () => {
 test("concurrent first bindings choose exactly one profile home", async () => {
   const store = new ProfileBindingStore(runtimeDir());
   const results = await Promise.allSettled([
-    store.bindProfile("research", "artbird"),
+    store.bindProfile("research", "remote-docker"),
     store.bindProfile("research", "apple-container-local"),
   ]);
 
@@ -428,5 +428,5 @@ test("concurrent first bindings choose exactly one profile home", async () => {
   });
   const binding = await store.read("research");
   expect(binding).toBeDefined();
-  expect(["artbird", "apple-container-local"]).toContain(binding!.backend);
+  expect(["remote-docker", "apple-container-local"]).toContain(binding!.backend);
 });

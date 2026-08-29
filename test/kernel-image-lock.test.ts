@@ -84,12 +84,12 @@ test("ordinary runtime selection never follows a mutable registry tag", async ()
   });
   const backend = new DockerFarmBackend(
     {
-      id: "artbird",
+      id: "remote-docker",
       type: "docker",
-      context: "artbird",
+      context: "remote-browser",
       expectedEndpoint: null,
       expectedEngine: null,
-      remoteHost: "artbird",
+      remoteHost: "browser-host",
       networkAddress: "192.0.2.1",
       networkAddressCommand: null,
     },

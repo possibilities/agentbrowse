@@ -99,7 +99,7 @@ class FakeBackend implements FarmBackend {
   readonly id = "docker";
   readonly type = "docker" as const;
   readonly maxTargets = 1_000;
-  readonly ip = "100.64.0.8";
+  readonly ip = "192.0.2.10";
   readonly image = "agentbrowse/kernel-headful:test";
   existing: ContainerState | undefined;
   existingContainer: string | undefined;
@@ -240,7 +240,7 @@ test("create launches a combined CDP and Live View target and records it", async
     slot: 3,
     container: "agentbrowse-browser-testing",
     image: backend.image,
-    cdpUrl: "http://100.64.0.8:9225",
+    cdpUrl: "http://192.0.2.10:9225",
     liveViewUrl: "http://127.0.0.1:18083",
     created: true,
   });
@@ -453,7 +453,7 @@ test("list sorts browsers and marks duplicate slots", async () => {
 
   expect(result.map((browser) => browser.name)).toEqual(["first", "collision", "second"]);
   expect(result[0]).toMatchObject({
-    cdpUrl: "http://100.64.0.8:9225",
+    cdpUrl: "http://192.0.2.10:9225",
     liveViewUrl: "http://127.0.0.1:18083",
     slotConflict: false,
   });

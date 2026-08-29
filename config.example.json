@@ -2,13 +2,13 @@
   "version": 2,
   "backends": [
     {
-      "id": "artbird",
+      "id": "remote-docker",
       "type": "docker",
-      "context": "artbird",
-      "expectedEndpoint": "ssh://artbird",
-      "expectedEngine": "artbird",
-      "remoteHost": "artbird",
-      "networkAddressCommand": "tailscale ip -4"
+      "context": "remote-browser",
+      "expectedEndpoint": "ssh://browser-host",
+      "expectedEngine": "browser-host",
+      "remoteHost": "browser-host",
+      "networkAddress": "192.0.2.10"
     },
     {
       "id": "apple-container-local",

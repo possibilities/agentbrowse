@@ -21,11 +21,12 @@ bun link
 The fleet installer owns `~/.config/agentbrowse/config.json`; for development,
 copy [`config.example.json`](config.example.json) there and replace its example
 deployment values. Its version 2 `backends` array is ordered: the Docker-backed
-Artbird host is first and an already-enabled Apple `container` session is
-second. Agentbrowse falls through only for classified host/service availability
-failures while a profile has no backend home yet. It never starts Apple services,
-pulls or builds an image, or publishes an Apple host port. `AGENTBROWSE_CONFIG`
-selects another absolute path for isolated tests. See
+remote host is first and an already-enabled Apple `container` session is second.
+Agentbrowse falls through only for classified host/service availability failures
+while a profile has no backend home yet. It never starts Apple services, pulls or
+builds an image, or publishes an Apple host port. `AGENTBROWSE_CONFIG` selects
+another absolute path for isolated tests. Replace the documentation-only
+`192.0.2.10` address and other placeholders before use. See
 [`docs/configuration.md`](docs/configuration.md).
 
 Browser profiles and Browser targets have separate lifetimes. A Browser profile
@@ -206,6 +207,14 @@ commit them. See `docs/connection-descriptor.md` and `docs/local-runtime.md`.
 The observed signaling contract is in `docs/protocol.md`; reusable frontend
 boundaries and initial measurements are in `docs/architecture.md` and
 `docs/performance.md`.
+
+Treat every backend network as trusted infrastructure. Docker Live View HTTP is
+kept on the browser host's loopback interface and reached through the managed SSH
+forward; Apple targets use Apple's private container bridge. CDP and WebRTC trust
+the configured private network, and CDP has no additional Agentbrowse
+authentication, so never expose either endpoint to an untrusted network. The
+example `kernel`/`admin` Live View credentials are public upstream compatibility
+defaults, not a security boundary.
 
 ## OpenTUI Live View
 

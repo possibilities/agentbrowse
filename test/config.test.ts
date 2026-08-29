@@ -51,13 +51,13 @@ test("version 2 preserves backend order and applies safe Apple defaults", () => 
       version: 2,
       backends: [
         {
-          id: "artbird",
+          id: "remote-docker",
           type: "docker",
-          context: "artbird",
-          expectedEndpoint: "ssh://artbird",
-          expectedEngine: "artbird",
-          remoteHost: "artbird",
-          networkAddressCommand: "tailscale ip -4",
+          context: "remote-browser",
+          expectedEndpoint: "ssh://browser-host",
+          expectedEngine: "browser-host",
+          remoteHost: "browser-host",
+          networkAddress: "192.0.2.10",
         },
         { id: "apple-container-local", type: "apple-container" },
       ],
@@ -76,7 +76,7 @@ test("version 2 preserves backend order and applies safe Apple defaults", () => 
   });
 
   expect(config.backends.map((backend) => [backend.id, backend.type])).toEqual([
-    ["artbird", "docker"],
+    ["remote-docker", "docker"],
     ["apple-container-local", "apple-container"],
   ]);
   expect(config.backends[1]).toMatchObject({
