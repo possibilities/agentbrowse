@@ -351,6 +351,10 @@ export class LiveViewRenderable extends ImageRenderable {
       if (snapshot.lifecycle === "closed" || snapshot.lifecycle === "failed") {
         this.releaseHeldInput();
       }
+      // Cursor policy: `main` frames are pointerless, and the terminal host
+      // pointer is the only cursor OpenTUI presents. Deliberately do not poll or
+      // composite cursor observations; remote-controller movement is therefore
+      // not shown on this frontend adapter.
       if (!this.visible || this.width <= 0 || this.height <= 0) return;
 
       const cellPixels = terminalCellPixels(this.ctx);

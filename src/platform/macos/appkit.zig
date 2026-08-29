@@ -13,6 +13,8 @@ pub fn attach(live_session: *session_mod.Session) !void {
         .on_focus = onFocus,
         .on_close = onClose,
         .copy_status = copyStatus,
+        .copy_cursor_snapshot = copyCursorSnapshot,
+        .copy_cursor_image = copyCursorImage,
     };
     const label = live_session.descriptor.label;
     if (!native.kl_native_attach_appkit(live_session.nativeHandle(), callbacks, label.ptr, label.len)) {
@@ -101,6 +103,49 @@ fn onClose(context: ?*anyopaque) callconv(.c) void {
 fn copyStatus(context: ?*anyopaque, output: [*]u8, output_capacity: u32) callconv(.c) u32 {
     const written = fromContext(context).copyStatus(output[0..output_capacity]);
     return @intCast(written);
+}
+
+fn copyCursorSnapshot(
+    context: ?*anyopaque,
+    output: *native.AppKitCursorSnapshot,
+    output_size: u32,
+) callconv(.c) bool {
+    if (output_size < @sizeOf(native.AppKitCursorSnapshot)) return false;
+    const live_session = fromContext(context);
+    const cursor = live_session.cursorSnapshot();
+    var flags: u32 = 0;
+    if (cursor.image_available) flags |= 1 << 0;
+    if (cursor.position_available) flags |= 1 << 1;
+    if (live_session.isAuthorized()) flags |= 1 << 2;
+    if (live_session.hasRemoteController()) flags |= 1 << 3;
+    output.* = .{
+        .struct_size = @sizeOf(native.AppKitCursorSnapshot),
+        .flags = flags,
+        .width = cursor.width,
+        .height = cursor.height,
+        .hotspot_x = cursor.hotspot_x,
+        .hotspot_y = cursor.hotspot_y,
+        .position_x = cursor.position_x,
+        .position_y = cursor.position_y,
+        .image_byte_length = cursor.image_length,
+        .reserved = 0,
+        .generation = cursor.generation,
+        .image_generation = cursor.image_generation,
+        .position_generation = cursor.position_generation,
+    };
+    return true;
+}
+
+fn copyCursorImage(
+    context: ?*anyopaque,
+    image_generation: u64,
+    output: [*]u8,
+    output_capacity: u32,
+) callconv(.c) u32 {
+    return @intCast(fromContext(context).copyCursorImage(
+        image_generation,
+        output[0..output_capacity],
+    ));
 }
 
 fn clampDelta(value: f64) i16 {

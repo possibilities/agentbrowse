@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { ImageRenderable } from "@opentui/core";
 import {
   BrowserPickerController as ExportedBrowserPickerController,
@@ -29,6 +31,10 @@ import {
   parseOsc11Response,
   resolveFxnkTheme,
 } from "../src/opentui/palette.ts";
+
+const LIVE_VIEW_RENDERABLE = fileURLToPath(
+  new URL("../src/opentui/LiveViewRenderable.ts", import.meta.url),
+);
 
 const browserEntries: BrowserListEntry[] = [
   {
@@ -77,6 +83,11 @@ test("package subpath preserves module and OpenTUI runtime identity", async () =
   expect(ExportedBrowserPickerController).toBe(BrowserPickerController);
   expect(core.ImageRenderable).toBe(ImageRenderable);
   expect(Object.getPrototypeOf(LiveViewRenderable.prototype).constructor).toBe(ImageRenderable);
+});
+
+test("OpenTUI leaves cursor presentation exclusively to the terminal host", () => {
+  const source = readFileSync(LIVE_VIEW_RENDERABLE, "utf8");
+  expect(source).not.toMatch(/\.cursor(?:Snapshot|Image)\s*\(/u);
 });
 
 test("frame fitting preserves browser aspect in terminal pixels", () => {

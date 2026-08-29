@@ -18,10 +18,16 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 @interface KLInputView : NSView
 @property(nonatomic, assign) KLAppKitCallbacks callbacks;
 @property(nonatomic, strong) LKRTCMTLVideoView *videoView;
+@property(nonatomic, strong) NSImageView *remoteCursorView;
 @property(nonatomic, strong) NSTextField *statusLabel;
 @property(nonatomic, strong) NSTrackingArea *trackingArea;
-@property(nonatomic, strong) NSCursor *transparentCursor;
+@property(nonatomic, strong) NSCursor *guestCursor;
+@property(nonatomic, strong) NSImage *guestCursorImage;
+@property(nonatomic, assign) KLAppKitCursorSnapshot cursorSnapshot;
+@property(nonatomic, assign) BOOL pointerInsideVideo;
 @property(nonatomic, assign) CGSize videoSize;
+- (void)updateRemoteCursorPresentation;
+- (void)refreshCursorObservation;
 @end
 
 @implementation KLInputView
@@ -37,9 +43,12 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   _videoView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
   [self addSubview:_videoView];
 
-  NSImage *transparentImage = [[NSImage alloc] initWithSize:NSMakeSize(1, 1)];
-  _transparentCursor = [[NSCursor alloc] initWithImage:transparentImage
-                                              hotSpot:NSZeroPoint];
+  _guestCursor = NSCursor.arrowCursor;
+  _cursorSnapshot = KLAppKitCursorSnapshot{};
+  _remoteCursorView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+  _remoteCursorView.imageScaling = NSImageScaleAxesIndependently;
+  _remoteCursorView.hidden = YES;
+  [self addSubview:_remoteCursorView];
 
   _statusLabel = [NSTextField labelWithString:@"Connecting…"];
   _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -77,12 +86,112 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 }
 - (void)setVideoSize:(CGSize)videoSize {
   _videoSize = videoSize;
+  if (self.window) {
+    NSPoint point = [self convertPoint:self.window.mouseLocationOutsideOfEventStream
+                              fromView:nil];
+    _pointerInsideVideo = NSPointInRect(point, [self fittedVideoRect]);
+  }
   [self.window invalidateCursorRectsForView:self];
+  [self updateRemoteCursorPresentation];
 }
 - (void)resetCursorRects {
   [super resetCursorRects];
   NSRect fitted = [self fittedVideoRect];
-  if (!NSIsEmptyRect(fitted)) [self addCursorRect:fitted cursor:_transparentCursor];
+  if (!NSIsEmptyRect(fitted)) {
+    BOOL authorized = (_cursorSnapshot.flags & KL_APPKIT_CURSOR_AUTHORIZED) != 0;
+    [self addCursorRect:fitted cursor:authorized ? _guestCursor : NSCursor.arrowCursor];
+  }
+}
+
+- (void)updateRemoteCursorPresentation {
+  BOOL hasImage = (_cursorSnapshot.flags & KL_APPKIT_CURSOR_IMAGE_AVAILABLE) != 0;
+  BOOL hasPosition =
+      (_cursorSnapshot.flags & KL_APPKIT_CURSOR_POSITION_AVAILABLE) != 0;
+  BOOL authorized = (_cursorSnapshot.flags & KL_APPKIT_CURSOR_AUTHORIZED) != 0;
+  BOOL remoteController =
+      (_cursorSnapshot.flags & KL_APPKIT_CURSOR_REMOTE_CONTROLLER) != 0;
+  NSRect fitted = [self fittedVideoRect];
+  if (!hasImage || !hasPosition || authorized || !remoteController ||
+      _pointerInsideVideo ||
+      !_guestCursorImage || NSIsEmptyRect(fitted) || _videoSize.width <= 0 ||
+      _videoSize.height <= 0) {
+    _remoteCursorView.hidden = YES;
+    return;
+  }
+
+  CGFloat hotspotX = fitted.origin.x +
+      (static_cast<CGFloat>(_cursorSnapshot.position_x) / _videoSize.width) *
+          fitted.size.width;
+  CGFloat hotspotY = NSMaxY(fitted) -
+      (static_cast<CGFloat>(_cursorSnapshot.position_y) / _videoSize.height) *
+          fitted.size.height;
+  CGFloat scaleX = fitted.size.width / _videoSize.width;
+  CGFloat scaleY = fitted.size.height / _videoSize.height;
+  NSSize imageSize = NSMakeSize(_guestCursorImage.size.width * scaleX,
+                                _guestCursorImage.size.height * scaleY);
+  CGFloat originX = hotspotX - _cursorSnapshot.hotspot_x * scaleX;
+  CGFloat originY = hotspotY -
+      (_guestCursorImage.size.height - _cursorSnapshot.hotspot_y) * scaleY;
+  _remoteCursorView.frame = NSMakeRect(originX, originY, imageSize.width,
+                                        imageSize.height);
+  _remoteCursorView.hidden = NO;
+}
+
+- (void)refreshCursorObservation {
+  if (!_callbacks.copy_cursor_snapshot) return;
+  KLAppKitCursorSnapshot snapshot{};
+  if (!_callbacks.copy_cursor_snapshot(_callbacks.context, &snapshot,
+                                       sizeof(snapshot)) ||
+      snapshot.struct_size != sizeof(snapshot)) return;
+
+  BOOL hasImage = (snapshot.flags & KL_APPKIT_CURSOR_IMAGE_AVAILABLE) != 0;
+  BOOL imagePresentationChanged = NO;
+  if (hasImage && snapshot.image_generation != _cursorSnapshot.image_generation) {
+    NSImage *image = nil;
+    BOOL dimensionsValid = snapshot.width > 0 && snapshot.height > 0 &&
+        snapshot.width <= 1024 && snapshot.height <= 1024 &&
+        snapshot.hotspot_x < snapshot.width && snapshot.hotspot_y < snapshot.height;
+    if (_callbacks.copy_cursor_image && dimensionsValid &&
+        snapshot.image_byte_length > 0 &&
+        snapshot.image_byte_length <= 1024 * 1024) {
+      NSMutableData *bytes = [NSMutableData dataWithLength:snapshot.image_byte_length];
+      uint32_t copied = _callbacks.copy_cursor_image(
+          _callbacks.context, snapshot.image_generation,
+          static_cast<uint8_t *>(bytes.mutableBytes), snapshot.image_byte_length);
+      if (copied == snapshot.image_byte_length) {
+        image = [[NSImage alloc] initWithData:bytes];
+      }
+    }
+    if (image) {
+      image.size = NSMakeSize(snapshot.width, snapshot.height);
+      _guestCursorImage = image;
+      // Neko's X11 hotspot and NSCursor's image hotspot are both measured from
+      // the top-left pixel, despite AppKit view coordinates being bottom-up.
+      _guestCursor = [[NSCursor alloc]
+          initWithImage:image
+                hotSpot:NSMakePoint(snapshot.hotspot_x, snapshot.hotspot_y)];
+      _remoteCursorView.image = image;
+      imagePresentationChanged = YES;
+    } else if (_guestCursorImage) {
+      _guestCursorImage = nil;
+      _guestCursor = NSCursor.arrowCursor;
+      _remoteCursorView.image = nil;
+      imagePresentationChanged = YES;
+    }
+  } else if (!hasImage && _guestCursorImage) {
+    _guestCursorImage = nil;
+    _guestCursor = NSCursor.arrowCursor;
+    _remoteCursorView.image = nil;
+    imagePresentationChanged = YES;
+  }
+
+  BOOL authorizationChanged =
+      ((snapshot.flags ^ _cursorSnapshot.flags) & KL_APPKIT_CURSOR_AUTHORIZED) != 0;
+  _cursorSnapshot = snapshot;
+  if (authorizationChanged || imagePresentationChanged) {
+    [self.window invalidateCursorRectsForView:self];
+  }
+  [self updateRemoteCursorPresentation];
 }
 - (BOOL)becomeFirstResponder {
   if (_callbacks.on_focus) _callbacks.on_focus(_callbacks.context, true);
@@ -97,8 +206,8 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   if (_trackingArea) [self removeTrackingArea:_trackingArea];
   _trackingArea = [[NSTrackingArea alloc]
       initWithRect:self.bounds
-           options:NSTrackingMouseMoved | NSTrackingActiveInKeyWindow |
-                   NSTrackingInVisibleRect
+           options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                   NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect
              owner:self
           userInfo:nil];
   [self addTrackingArea:_trackingArea];
@@ -106,12 +215,25 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 }
 
 - (void)sendPointer:(NSEvent *)event kind:(uint8_t)kind button:(uint8_t)button {
-  if (!_callbacks.on_pointer) return;
   NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+  _pointerInsideVideo = NSPointInRect(point, [self fittedVideoRect]);
+  [self updateRemoteCursorPresentation];
+  if (!_callbacks.on_pointer) return;
   _callbacks.on_pointer(_callbacks.context, point.x, point.y,
                         self.bounds.size.width, self.bounds.size.height, kind,
                         button, 0, 0,
                         (event.modifierFlags & NSEventModifierFlagControl) != 0);
+}
+
+- (void)mouseEntered:(NSEvent *)event {
+  NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+  _pointerInsideVideo = NSPointInRect(point, [self fittedVideoRect]);
+  [self updateRemoteCursorPresentation];
+}
+- (void)mouseExited:(NSEvent *)event {
+  (void)event;
+  _pointerInsideVideo = NO;
+  [self updateRemoteCursorPresentation];
 }
 
 - (void)mouseMoved:(NSEvent *)event { [self sendPointer:event kind:0 button:0]; }
@@ -236,16 +358,24 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 // synchronized on this session. NSURLSession and WebRTC use different worker
 // queues, so property-level atomicity would not make a reset coherent.
 @property(nonatomic, strong) NSURLSession *urlSession;
+@property(nonatomic, strong) NSURLSessionDataTask *loginTask;
 @property(nonatomic, strong) NSURLSessionWebSocketTask *webSocket;
+@property(nonatomic, copy) NSString *baseURL;
+@property(nonatomic, copy) NSString *authToken;
 @property(nonatomic, strong) dispatch_source_t heartbeat;
 @property(nonatomic, strong) LKRTCPeerConnectionFactory *factory;
 @property(nonatomic, strong) LKRTCPeerConnection *peer;
-@property(nonatomic, strong) LKRTCDataChannel *dataChannel;
+@property(nonatomic, strong) NSMutableArray<LKRTCIceCandidate *> *pendingRemoteCandidates;
+@property(nonatomic, assign) BOOL remoteDescriptionReady;
+@property(nonatomic, strong) LKRTCDataChannel *outboundDataChannel;
+@property(nonatomic, strong) LKRTCDataChannel *inboundDataChannel;
 @property(nonatomic, strong) LKRTCVideoTrack *videoTrack;
 @property(nonatomic, strong) KLFrameSink *frameSink;
 @property(nonatomic, strong) NSTimer *statusTimer;
 @property(nonatomic, assign) BOOL closing;
 @property(nonatomic, assign) BOOL reconnectScheduled;
+- (void)addRemoteCandidate:(LKRTCIceCandidate *)candidate
+                       peer:(LKRTCPeerConnection *)peer;
 @end
 
 @implementation KLNativeSession
@@ -257,6 +387,7 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   _callbackCondition = [NSCondition new];
   _callbacksEnabled = YES;
   _transportResetCondition = [NSCondition new];
+  _pendingRemoteCandidates = [NSMutableArray new];
   _frameSink = [KLFrameSink new];
   _frameSink.callbacks = callbacks;
   _frameSink.callbackLock = [NSLock new];
@@ -350,7 +481,7 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   self.window.contentView = self.inputView;
   [self.window center];
   __weak KLNativeSession *weakSelf = self;
-  self.statusTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+  self.statusTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 30.0)
                                                      repeats:YES
                                                        block:^(NSTimer *timer) {
     (void)timer;
@@ -361,40 +492,155 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
         strongSelf.appKitCallbacks.context, buffer, sizeof(buffer));
     if (length > sizeof(buffer)) length = sizeof(buffer);
     strongSelf.inputView.statusLabel.stringValue = KLString(buffer, length);
+    [strongSelf.inputView refreshCursorObservation];
   }];
   return YES;
+}
+
+- (NSURL *)URLForBaseURL:(NSString *)baseURL
+                    path:(NSString *)suffix
+         websocketScheme:(BOOL)websocketScheme
+              queryItems:(NSArray<NSURLQueryItem *> *)queryItems {
+  NSURLComponents *components = [NSURLComponents componentsWithString:baseURL];
+  if (!components || !components.scheme || !components.host) return nil;
+  if (websocketScheme) {
+    components.scheme = [components.scheme.lowercaseString isEqualToString:@"https"] ? @"wss" : @"ws";
+  }
+  NSString *path = components.path ?: @"";
+  if ([path hasSuffix:@"/"]) path = [path substringToIndex:path.length - 1];
+  components.path = [path stringByAppendingString:suffix];
+  if (queryItems.count != 0) {
+    NSMutableArray<NSURLQueryItem *> *items =
+        [NSMutableArray arrayWithArray:components.queryItems ?: @[]];
+    [items addObjectsFromArray:queryItems];
+    components.queryItems = items;
+  }
+  return components.URL;
+}
+
+- (void)openWebSocketForBaseURL:(NSString *)baseURL
+                          token:(NSString *)token
+                        session:(NSURLSession *)urlSession {
+  NSURL *url = [self URLForBaseURL:baseURL
+                              path:@"/api/ws"
+                   websocketScheme:YES
+                        queryItems:@[[NSURLQueryItem queryItemWithName:@"token" value:token]]];
+  if (!url) {
+    [self reportError:@"invalid websocket URL"];
+    return;
+  }
+  @synchronized (self) {
+    if (self.closing || urlSession != self.urlSession) return;
+    self.webSocket = [urlSession webSocketTaskWithURL:url];
+    [self.webSocket resume];
+  }
 }
 
 - (void)connectBaseURL:(NSString *)baseURL
               username:(NSString *)username
               password:(NSString *)password {
+  NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+  configuration.timeoutIntervalForRequest = 15;
+  NSURLSession *urlSession =
+      [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
+  NSString *existingToken;
   @synchronized (self) {
-    if (self.closing) return;
-    NSURLComponents *components = [NSURLComponents componentsWithString:baseURL];
-    if (!components || !components.scheme || !components.host) {
-      [self reportError:@"invalid connection URL"];
+    if (self.closing) {
+      [urlSession invalidateAndCancel];
       return;
     }
-    components.scheme = [components.scheme.lowercaseString isEqualToString:@"https"] ? @"wss" : @"ws";
-    NSString *path = components.path ?: @"";
-    if ([path hasSuffix:@"/"]) path = [path substringToIndex:path.length - 1];
-    components.path = [path stringByAppendingString:@"/ws"];
-    NSMutableArray<NSURLQueryItem *> *items = [NSMutableArray arrayWithArray:components.queryItems ?: @[]];
-    [items addObject:[NSURLQueryItem queryItemWithName:@"password" value:password]];
-    [items addObject:[NSURLQueryItem queryItemWithName:@"username" value:username]];
-    components.queryItems = items;
-    NSURL *url = components.URL;
-    if (!url) {
-      [self reportError:@"invalid websocket URL"];
-      return;
-    }
-
-    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
-    configuration.timeoutIntervalForRequest = 15;
-    self.urlSession = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
-    self.webSocket = [self.urlSession webSocketTaskWithURL:url];
-    [self.webSocket resume];
+    self.baseURL = baseURL;
+    self.urlSession = urlSession;
+    existingToken = self.authToken;
   }
+  if (existingToken.length != 0) {
+    [self openWebSocketForBaseURL:baseURL token:existingToken session:urlSession];
+    return;
+  }
+
+  NSURL *loginURL = [self URLForBaseURL:baseURL
+                                   path:@"/api/login"
+                        websocketScheme:NO
+                             queryItems:@[]];
+  if (!loginURL) {
+    [self reportError:@"invalid login URL"];
+    return;
+  }
+  NSDictionary *credentials = @{ @"username" : username, @"password" : password };
+  NSData *body = [NSJSONSerialization dataWithJSONObject:credentials options:0 error:nil];
+  if (!body) {
+    [self reportError:@"could not encode login request"];
+    return;
+  }
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:loginURL];
+  request.HTTPMethod = @"POST";
+  request.HTTPBody = body;
+  [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+
+  __weak KLNativeSession *weakSelf = self;
+  __block NSURLSessionDataTask *loginTask = nil;
+  loginTask = [urlSession dataTaskWithRequest:request
+                           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    KLNativeSession *strongSelf = weakSelf;
+    if (!strongSelf) return;
+    NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class]
+                                  ? (NSHTTPURLResponse *)response
+                                  : nil;
+    NSDictionary *value = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSString *token = [value isKindOfClass:NSDictionary.class] &&
+                              [value[@"token"] isKindOfClass:NSString.class]
+                          ? value[@"token"]
+                          : nil;
+    @synchronized (strongSelf) {
+      if (strongSelf.closing || strongSelf.urlSession != urlSession ||
+          strongSelf.loginTask != loginTask) return;
+      strongSelf.loginTask = nil;
+      if (!error && http.statusCode >= 200 && http.statusCode < 300 && token.length != 0) {
+        strongSelf.authToken = token;
+      }
+    }
+    if (error || http.statusCode < 200 || http.statusCode >= 300 || token.length == 0) {
+      [strongSelf reportError:@"Live View authentication failed"];
+      return;
+    }
+    [strongSelf openWebSocketForBaseURL:baseURL token:token session:urlSession];
+  }];
+  @synchronized (self) {
+    if (self.closing || self.urlSession != urlSession) {
+      [loginTask cancel];
+      return;
+    }
+    self.loginTask = loginTask;
+  }
+  [loginTask resume];
+}
+
+- (void)logoutBaseURL:(NSString *)baseURL token:(NSString *)token {
+  if (baseURL.length == 0 || token.length == 0) return;
+  NSURL *logoutURL = [self URLForBaseURL:baseURL
+                                    path:@"/api/logout"
+                         websocketScheme:NO
+                              queryItems:@[]];
+  if (!logoutURL) return;
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:logoutURL];
+  request.HTTPMethod = @"POST";
+  [request setValue:[@"Bearer " stringByAppendingString:token]
+      forHTTPHeaderField:@"Authorization"];
+  NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+  configuration.timeoutIntervalForRequest = 0.5;
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+  dispatch_semaphore_t completed = dispatch_semaphore_create(0);
+  NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+                                         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    (void)data;
+    (void)response;
+    (void)error;
+    dispatch_semaphore_signal(completed);
+  }];
+  [task resume];
+  dispatch_semaphore_wait(completed,
+                          dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC));
+  [session invalidateAndCancel];
 }
 
 - (void)receiveNextMessage {
@@ -488,9 +734,9 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
     return;
   }
   LKRTCDataChannelConfiguration *dataConfiguration = [LKRTCDataChannelConfiguration new];
-  LKRTCDataChannel *dataChannel =
+  LKRTCDataChannel *outboundDataChannel =
       [peer dataChannelForLabel:@"data" configuration:dataConfiguration];
-  dataChannel.delegate = self;
+  outboundDataChannel.delegate = self;
 
   BOOL adopted = NO;
   [self.transportResetCondition lock];
@@ -499,15 +745,17 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
       if (!self.closing && !self.peer) {
         self.factory = factory;
         self.peer = peer;
-        self.dataChannel = dataChannel;
+        if (!self.pendingRemoteCandidates) self.pendingRemoteCandidates = [NSMutableArray new];
+        self.remoteDescriptionReady = NO;
+        self.outboundDataChannel = outboundDataChannel;
         adopted = YES;
       }
     }
   }
   [self.transportResetCondition unlock];
   if (!adopted) {
-    dataChannel.delegate = nil;
-    [dataChannel close];
+    outboundDataChannel.delegate = nil;
+    [outboundDataChannel close];
     peer.delegate = nil;
     [peer close];
     return;
@@ -538,6 +786,16 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
     if (error) {
       [remoteSelf reportError:@"set remote description failed"];
       return;
+    }
+    NSArray<LKRTCIceCandidate *> *pendingCandidates;
+    @synchronized (remoteSelf) {
+      if (remoteSelf.closing || remoteSelf.peer != remotePeer) return;
+      remoteSelf.remoteDescriptionReady = YES;
+      pendingCandidates = [remoteSelf.pendingRemoteCandidates copy];
+      [remoteSelf.pendingRemoteCandidates removeAllObjects];
+    }
+    for (LKRTCIceCandidate *candidate in pendingCandidates) {
+      [remoteSelf addRemoteCandidate:candidate peer:remotePeer];
     }
     if (answer) return;
     LKRTCMediaConstraints *constraints =
@@ -571,24 +829,11 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   }];
 }
 
-- (void)addCandidateJSON:(NSString *)candidateJSON {
-  NSData *data = [candidateJSON dataUsingEncoding:NSUTF8StringEncoding];
-  NSDictionary *value = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-  if (![value isKindOfClass:NSDictionary.class]) return;
-  NSString *candidate = [value[@"candidate"] isKindOfClass:NSString.class] ? value[@"candidate"] : nil;
-  NSString *mid = [value[@"sdpMid"] isKindOfClass:NSString.class] ? value[@"sdpMid"] : nil;
-  NSNumber *line = [value[@"sdpMLineIndex"] isKindOfClass:NSNumber.class] ? value[@"sdpMLineIndex"] : @0;
-  if (!candidate) return;
-  LKRTCPeerConnection *peer;
-  @synchronized (self) {
-    peer = self.closing ? nil : self.peer;
-  }
-  if (!peer) return;
-  LKRTCIceCandidate *ice = [[LKRTCIceCandidate alloc]
-      initWithSdp:candidate sdpMLineIndex:line.intValue sdpMid:mid];
+- (void)addRemoteCandidate:(LKRTCIceCandidate *)candidate
+                       peer:(LKRTCPeerConnection *)peer {
   __weak KLNativeSession *weakSelf = self;
   __weak LKRTCPeerConnection *weakPeer = peer;
-  [peer addIceCandidate:ice completionHandler:^(NSError *error) {
+  [peer addIceCandidate:candidate completionHandler:^(NSError *error) {
     KLNativeSession *strongSelf = weakSelf;
     LKRTCPeerConnection *strongPeer = weakPeer;
     if (error && strongSelf && strongPeer && [strongSelf isCurrentPeer:strongPeer]) {
@@ -597,13 +842,37 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   }];
 }
 
+- (void)addCandidateJSON:(NSString *)candidateJSON {
+  NSData *data = [candidateJSON dataUsingEncoding:NSUTF8StringEncoding];
+  NSDictionary *value = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+  if (![value isKindOfClass:NSDictionary.class]) return;
+  NSString *candidate = [value[@"candidate"] isKindOfClass:NSString.class] ? value[@"candidate"] : nil;
+  NSString *mid = [value[@"sdpMid"] isKindOfClass:NSString.class] ? value[@"sdpMid"] : nil;
+  NSNumber *line = [value[@"sdpMLineIndex"] isKindOfClass:NSNumber.class] ? value[@"sdpMLineIndex"] : @0;
+  if (!candidate) return;
+  LKRTCIceCandidate *ice = [[LKRTCIceCandidate alloc]
+      initWithSdp:candidate sdpMLineIndex:line.intValue sdpMid:mid];
+  LKRTCPeerConnection *peer;
+  @synchronized (self) {
+    if (self.closing) return;
+    peer = self.peer;
+    if (!peer || !self.remoteDescriptionReady) {
+      [self.pendingRemoteCandidates addObject:ice];
+      return;
+    }
+  }
+  [self addRemoteCandidate:ice peer:peer];
+}
+
 - (void)resetTransport {
   dispatch_source_t heartbeat;
   KLFrameSink *frameSink;
   KLInputView *inputView;
   LKRTCVideoTrack *videoTrack;
-  LKRTCDataChannel *dataChannel;
+  LKRTCDataChannel *outboundDataChannel;
+  LKRTCDataChannel *inboundDataChannel;
   LKRTCPeerConnection *peer;
+  NSURLSessionDataTask *loginTask;
   NSURLSessionWebSocketTask *webSocket;
   NSURLSession *urlSession;
   LKRTCPeerConnectionFactory *factory;
@@ -619,17 +888,24 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
       inputView = self.inputView;
       videoTrack = self.videoTrack;
       self.videoTrack = nil;
-      dataChannel = self.dataChannel;
-      self.dataChannel = nil;
+      outboundDataChannel = self.outboundDataChannel;
+      self.outboundDataChannel = nil;
+      inboundDataChannel = self.inboundDataChannel;
+      self.inboundDataChannel = nil;
       peer = self.peer;
       self.peer = nil;
+      self.pendingRemoteCandidates = [NSMutableArray new];
+      self.remoteDescriptionReady = NO;
+      loginTask = self.loginTask;
+      self.loginTask = nil;
       webSocket = self.webSocket;
       self.webSocket = nil;
       urlSession = self.urlSession;
       self.urlSession = nil;
       factory = self.factory;
       self.factory = nil;
-      dataChannel.delegate = nil;
+      outboundDataChannel.delegate = nil;
+      inboundDataChannel.delegate = nil;
       peer.delegate = nil;
     }
     if (heartbeat) dispatch_source_cancel(heartbeat);
@@ -640,7 +916,9 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
       [videoTrack removeRenderer:frameSink];
       if (inputView) [videoTrack removeRenderer:inputView.videoView];
     }
-    [dataChannel close];
+    [loginTask cancel];
+    [outboundDataChannel close];
+    [inboundDataChannel close];
     [peer close];
     [webSocket cancelWithCloseCode:NSURLSessionWebSocketCloseCodeNormalClosure reason:nil];
     [urlSession invalidateAndCancel];
@@ -655,15 +933,21 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 
 - (void)closeNative {
   BOOL shouldReset = NO;
+  NSString *baseURL;
+  NSString *authToken;
   @synchronized (self) {
     if (self.closing) return;
     self.closing = YES;
+    baseURL = self.baseURL;
+    authToken = self.authToken;
+    self.authToken = nil;
     [self.statusTimer invalidate];
     self.statusTimer = nil;
     shouldReset = YES;
   }
   if (shouldReset) {
     [self disableCallbacks];
+    [self logoutBaseURL:baseURL token:authToken];
     [self resetTransport];
   }
 }
@@ -780,11 +1064,14 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 - (void)peerConnection:(LKRTCPeerConnection *)peerConnection didOpenDataChannel:(LKRTCDataChannel *)dataChannel {
   @synchronized (self) {
     if (self.closing || peerConnection != self.peer) return;
-    // Kernel's client creates the outbound `data` channel. Do not replace that
-    // channel if a future server also opens a channel toward the client.
-    if (!self.dataChannel || self.dataChannel.readyState == LKRTCDataChannelStateClosed) {
-      self.dataChannel = dataChannel;
-      self.dataChannel.delegate = self;
+    // Input stays on the client-created channel. Retain Neko's independently
+    // created channel too; cursor observations can arrive on either stream
+    // when Neko's pinned legacy compatibility handoff changes its active
+    // channel after SCTP setup.
+    if (!self.inboundDataChannel ||
+        self.inboundDataChannel.readyState == LKRTCDataChannelStateClosed) {
+      self.inboundDataChannel = dataChannel;
+      self.inboundDataChannel.delegate = self;
     }
   }
 }
@@ -801,12 +1088,28 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 
 - (void)dataChannelDidChangeState:(LKRTCDataChannel *)dataChannel {
   @synchronized (self) {
-    if (dataChannel != self.dataChannel) return;
+    if (dataChannel != self.outboundDataChannel) return;
     if (dataChannel.readyState == LKRTCDataChannelStateOpen) [self emitState:KL_NATIVE_DATA_OPEN];
     if (dataChannel.readyState == LKRTCDataChannelStateClosed) [self emitState:KL_NATIVE_DATA_CLOSED];
   }
 }
-- (void)dataChannel:(LKRTCDataChannel *)dataChannel didReceiveMessageWithBuffer:(LKRTCDataBuffer *)buffer { (void)dataChannel; (void)buffer; }
+- (void)dataChannel:(LKRTCDataChannel *)dataChannel
+    didReceiveMessageWithBuffer:(LKRTCDataBuffer *)buffer {
+  @synchronized (self) {
+    BOOL knownChannel = dataChannel == self.inboundDataChannel ||
+        dataChannel == self.outboundDataChannel;
+    if (self.closing || !knownChannel ||
+        !buffer.isBinary || !self.callbacks.on_data_message ||
+        ![self beginCallback]) return;
+    // Keep resetTransport serialized behind this callback. Otherwise an old
+    // channel can pass the identity check, pause here, and repopulate cursor
+    // state after the reconnect path has cleared it.
+    NSData *data = buffer.data;
+    self.callbacks.on_data_message(
+        self.callbacks.context, static_cast<const uint8_t *>(data.bytes), data.length);
+    [self endCallback];
+  }
+}
 - (void)videoView:(id<LKRTCVideoRenderer>)videoView didChangeVideoSize:(CGSize)size {
   (void)videoView;
   if (self.inputView) self.inputView.videoSize = size;
@@ -835,7 +1138,7 @@ extern "C" bool kl_native_attach_appkit(KLNativeSessionHandle *handle,
   }
 }
 
-extern "C" void kl_native_connect_websocket(
+extern "C" void kl_native_connect(
     KLNativeSessionHandle *handle, const uint8_t *base_url, size_t base_url_len,
     const uint8_t *username, size_t username_len, const uint8_t *password,
     size_t password_len) {
@@ -870,10 +1173,11 @@ extern "C" bool kl_native_send_data(KLNativeSessionHandle *handle,
                                       const uint8_t *bytes, size_t len) {
   KLNativeSession *session = KLSession(handle);
   @synchronized (session) {
-    if (session.closing || !session.dataChannel ||
-        session.dataChannel.readyState != LKRTCDataChannelStateOpen) return false;
+    if (session.closing || !session.outboundDataChannel ||
+        session.outboundDataChannel.readyState != LKRTCDataChannelStateOpen) return false;
     NSData *data = [NSData dataWithBytes:bytes length:len];
-    return [session.dataChannel sendData:[[LKRTCDataBuffer alloc] initWithData:data isBinary:YES]];
+    return [session.outboundDataChannel
+        sendData:[[LKRTCDataBuffer alloc] initWithData:data isBinary:YES]];
   }
 }
 

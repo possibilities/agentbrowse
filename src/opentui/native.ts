@@ -7,10 +7,12 @@ import {
   type LiveViewConnectionDescriptor,
 } from "../../client/connection.ts";
 
-const ABI_VERSION = 1;
+const ABI_VERSION = 2;
 const SNAPSHOT_SIZE = 32;
 const METRICS_SIZE = 96;
 const FRAME_INFO_SIZE = 48;
+const CURSOR_SNAPSHOT_SIZE = 64;
+const MAX_CURSOR_IMAGE_BYTES = 1024 * 1024;
 const CREATE_ERROR_SIZE = 256;
 const MAX_OUTPUT_DIMENSION = 8192;
 const MAX_OUTPUT_PIXELS = 32 * 1024 * 1024;
@@ -38,6 +40,14 @@ const nativeSymbols = {
   },
   ab_live_view_session_copy_status: {
     args: [FFIType.ptr, FFIType.ptr, FFIType.u32],
+    returns: FFIType.u32,
+  },
+  ab_live_view_session_cursor_snapshot: {
+    args: [FFIType.ptr, FFIType.ptr, FFIType.u32],
+    returns: FFIType.u32,
+  },
+  ab_live_view_session_copy_cursor_image: {
+    args: [FFIType.ptr, FFIType.u64, FFIType.ptr, FFIType.u32],
     returns: FFIType.u32,
   },
   ab_live_view_session_acquire_frame: {
@@ -131,6 +141,21 @@ export interface NativeFrameInfo {
   rotationDegrees: number;
   generation: bigint;
   timestampUs: bigint;
+}
+
+export interface NativeCursorSnapshot {
+  imageAvailable: boolean;
+  positionAvailable: boolean;
+  width: number;
+  height: number;
+  hotspotX: number;
+  hotspotY: number;
+  positionX: number;
+  positionY: number;
+  imageByteLength: number;
+  generation: bigint;
+  imageGeneration: bigint;
+  positionGeneration: bigint;
 }
 
 export function defaultNativeLibraryPath(): string {
@@ -236,6 +261,49 @@ export class NativeLiveViewSession {
       output.byteLength,
     );
     return output.subarray(0, written).toString();
+  }
+
+  cursorSnapshot(): NativeCursorSnapshot {
+    const output = Buffer.alloc(CURSOR_SNAPSHOT_SIZE);
+    checkResult(
+      "cursor snapshot",
+      this.native.symbols.ab_live_view_session_cursor_snapshot(
+        this.requireHandle(),
+        ptr(output),
+        output.byteLength,
+      ),
+    );
+    const flags = output.readUInt32LE(8);
+    const imageByteLength = output.readUInt32LE(36);
+    if (imageByteLength > MAX_CURSOR_IMAGE_BYTES) {
+      throw new Error(`native Live View cursor image exceeds ${MAX_CURSOR_IMAGE_BYTES} bytes`);
+    }
+    return {
+      imageAvailable: (flags & (1 << 0)) !== 0,
+      positionAvailable: (flags & (1 << 1)) !== 0,
+      width: output.readUInt32LE(12),
+      height: output.readUInt32LE(16),
+      hotspotX: output.readUInt32LE(20),
+      hotspotY: output.readUInt32LE(24),
+      positionX: output.readUInt32LE(28),
+      positionY: output.readUInt32LE(32),
+      imageByteLength,
+      generation: output.readBigUInt64LE(40),
+      imageGeneration: output.readBigUInt64LE(48),
+      positionGeneration: output.readBigUInt64LE(56),
+    };
+  }
+
+  cursorImage(snapshot = this.cursorSnapshot()): Uint8Array | null {
+    if (!snapshot.imageAvailable || snapshot.imageByteLength === 0) return null;
+    const output = Buffer.alloc(snapshot.imageByteLength);
+    const written = this.native.symbols.ab_live_view_session_copy_cursor_image(
+      this.requireHandle(),
+      snapshot.imageGeneration,
+      ptr(output),
+      output.byteLength,
+    );
+    return written === output.byteLength ? output : null;
   }
 
   acquireFrame(afterGeneration: bigint): NativeFrameLease | null {

@@ -1,5 +1,7 @@
 const std = @import("std");
 const connection = @import("../app/connection.zig");
+const cursor_packets = @import("../protocol/cursor_packets.zig");
+const cursor_state = @import("cursor_state.zig");
 const frame_mod = @import("frame.zig");
 const frame_queue = @import("frame_queue.zig");
 const input_packets = @import("../protocol/input_packets.zig");
@@ -29,6 +31,7 @@ pub const Session = struct {
     lifecycle: std.atomic.Value(u8) = .init(@intFromEnum(state_mod.State.idle)),
     data_open: std.atomic.Value(u8) = .init(0),
     authorized: std.atomic.Value(u8) = .init(0),
+    remote_controller: std.atomic.Value(u8) = .init(0),
     implicit_hosting: std.atomic.Value(u8) = .init(0),
     control_requested: std.atomic.Value(u8) = .init(0),
     closed: std.atomic.Value(u8) = .init(0),
@@ -53,6 +56,7 @@ pub const Session = struct {
     status_bytes: [256]u8 = [_]u8{0} ** 256,
     status_len: u16 = 0,
     frames: frame_queue.Queue = .{},
+    cursor: cursor_state.State = .{},
 
     pub fn create(allocator: std.mem.Allocator, descriptor: connection.Descriptor) !*Session {
         const self = try allocator.create(Session);
@@ -61,6 +65,7 @@ pub const Session = struct {
         const callbacks: native.Callbacks = .{
             .context = self,
             .on_websocket_message = onWebSocketMessage,
+            .on_data_message = onDataMessage,
             .on_local_description = onLocalDescription,
             .on_local_candidate = onLocalCandidate,
             .on_state = onNativeState,
@@ -81,7 +86,7 @@ pub const Session = struct {
     pub fn connect(self: *Session) void {
         self.setLifecycle(.connecting);
         self.setStatus("Connecting…");
-        native.kl_native_connect_websocket(
+        native.kl_native_connect(
             self.native_handle,
             self.descriptor.base_url.ptr,
             self.descriptor.base_url.len,
@@ -94,7 +99,7 @@ pub const Session = struct {
 
     pub fn close(self: *Session) void {
         if (self.closed.swap(1, .acq_rel) != 0) return;
-        self.releaseHeldInput();
+        self.invalidateTransportState();
         self.setLifecycle(.closed);
         native.kl_native_close(self.native_handle);
         // Native close serializes behind any callback that was already using
@@ -109,6 +114,7 @@ pub const Session = struct {
         // releasing any Session-owned fields they may still be using.
         native.kl_native_destroy(self.native_handle);
         self.frames.clear();
+        self.cursor.deinit(self.allocator);
         lock(&self.id_mutex);
         const old_id = self.self_id;
         self.self_id = null;
@@ -129,6 +135,14 @@ pub const Session = struct {
         return self.frames.latestGeneration();
     }
 
+    pub fn cursorSnapshot(self: *Session) cursor_state.Snapshot {
+        return self.cursor.snapshot();
+    }
+
+    pub fn copyCursorImage(self: *Session, image_generation: u64, output: []u8) usize {
+        return self.cursor.copyImage(image_generation, output);
+    }
+
     pub fn nativeHandle(self: *Session) *native.Session {
         return self.native_handle;
     }
@@ -146,6 +160,10 @@ pub const Session = struct {
 
     pub fn isAuthorized(self: *const Session) bool {
         return self.authorized.load(.acquire) != 0;
+    }
+
+    pub fn hasRemoteController(self: *const Session) bool {
+        return self.remote_controller.load(.acquire) != 0;
     }
 
     pub fn isControlRequested(self: *const Session) bool {
@@ -185,7 +203,7 @@ pub const Session = struct {
         if (self.descriptor.read_only or self.data_open.load(.acquire) == 0) return false;
         if (self.authorized.load(.acquire) != 0) return true;
         if (self.control_requested.swap(1, .acq_rel) != 0) return false;
-        if (!self.sendJson(.{ .event = "control/request" })) {
+        if (!self.sendEventEmpty("control/request")) {
             self.control_requested.store(0, .release);
             return false;
         }
@@ -197,9 +215,10 @@ pub const Session = struct {
         if (self.descriptor.read_only) return false;
         self.releaseHeldInput();
         self.authorized.store(0, .release);
+        self.remote_controller.store(0, .release);
         self.implicit_hosting.store(0, .release);
         self.control_requested.store(0, .release);
-        return self.sendJson(.{ .event = "control/release" });
+        return self.sendEventEmpty("control/release");
     }
 
     pub fn movePointer(self: *Session, x: u16, y: u16) bool {
@@ -236,7 +255,7 @@ pub const Session = struct {
 
     pub fn paste(self: *Session, text: []const u8) bool {
         if (text.len > 1024 * 1024 or !self.ensureInput()) return false;
-        if (!self.sendJson(.{ .event = "control/clipboard", .text = text })) return false;
+        if (!self.sendEvent("clipboard/set", .{ .text = text })) return false;
         native.kl_native_schedule_paste(self.native_handle, 80);
         return true;
     }
@@ -299,10 +318,7 @@ pub const Session = struct {
     fn scheduleReconnect(self: *Session) void {
         if (self.closed.load(.acquire) != 0) return;
         if (self.reconnect_scheduled.swap(1, .acq_rel) != 0) return;
-        self.authorized.store(0, .release);
-        self.control_requested.store(0, .release);
-        self.releaseHeldInput();
-        self.data_open.store(0, .release);
+        self.invalidateTransportState();
         self.setLifecycle(.reconnecting);
         self.setStatus("Connection interrupted · reconnecting…");
         const attempt = self.reconnect_attempts.fetchAdd(1, .acq_rel);
@@ -315,79 +331,147 @@ pub const Session = struct {
         return native.kl_native_send_websocket(self.native_handle, bytes.ptr, bytes.len);
     }
 
+    fn sendEvent(self: *Session, event: []const u8, payload: anytype) bool {
+        return self.sendJson(.{ .event = event, .payload = payload });
+    }
+
+    fn sendEventEmpty(self: *Session, event: []const u8) bool {
+        return self.sendJson(.{ .event = event });
+    }
+
+    fn requestPointerlessStream(self: *Session) bool {
+        return self.sendEvent("signal/request", .{
+            .video = .{
+                .selector = .{
+                    .type = "exact",
+                    .id = "main",
+                    .bitrate = @as(u64, 0),
+                },
+            },
+            .audio = .{ .disabled = false },
+            .auto = false,
+        });
+    }
+
     fn handleWebSocketMessage(self: *Session, bytes: []const u8) !void {
         switch (try signaling.eventFromJson(self.allocator, bytes)) {
             .signal_provide => {
                 const Payload = struct {
                     event: []const u8,
-                    id: []const u8,
-                    lite: bool,
-                    ice: std.json.Value,
-                    sdp: []const u8,
+                    payload: struct {
+                        sdp: []const u8,
+                        iceservers: std.json.Value,
+                    },
                 };
                 const parsed = try std.json.parseFromSlice(Payload, self.allocator, bytes, .{ .ignore_unknown_fields = true });
                 defer parsed.deinit();
-                try self.replaceSelfId(parsed.value.id);
-                const ice = try std.json.Stringify.valueAlloc(self.allocator, parsed.value.ice, .{});
+                const ice = try std.json.Stringify.valueAlloc(self.allocator, parsed.value.payload.iceservers, .{});
                 defer self.allocator.free(ice);
-                native.kl_native_create_peer(self.native_handle, ice.ptr, ice.len, parsed.value.lite);
-                native.kl_native_set_remote_description(self.native_handle, false, parsed.value.sdp.ptr, parsed.value.sdp.len);
+                native.kl_native_create_peer(self.native_handle, ice.ptr, ice.len, false);
+                native.kl_native_set_remote_description(
+                    self.native_handle,
+                    false,
+                    parsed.value.payload.sdp.ptr,
+                    parsed.value.payload.sdp.len,
+                );
             },
             .signal_offer, .signal_answer => |event| {
-                const Payload = struct { event: []const u8, sdp: []const u8 };
+                const Payload = struct {
+                    event: []const u8,
+                    payload: struct { sdp: []const u8 },
+                };
                 const parsed = try std.json.parseFromSlice(Payload, self.allocator, bytes, .{ .ignore_unknown_fields = true });
                 defer parsed.deinit();
-                native.kl_native_set_remote_description(self.native_handle, event == .signal_answer, parsed.value.sdp.ptr, parsed.value.sdp.len);
+                native.kl_native_set_remote_description(
+                    self.native_handle,
+                    event == .signal_answer,
+                    parsed.value.payload.sdp.ptr,
+                    parsed.value.payload.sdp.len,
+                );
             },
             .signal_candidate => {
-                const Payload = struct { event: []const u8, data: []const u8 };
+                const Payload = struct { event: []const u8, payload: std.json.Value };
                 const parsed = try std.json.parseFromSlice(Payload, self.allocator, bytes, .{ .ignore_unknown_fields = true });
                 defer parsed.deinit();
-                native.kl_native_add_ice_candidate(self.native_handle, parsed.value.data.ptr, parsed.value.data.len);
+                const candidate = try std.json.Stringify.valueAlloc(self.allocator, parsed.value.payload, .{});
+                defer self.allocator.free(candidate);
+                native.kl_native_add_ice_candidate(self.native_handle, candidate.ptr, candidate.len);
             },
             .system_init => {
                 const Payload = struct {
                     event: []const u8,
-                    heartbeat_interval: u32,
-                    implicit_hosting: bool = false,
+                    payload: struct {
+                        session_id: []const u8,
+                        settings: struct {
+                            heartbeat_interval: u32,
+                            implicit_hosting: bool = false,
+                        },
+                        control_host: struct {
+                            has_host: bool,
+                            host_id: []const u8 = "",
+                        },
+                    },
                 };
                 const parsed = try std.json.parseFromSlice(Payload, self.allocator, bytes, .{ .ignore_unknown_fields = true });
                 defer parsed.deinit();
-                self.implicit_hosting.store(@intFromBool(parsed.value.implicit_hosting), .release);
-                if (parsed.value.heartbeat_interval > 0) {
-                    native.kl_native_start_heartbeat(self.native_handle, parsed.value.heartbeat_interval * 1000);
+                try self.replaceSelfId(parsed.value.payload.session_id);
+                self.implicit_hosting.store(@intFromBool(parsed.value.payload.settings.implicit_hosting), .release);
+                self.applyControlHost(
+                    parsed.value.payload.control_host.has_host,
+                    parsed.value.payload.control_host.host_id,
+                );
+                if (parsed.value.payload.settings.heartbeat_interval > 0) {
+                    native.kl_native_start_heartbeat(
+                        self.native_handle,
+                        parsed.value.payload.settings.heartbeat_interval * 1000,
+                    );
                 }
             },
-            .control_locked => {
-                const Payload = struct { event: []const u8, id: []const u8 };
+            .control_host => {
+                const Payload = struct {
+                    event: []const u8,
+                    payload: struct {
+                        has_host: bool,
+                        host_id: []const u8 = "",
+                    },
+                };
                 const parsed = try std.json.parseFromSlice(Payload, self.allocator, bytes, .{ .ignore_unknown_fields = true });
                 defer parsed.deinit();
-                if (self.descriptor.read_only) {
-                    self.authorized.store(0, .release);
-                    self.control_requested.store(0, .release);
-                    self.releaseHeldInput();
-                    self.setStatus("Connected · read-only");
-                } else if (self.isSelf(parsed.value.id)) {
-                    self.authorized.store(1, .release);
-                    self.control_requested.store(0, .release);
-                    self.setStatus(if (self.descriptor.read_only) "Connected · read-only" else "Connected · controlling");
-                } else {
-                    self.authorized.store(0, .release);
-                    self.releaseHeldInput();
-                    self.setStatus("Connected · waiting for control");
-                }
+                self.applyControlHost(parsed.value.payload.has_host, parsed.value.payload.host_id);
             },
             .control_release => {
                 self.authorized.store(0, .release);
+                self.remote_controller.store(0, .release);
+                self.control_requested.store(0, .release);
                 self.releaseHeldInput();
+                self.cursor.clearPosition();
                 self.setStatus(if (self.descriptor.read_only) "Connected · read-only" else "Connected · control released");
             },
-            .system_disconnect, .system_error => {
+            .system_disconnect, .signal_close => {
+                self.invalidateTransportState();
                 self.setLifecycle(.failed);
-                self.releaseHeldInput();
                 self.setStatus("Connection failed");
             },
             else => {},
+        }
+    }
+
+    fn applyControlHost(self: *Session, has_host: bool, host_id: []const u8) void {
+        self.control_requested.store(0, .release);
+        self.cursor.clearPosition();
+        const host_is_self = has_host and self.isSelf(host_id);
+        self.remote_controller.store(@intFromBool(has_host and !host_is_self), .release);
+        if (self.descriptor.read_only) {
+            self.authorized.store(0, .release);
+            self.releaseHeldInput();
+            self.setStatus("Connected · read-only");
+        } else if (host_is_self) {
+            self.authorized.store(1, .release);
+            self.setStatus("Connected · controlling");
+        } else {
+            self.authorized.store(0, .release);
+            self.releaseHeldInput();
+            self.setStatus(if (has_host) "Connected · waiting for control" else "Connected · control released");
         }
     }
 
@@ -411,6 +495,22 @@ pub const Session = struct {
         if (self.authorized.load(.acquire) != 0) return true;
         _ = self.requestControl();
         return false;
+    }
+
+    fn invalidateTransportState(self: *Session) void {
+        // Revoke the gate first so no concurrent callback can enqueue new
+        // input while failure teardown is clearing locally held state.
+        self.revokeTransportState();
+        self.releaseHeldInput();
+    }
+
+    fn revokeTransportState(self: *Session) void {
+        self.authorized.store(0, .release);
+        self.remote_controller.store(0, .release);
+        self.control_requested.store(0, .release);
+        self.implicit_hosting.store(0, .release);
+        self.data_open.store(0, .release);
+        self.cursor.reset(self.allocator);
     }
 
     fn sendPacket(self: *Session, bytes: []const u8) bool {
@@ -454,37 +554,48 @@ fn fromContext(context: ?*anyopaque) *Session {
 fn onWebSocketMessage(context: ?*anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void {
     const self = fromContext(context);
     self.handleWebSocketMessage(bytes[0..len]) catch {
+        self.invalidateTransportState();
         self.setLifecycle(.failed);
-        self.releaseHeldInput();
         self.setStatus("Protocol error");
     };
+}
+
+fn onDataMessage(context: ?*anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void {
+    const self = fromContext(context);
+    const packet = cursor_packets.parse(bytes[0..len]) catch return;
+    const value = packet orelse return;
+    switch (value) {
+        .position => |position| self.cursor.updatePosition(position),
+        .image => |image| self.cursor.updateImage(self.allocator, image) catch {},
+    }
 }
 
 fn onLocalDescription(context: ?*anyopaque, answer: bool, bytes: [*]const u8, len: usize) callconv(.c) void {
     const self = fromContext(context);
     const sdp = bytes[0..len];
     if (answer) {
-        _ = self.sendJson(.{ .event = "signal/answer", .sdp = sdp, .displayname = self.descriptor.username });
+        _ = self.sendEvent("signal/answer", .{ .sdp = sdp });
     } else {
-        _ = self.sendJson(.{ .event = "signal/offer", .sdp = sdp });
+        _ = self.sendEvent("signal/offer", .{ .sdp = sdp });
     }
 }
 
 fn onLocalCandidate(context: ?*anyopaque, sdp_ptr: [*]const u8, sdp_len: usize, mid_ptr: [*]const u8, mid_len: usize, mline_index: i32) callconv(.c) void {
     const self = fromContext(context);
-    const inner = std.json.Stringify.valueAlloc(self.allocator, .{
+    _ = self.sendEvent("signal/candidate", .{
         .candidate = sdp_ptr[0..sdp_len],
         .sdpMid = mid_ptr[0..mid_len],
         .sdpMLineIndex = mline_index,
-    }, .{}) catch return;
-    defer self.allocator.free(inner);
-    _ = self.sendJson(.{ .event = "signal/candidate", .data = inner });
+    });
 }
 
 fn onNativeState(context: ?*anyopaque, native_state: native.State) callconv(.c) void {
     const self = fromContext(context);
     switch (native_state) {
-        .ws_open => self.setStatus("Signaling connected · negotiating"),
+        .ws_open => {
+            self.setStatus("Signaling connected · negotiating");
+            if (!self.requestPointerlessStream()) self.setStatus("Could not request Live View stream");
+        },
         .ws_closed, .peer_failed => {
             self.scheduleReconnect();
         },
@@ -495,16 +606,18 @@ fn onNativeState(context: ?*anyopaque, native_state: native.State) callconv(.c) 
             self.setStatus(if (self.descriptor.read_only) "Connected · read-only" else "Connected · waiting for control");
         },
         .peer_disconnected => {
+            self.invalidateTransportState();
             self.setLifecycle(.reconnecting);
-            self.releaseHeldInput();
             self.setStatus("Connection interrupted · recovering…");
         },
         .data_open => self.data_open.store(1, .release),
-        .data_closed => {
-            self.data_open.store(0, .release);
-            self.releaseHeldInput();
-        },
+        .data_closed => self.invalidateTransportState(),
         .reconnect_ready => {
+            // Native reset has now detached both old data channels. Clear once
+            // more after that quiescence point so a cursor callback that ran
+            // between the initial failure notification and reset cannot carry
+            // stale observation state into the replacement transport.
+            self.invalidateTransportState();
             self.reconnect_scheduled.store(0, .release);
             if (self.closed.load(.acquire) == 0) self.connect();
         },
@@ -515,8 +628,8 @@ fn onNativeError(context: ?*anyopaque, bytes: [*]const u8, len: usize) callconv(
     const self = fromContext(context);
     _ = bytes;
     _ = len;
+    self.invalidateTransportState();
     self.setLifecycle(.failed);
-    self.releaseHeldInput();
     self.setStatus("Native transport error");
 }
 
@@ -567,4 +680,31 @@ fn onPasteReady(context: ?*anyopaque) callconv(.c) void {
 
 fn lock(mutex: *std.atomic.Mutex) void {
     while (!mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+test "transport state revocation closes every input gate" {
+    var session: Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{
+            .version = connection.current_version,
+            .label = "failure-test",
+            .base_url = "http://127.0.0.1",
+        },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    session.data_open.store(1, .release);
+    session.authorized.store(1, .release);
+    session.remote_controller.store(1, .release);
+    session.control_requested.store(1, .release);
+    session.implicit_hosting.store(1, .release);
+    session.cursor.updatePosition(.{ .x = 10, .y = 20 });
+
+    session.revokeTransportState();
+
+    try std.testing.expect(!session.isDataOpen());
+    try std.testing.expect(!session.isAuthorized());
+    try std.testing.expect(!session.hasRemoteController());
+    try std.testing.expect(!session.isControlRequested());
+    try std.testing.expect(!session.cursorSnapshot().position_available);
 }

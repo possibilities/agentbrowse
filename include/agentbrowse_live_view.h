@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-#define AB_LIVE_VIEW_ABI_VERSION 1u
+#define AB_LIVE_VIEW_ABI_VERSION 2u
 
 typedef struct ABLiveViewSession ABLiveViewSession;
 typedef struct ABLiveViewFrameLease ABLiveViewFrameLease;
@@ -51,6 +51,11 @@ typedef enum ABLiveViewFlags {
 typedef enum ABLiveViewFrameFormat {
   AB_LIVE_VIEW_FRAME_I420 = 1,
 } ABLiveViewFrameFormat;
+
+typedef enum ABLiveViewCursorFlags {
+  AB_LIVE_VIEW_CURSOR_IMAGE_AVAILABLE = 1u << 0,
+  AB_LIVE_VIEW_CURSOR_POSITION_AVAILABLE = 1u << 1,
+} ABLiveViewCursorFlags;
 
 // Callers initialize no fields. The library writes the complete fixed-layout
 // snapshot when output_size is at least sizeof(ABLiveViewSnapshot).
@@ -93,6 +98,25 @@ typedef struct ABLiveViewFrameInfo {
   int64_t timestamp_us;
 } ABLiveViewFrameInfo;
 
+// A cursor observation is transport-derived latest-value state. Frontend
+// adapters decide whether and how to present it. The image is PNG-encoded and
+// bounded to 1 MiB by the session parser.
+typedef struct ABLiveViewCursorSnapshot {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t flags;
+  uint32_t width;
+  uint32_t height;
+  uint32_t hotspot_x;
+  uint32_t hotspot_y;
+  uint32_t position_x;
+  uint32_t position_y;
+  uint32_t image_byte_length;
+  uint64_t generation;
+  uint64_t image_generation;
+  uint64_t position_generation;
+} ABLiveViewCursorSnapshot;
+
 AB_LIVE_VIEW_API uint32_t ab_live_view_abi_version(void);
 
 // The descriptor bytes are copied and retained until session destruction.
@@ -115,6 +139,14 @@ AB_LIVE_VIEW_API uint32_t ab_live_view_session_metrics(
     uint32_t output_size);
 AB_LIVE_VIEW_API uint32_t ab_live_view_session_copy_status(
     ABLiveViewSession *session, uint8_t *output, uint32_t output_capacity);
+AB_LIVE_VIEW_API uint32_t ab_live_view_session_cursor_snapshot(
+    ABLiveViewSession *session, ABLiveViewCursorSnapshot *output,
+    uint32_t output_size);
+// Returns the PNG byte count copied, or zero when the requested generation is
+// no longer current, no cursor image is available, or the buffer is too small.
+AB_LIVE_VIEW_API uint32_t ab_live_view_session_copy_cursor_image(
+    ABLiveViewSession *session, uint64_t image_generation, uint8_t *output,
+    uint32_t output_capacity);
 
 // Returns NULL when no frame newer than after_generation is available.
 AB_LIVE_VIEW_API ABLiveViewFrameLease *ab_live_view_session_acquire_frame(

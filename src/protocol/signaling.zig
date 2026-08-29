@@ -3,21 +3,16 @@ const std = @import("std");
 pub const Event = enum {
     system_init,
     system_disconnect,
-    system_error,
-    system_pong,
+    system_heartbeat,
     signal_provide,
     signal_offer,
     signal_answer,
     signal_candidate,
-    member_list,
-    member_connected,
-    member_disconnected,
-    control_locked,
+    signal_close,
+    control_host,
     control_release,
-    control_requesting,
-    control_clipboard,
-    screen_configurations,
-    screen_resolution,
+    control_request,
+    clipboard_updated,
     unknown,
 };
 
@@ -25,21 +20,16 @@ pub fn classify(name: []const u8) Event {
     const names = .{
         .{ "system/init", Event.system_init },
         .{ "system/disconnect", Event.system_disconnect },
-        .{ "system/error", Event.system_error },
-        .{ "system/pong", Event.system_pong },
+        .{ "system/heartbeat", Event.system_heartbeat },
         .{ "signal/provide", Event.signal_provide },
         .{ "signal/offer", Event.signal_offer },
         .{ "signal/answer", Event.signal_answer },
         .{ "signal/candidate", Event.signal_candidate },
-        .{ "member/list", Event.member_list },
-        .{ "member/connected", Event.member_connected },
-        .{ "member/disconnected", Event.member_disconnected },
-        .{ "control/locked", Event.control_locked },
+        .{ "signal/close", Event.signal_close },
+        .{ "control/host", Event.control_host },
         .{ "control/release", Event.control_release },
-        .{ "control/requesting", Event.control_requesting },
-        .{ "control/clipboard", Event.control_clipboard },
-        .{ "screen/configurations", Event.screen_configurations },
-        .{ "screen/resolution", Event.screen_resolution },
+        .{ "control/request", Event.control_request },
+        .{ "clipboard/updated", Event.clipboard_updated },
     };
     inline for (names) |entry| if (std.mem.eql(u8, name, entry[0])) return entry[1];
     return .unknown;
@@ -54,6 +44,7 @@ pub fn eventFromJson(allocator: std.mem.Allocator, bytes: []const u8) !Event {
 }
 
 test "classify known and unknown signaling events" {
-    try std.testing.expectEqual(Event.signal_provide, try eventFromJson(std.testing.allocator, "{\"event\":\"signal/provide\",\"sdp\":\"redacted\"}"));
+    try std.testing.expectEqual(Event.signal_provide, try eventFromJson(std.testing.allocator, "{\"event\":\"signal/provide\",\"payload\":{\"sdp\":\"redacted\"}}"));
+    try std.testing.expectEqual(Event.control_host, try eventFromJson(std.testing.allocator, "{\"event\":\"control/host\",\"payload\":{\"has_host\":true}}"));
     try std.testing.expectEqual(Event.unknown, try eventFromJson(std.testing.allocator, "{\"event\":\"future/event\"}"));
 }

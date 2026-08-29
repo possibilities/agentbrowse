@@ -52,6 +52,21 @@ test.skipIf(!existsSync(defaultNativeLibraryPath()))(
         lifecycle: "idle",
         latestFrameGeneration: 0n,
       });
+      expect(session.cursorSnapshot()).toEqual({
+        imageAvailable: false,
+        positionAvailable: false,
+        width: 0,
+        height: 0,
+        hotspotX: 0,
+        hotspotY: 0,
+        positionX: 0,
+        positionY: 0,
+        imageByteLength: 0,
+        generation: 0n,
+        imageGeneration: 0n,
+        positionGeneration: 0n,
+      });
+      expect(session.cursorImage()).toBeNull();
       expect(session.status()).toBe("Ready");
       expect(session.acquireFrame(0n)).toBeNull();
       // Exercise immediate teardown with NSURLSession work outstanding. Native
@@ -85,7 +100,15 @@ test.skipIf(!existsSync(defaultNativeLibraryPath()))(
     const [exitCode, stdout, stderr] = completed;
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
-    expect(JSON.parse(stdout)).toMatchObject({ answered: true, closed: true });
+    expect(JSON.parse(stdout)).toMatchObject({
+      loginAccepted: true,
+      websocketAuthorized: true,
+      selectedMain: true,
+      candidateSent: true,
+      answered: true,
+      answerUsesPayload: true,
+      closed: true,
+    });
   },
 );
 

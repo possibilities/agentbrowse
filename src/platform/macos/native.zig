@@ -15,6 +15,7 @@ pub const State = enum(c_int) {
 pub const Callbacks = extern struct {
     context: ?*anyopaque,
     on_websocket_message: ?*const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void,
+    on_data_message: ?*const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void,
     on_local_description: ?*const fn (?*anyopaque, bool, [*]const u8, usize) callconv(.c) void,
     on_local_candidate: ?*const fn (?*anyopaque, [*]const u8, usize, [*]const u8, usize, i32) callconv(.c) void,
     on_state: ?*const fn (?*anyopaque, State) callconv(.c) void,
@@ -31,11 +32,29 @@ pub const AppKitCallbacks = extern struct {
     on_focus: ?*const fn (?*anyopaque, bool) callconv(.c) void,
     on_close: ?*const fn (?*anyopaque) callconv(.c) void,
     copy_status: ?*const fn (?*anyopaque, [*]u8, u32) callconv(.c) u32,
+    copy_cursor_snapshot: ?*const fn (?*anyopaque, *AppKitCursorSnapshot, u32) callconv(.c) bool,
+    copy_cursor_image: ?*const fn (?*anyopaque, u64, [*]u8, u32) callconv(.c) u32,
+};
+
+pub const AppKitCursorSnapshot = extern struct {
+    struct_size: u32,
+    flags: u32,
+    width: u32,
+    height: u32,
+    hotspot_x: u32,
+    hotspot_y: u32,
+    position_x: u32,
+    position_y: u32,
+    image_byte_length: u32,
+    reserved: u32,
+    generation: u64,
+    image_generation: u64,
+    position_generation: u64,
 };
 
 pub extern fn kl_native_create(Callbacks) ?*Session;
 pub extern fn kl_native_attach_appkit(*Session, AppKitCallbacks, [*]const u8, usize) bool;
-pub extern fn kl_native_connect_websocket(*Session, [*]const u8, usize, [*]const u8, usize, [*]const u8, usize) void;
+pub extern fn kl_native_connect(*Session, [*]const u8, usize, [*]const u8, usize, [*]const u8, usize) void;
 pub extern fn kl_native_create_peer(*Session, [*]const u8, usize, bool) void;
 pub extern fn kl_native_set_remote_description(*Session, bool, [*]const u8, usize) void;
 pub extern fn kl_native_add_ice_candidate(*Session, [*]const u8, usize) void;

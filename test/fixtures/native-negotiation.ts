@@ -35,29 +35,88 @@ const offer = `${[
   "a=max-message-size:262144",
 ].join("\r\n")}\r\n`;
 
+const token = "fixture-token";
+let loginAccepted = false;
+let websocketAuthorized = false;
+let selectedMain = false;
+let candidateSent = false;
 let answered = false;
+let answerUsesPayload = false;
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
-  fetch(request, bunServer) {
-    if (bunServer.upgrade(request)) return undefined;
+  async fetch(request, bunServer) {
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/api/login") {
+      const credentials = (await request.json()) as { username?: string; password?: string };
+      loginAccepted = credentials.username === "kernel" && credentials.password === "admin";
+      return Response.json({ id: "fixture-client", token, profile: {}, state: {} });
+    }
+    if (request.method === "POST" && url.pathname === "/api/logout") {
+      return Response.json(true);
+    }
+    if (
+      url.pathname === "/api/ws" &&
+      url.searchParams.get("token") === token &&
+      bunServer.upgrade(request)
+    ) {
+      websocketAuthorized = true;
+      return undefined;
+    }
     return new Response("websocket required", { status: 426 });
   },
   websocket: {
     open(socket) {
       socket.send(
         JSON.stringify({
-          event: "signal/provide",
-          id: "fixture-client",
-          lite: true,
-          ice: [],
-          sdp: offer,
+          event: "system/init",
+          payload: {
+            session_id: "fixture-client",
+            settings: { heartbeat_interval: 0, implicit_hosting: true },
+            control_host: { has_host: false },
+          },
         }),
       );
     },
-    message(_socket, message) {
-      const value = JSON.parse(message.toString()) as { event?: string };
-      if (value.event === "signal/answer") answered = true;
+    message(socket, message) {
+      const value = JSON.parse(message.toString()) as {
+        event?: string;
+        payload?: {
+          sdp?: string;
+          video?: { selector?: { type?: string; id?: string; bitrate?: number } };
+          audio?: { disabled?: boolean };
+        };
+      };
+      if (value.event === "signal/request") {
+        selectedMain =
+          value.payload?.video?.selector?.type === "exact" &&
+          value.payload.video.selector.id === "main" &&
+          value.payload.video.selector.bitrate === 0 &&
+          value.payload.audio?.disabled === false;
+        socket.send(
+          JSON.stringify({
+            event: "signal/provide",
+            payload: { iceservers: [], sdp: offer },
+          }),
+        );
+        // Neko trickles candidates immediately; this deliberately races the
+        // asynchronous setRemoteDescription completion in the native client.
+        socket.send(
+          JSON.stringify({
+            event: "signal/candidate",
+            payload: {
+              candidate: "candidate:0 1 UDP 2122252543 127.0.0.1 54321 typ host",
+              sdpMid: "0",
+              sdpMLineIndex: 0,
+            },
+          }),
+        );
+        candidateSent = true;
+      }
+      if (value.event === "signal/answer") {
+        answered = true;
+        answerUsesPayload = typeof value.payload?.sdp === "string";
+      }
     },
   },
 });
@@ -80,4 +139,15 @@ try {
   await server.stop(true);
 }
 
-process.stdout.write(`${JSON.stringify({ answered, closed: true, status })}\n`);
+process.stdout.write(
+  `${JSON.stringify({
+    loginAccepted,
+    websocketAuthorized,
+    selectedMain,
+    candidateSent,
+    answered,
+    answerUsesPayload,
+    closed: true,
+    status,
+  })}\n`,
+);

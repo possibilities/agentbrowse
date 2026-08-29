@@ -1,7 +1,7 @@
 const std = @import("std");
 const klv = @import("kernel_live_view");
 
-const abi_version: u32 = 1;
+const abi_version: u32 = 2;
 const allocator = std.heap.page_allocator;
 const max_descriptor_bytes: u32 = 64 * 1024;
 const max_output_dimension: u32 = 8192;
@@ -56,6 +56,22 @@ const FrameInfo = extern struct {
     timestamp_us: i64,
 };
 
+const CursorSnapshot = extern struct {
+    struct_size: u32,
+    abi_version: u32,
+    flags: u32,
+    width: u32,
+    height: u32,
+    hotspot_x: u32,
+    hotspot_y: u32,
+    position_x: u32,
+    position_y: u32,
+    image_byte_length: u32,
+    generation: u64,
+    image_generation: u64,
+    position_generation: u64,
+};
+
 const Result = enum(u32) {
     ok = 0,
     invalid_argument = 1,
@@ -69,6 +85,7 @@ comptime {
     if (@sizeOf(Snapshot) != 32) @compileError("ABLiveViewSnapshot layout changed");
     if (@sizeOf(Metrics) != 96) @compileError("ABLiveViewMetrics layout changed");
     if (@sizeOf(FrameInfo) != 48) @compileError("ABLiveViewFrameInfo layout changed");
+    if (@sizeOf(CursorSnapshot) != 64) @compileError("ABLiveViewCursorSnapshot layout changed");
 }
 
 export fn ab_live_view_abi_version() callconv(.c) u32 {
@@ -193,6 +210,51 @@ export fn ab_live_view_session_copy_status(
     if (output_capacity == 0) return 0;
     const target = output orelse return 0;
     return @intCast(session_handle.live_session.copyStatus(target[0..output_capacity]));
+}
+
+export fn ab_live_view_session_cursor_snapshot(
+    handle: ?*AbiSession,
+    output: ?*CursorSnapshot,
+    output_size: u32,
+) callconv(.c) u32 {
+    const session_handle = handle orelse return result(.invalid_argument);
+    const target = output orelse return result(.invalid_argument);
+    if (output_size < @sizeOf(CursorSnapshot)) return result(.buffer_too_small);
+    const cursor = session_handle.live_session.cursorSnapshot();
+    var flags: u32 = 0;
+    if (cursor.image_available) flags |= 1 << 0;
+    if (cursor.position_available) flags |= 1 << 1;
+    target.* = .{
+        .struct_size = @sizeOf(CursorSnapshot),
+        .abi_version = abi_version,
+        .flags = flags,
+        .width = cursor.width,
+        .height = cursor.height,
+        .hotspot_x = cursor.hotspot_x,
+        .hotspot_y = cursor.hotspot_y,
+        .position_x = cursor.position_x,
+        .position_y = cursor.position_y,
+        .image_byte_length = cursor.image_length,
+        .generation = cursor.generation,
+        .image_generation = cursor.image_generation,
+        .position_generation = cursor.position_generation,
+    };
+    return result(.ok);
+}
+
+export fn ab_live_view_session_copy_cursor_image(
+    handle: ?*AbiSession,
+    image_generation: u64,
+    output: ?[*]u8,
+    output_capacity: u32,
+) callconv(.c) u32 {
+    const session_handle = handle orelse return 0;
+    if (output_capacity == 0) return 0;
+    const target = output orelse return 0;
+    return @intCast(session_handle.live_session.copyCursorImage(
+        image_generation,
+        target[0..output_capacity],
+    ));
 }
 
 export fn ab_live_view_session_acquire_frame(

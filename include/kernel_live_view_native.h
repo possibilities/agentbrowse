@@ -11,6 +11,29 @@ extern "C" {
 
 typedef struct KLNativeSessionHandle KLNativeSessionHandle;
 
+typedef enum KLAppKitCursorFlags {
+  KL_APPKIT_CURSOR_IMAGE_AVAILABLE = 1u << 0,
+  KL_APPKIT_CURSOR_POSITION_AVAILABLE = 1u << 1,
+  KL_APPKIT_CURSOR_AUTHORIZED = 1u << 2,
+  KL_APPKIT_CURSOR_REMOTE_CONTROLLER = 1u << 3,
+} KLAppKitCursorFlags;
+
+typedef struct KLAppKitCursorSnapshot {
+  uint32_t struct_size;
+  uint32_t flags;
+  uint32_t width;
+  uint32_t height;
+  uint32_t hotspot_x;
+  uint32_t hotspot_y;
+  uint32_t position_x;
+  uint32_t position_y;
+  uint32_t image_byte_length;
+  uint32_t reserved;
+  uint64_t generation;
+  uint64_t image_generation;
+  uint64_t position_generation;
+} KLAppKitCursorSnapshot;
+
 typedef enum KLNativeState {
   KL_NATIVE_WS_OPEN = 1,
   KL_NATIVE_WS_CLOSED = 2,
@@ -27,6 +50,7 @@ typedef enum KLNativeState {
 typedef struct KLNativeCallbacks {
   void *context;
   void (*on_websocket_message)(void *context, const uint8_t *bytes, size_t len);
+  void (*on_data_message)(void *context, const uint8_t *bytes, size_t len);
   void (*on_local_description)(void *context, bool answer, const uint8_t *bytes,
                                size_t len);
   void (*on_local_candidate)(void *context, const uint8_t *sdp, size_t sdp_len,
@@ -56,6 +80,11 @@ typedef struct KLAppKitCallbacks {
   void (*on_close)(void *context);
   uint32_t (*copy_status)(void *context, uint8_t *output,
                           uint32_t output_capacity);
+  bool (*copy_cursor_snapshot)(void *context,
+                               KLAppKitCursorSnapshot *output,
+                               uint32_t output_size);
+  uint32_t (*copy_cursor_image)(void *context, uint64_t image_generation,
+                                uint8_t *output, uint32_t output_capacity);
 } KLAppKitCallbacks;
 
 KLNativeSessionHandle *kl_native_create(KLNativeCallbacks callbacks);
@@ -63,10 +92,10 @@ bool kl_native_attach_appkit(KLNativeSessionHandle *session,
                              KLAppKitCallbacks callbacks,
                              const uint8_t *window_title,
                              size_t window_title_len);
-void kl_native_connect_websocket(KLNativeSessionHandle *session,
-                                 const uint8_t *base_url, size_t base_url_len,
-                                 const uint8_t *username, size_t username_len,
-                                 const uint8_t *password, size_t password_len);
+void kl_native_connect(KLNativeSessionHandle *session, const uint8_t *base_url,
+                       size_t base_url_len, const uint8_t *username,
+                       size_t username_len, const uint8_t *password,
+                       size_t password_len);
 void kl_native_create_peer(KLNativeSessionHandle *session,
                            const uint8_t *ice_json, size_t ice_json_len,
                            bool lite);

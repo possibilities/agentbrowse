@@ -2,8 +2,9 @@
 
 agentbrowse has one platform-neutral Live View core and two frontend adapters.
 The core owns signaling, WebRTC control state, input gating, reconnect policy,
-decoded frames, and held-input cleanup. AppKit and OpenTUI decide only how to
-present a frame and translate local input into that core.
+decoded frames, cursor observations, and held-input cleanup. AppKit and OpenTUI
+decide only how to present those observations and translate local input into
+that core.
 
 ## OpenTUI path
 
@@ -81,6 +82,12 @@ the inverse frame rotation. Keyboard events become X11 keysyms, including
 Kitty press/release events and Unicode keysyms. Terminals that report only a
 raw press are treated as taps so a key cannot remain held indefinitely.
 
+Neko's selected `main` stream contains no cursor. OpenTUI deliberately leaves
+cursor presentation to the terminal host pointer and never composites the
+cursor observation exposed by ABI version 2. This produces one pointer for
+local interaction; movement by another control host is intentionally not
+shown in the OpenTUI frontend adapter.
+
 The example host releases every held key and pointer button before its picker
 opens. The adapter does the same when the renderable blurs, the terminal loses
 focus, the target changes, transport disconnects, or teardown begins. Control
@@ -113,6 +120,27 @@ when a Retina terminal has more backing pixels than the stream, Ghostty's
 linear GPU texture sampler performs the final enlargement instead of receiving
 CPU-manufactured pixels.
 
+## Cursor observation ownership
+
+The client-created WebRTC channel labeled `data` remains the outbound input
+channel. Neko opens another channel with the same label on a different SCTP
+stream. The pinned Neko runtime has legacy compatibility enabled: after it
+observes the client-created channel, its internal active-channel reference can
+move from the server-created stream to the client-created stream. Cursor
+packets can consequently arrive on either known channel. The native bridge
+preserves both objects, accepts cursor observations from both, and still sends
+little-endian input only on the client-created channel that the pinned runtime
+handles.
+
+The Live View session parses inbound position and PNG image packets into one
+mutex-protected latest-value cursor observation. Image, position, and combined
+generations change independently so a polling consumer can copy an image only
+while its generation is still current. Images are capped at 1 MiB and 1024
+pixels per dimension. Position is cleared on control-host changes and the
+entire observation is reset when transport identity changes, closes, or fails.
+Neko sends no visibility or stall marker, so a stationary position cannot be
+distinguished from a stalled producer.
+
 ## Threads and teardown
 
 NSURLSession and WebRTC callbacks may enter Zig from worker threads. Session
@@ -144,9 +172,13 @@ teardown.
 AppKit-specific behavior is confined to `src/platform/macos/appkit.zig` and the
 AppKit half of `platform/macos/native_bridge.mm`: window and responder
 lifecycle, native Metal presentation, macOS events, pasteboard access,
-application shortcuts, and the transparent local cursor over the aspect-fitted
-guest image. Creating a headless Live View session does not initialize
-`NSApplication` or create a window.
+application shortcuts, and cursor presentation over the aspect-fitted guest
+image. While this client controls input, the local pointer uses the current
+metadata-derived `NSCursor`; otherwise it remains an ordinary arrow. If a
+different control host moves the guest pointer while the local pointer is
+outside the fitted video, AppKit draws the cursor observation as an overlay.
+Creating a headless Live View session does not initialize `NSApplication` or
+create a window.
 
 OpenTUI-specific behavior is confined to `src/opentui` and `client`: target
 discovery, managed Live View access, Bun FFI, terminal image fitting, input mapping,
@@ -166,12 +198,12 @@ the dylib link joins a normalized Zig archive and an Apple-clang bridge object
 with Apple's linker. `platform/macos/live_view.exports` restricts the resulting
 dynamic symbol table to the public `ab_live_view_*` ABI.
 
-## Cursor limitation
+## Cursor presentation
 
-The compatibility stream currently selected by Kernel's legacy proxy has the
-guest cursor composited into the video. Hiding the macOS cursor over the fitted
-AppKit image prevents a double cursor while interacting, but the last guest
-cursor remains in the video after the macOS pointer leaves. Hover-only guest
-cursor visibility requires consuming Neko's separate cursor metadata with its
-pointerless stream and is a scoped follow-up rather than something either
-frontend can remove from already-decoded pixels.
+The Live View core authenticates against Neko's current API and requests its
+pointerless `main` stream, rather than Kernel's legacy compatibility stream
+whose `legacy` selector burns a cursor into every decoded frame. Cursor image
+and position remain frontend-neutral observations in the session and polling
+ABI. AppKit uses them to preserve guest cursor shape and shared-control
+visibility; OpenTUI applies its host-pointer-only policy above. Agentattention
+embeds the OpenTUI adapter and needs no cursor-specific behavior.

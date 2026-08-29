@@ -67,3 +67,9 @@ _Avoid: viewer, skin._
 `data` that carries binary pointer and keyboard packets to Neko. Neko also
 opens a same-labeled inbound channel; it must not replace this channel.
 _Avoid: data socket, remote data channel._
+
+**Cursor observation** — The bounded latest-value cursor image and remote
+position retained by a Live View session from either known Neko data channel.
+Frontend adapters decide whether and how to present it; it is not itself a
+rendered cursor.
+_Avoid: cursor event, cursor overlay, guest pointer._
