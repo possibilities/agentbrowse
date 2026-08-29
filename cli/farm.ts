@@ -1,16 +1,15 @@
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type {
-  ContainerState,
-  FarmBackend,
-  ManagedContainerRecord,
-  PortBinding,
+import {
+  type FarmBackend,
+  type ManagedContainerRecord,
+  targetFromLabels,
+  verifyDestroyOwnership,
 } from "./backend.ts";
 import { CliError } from "./errors.ts";
 import {
   type BrowserDescription,
-  CHROMIUM_FLAGS,
   configPath,
   parseTargetConfig,
   renderTargetConfig,
@@ -37,110 +36,22 @@ export interface CreateResult extends BrowserDescription {
 
 export interface DestroyResult {
   name: string;
+  backend: string;
   container: string;
   destroyed: boolean;
 }
 
 export interface BrowserListEntry extends ManagedContainerRecord {
+  backend: string;
   cdpUrl: string;
   liveViewUrl: string;
+  liveViewAccess: BrowserDescription["liveViewAccess"];
   slotConflict: boolean;
 }
 
 const PROVIDER_READY_TIMEOUT_SECONDS = 45;
 const PROVIDER_LOCK_WAIT_MS = 10_000;
 const PROVIDER_LOCK_STALE_MS = 90_000;
-
-function hasBinding(
-  state: ContainerState,
-  port: string,
-  hostIp: string,
-  hostPort: number,
-): boolean {
-  const bindings: readonly PortBinding[] = state.bindings[port] ?? [];
-  return bindings.some(
-    (binding) => binding.hostIp === hostIp && binding.hostPort === String(hostPort),
-  );
-}
-
-function hasEnvironment(state: ContainerState, value: string): boolean {
-  return state.environment.includes(value);
-}
-
-function drift(message: string): never {
-  throw new CliError(
-    "browser_drift",
-    message,
-    "destroy the browser target explicitly before recreating it",
-  );
-}
-
-export function verifyManagedContainer(
-  state: ContainerState,
-  target: Target,
-  image: string,
-  networkAddress: string,
-): void {
-  if (state.labels["dev.agentbrowse.managed"] !== "true") {
-    drift(`${target.container} is not managed by agentbrowse`);
-  }
-  if (state.labels["dev.agentbrowse.role"] !== "kernel-browser") {
-    drift(`${target.container} has a different agentbrowse role`);
-  }
-  if (state.labels["dev.agentbrowse.target"] !== target.name) {
-    drift(`${target.container} belongs to a different browser target`);
-  }
-  if (state.labels["dev.agentbrowse.slot"] !== String(target.slot)) {
-    drift(`${target.container} uses a different slot`);
-  }
-  if (state.image !== image) drift(`${target.container} uses a different image`);
-  if (!hasEnvironment(state, "ENABLE_WEBRTC=true")) {
-    drift(`${target.container} does not enable Live View`);
-  }
-  if (!hasEnvironment(state, `CHROMIUM_FLAGS=${CHROMIUM_FLAGS}`)) {
-    drift(`${target.container} uses different Chromium window flags`);
-  }
-  if (!hasEnvironment(state, `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`)) {
-    drift(`${target.container} uses a different WebRTC mux port`);
-  }
-  if (!hasEnvironment(state, `NEKO_WEBRTC_NAT1TO1=${networkAddress}`)) {
-    drift(`${target.container} uses a different WebRTC NAT address`);
-  }
-  if (!hasBinding(state, "8080/tcp", "127.0.0.1", target.httpPort)) {
-    drift(`${target.container} uses a different Live View HTTP bind`);
-  }
-  if (!hasBinding(state, `${target.webrtcPort}/udp`, networkAddress, target.webrtcPort)) {
-    drift(`${target.container} uses a different WebRTC bind`);
-  }
-  if (!hasBinding(state, "9222/tcp", networkAddress, target.cdpPort)) {
-    drift(`${target.container} uses a different CDP bind`);
-  }
-}
-
-function verifyDestroyOwnership(state: ContainerState, target: Target): void {
-  if (
-    state.labels["dev.agentbrowse.managed"] !== "true" ||
-    state.labels["dev.agentbrowse.role"] !== "kernel-browser" ||
-    state.labels["dev.agentbrowse.target"] !== target.name ||
-    state.labels["dev.agentbrowse.slot"] !== String(target.slot)
-  ) {
-    throw new CliError(
-      "foreign_container",
-      `refusing to delete ${target.container}: its ownership labels do not match ${target.name}`,
-    );
-  }
-}
-
-function targetFromLabels(name: string, state: ContainerState): Target {
-  const slot = state.labels["dev.agentbrowse.slot"];
-  if (slot === undefined || !/^(0|[1-9][0-9]{0,2})$/.test(slot)) {
-    throw new CliError(
-      "foreign_container",
-      `refusing to delete agentbrowse-browser-${name}: its slot ownership label is invalid`,
-    );
-  }
-  return targetFor(name, Number(slot));
-}
 
 export class BrowserFarm {
   constructor(
@@ -149,19 +60,27 @@ export class BrowserFarm {
     readonly nekoLogLevel = "info",
   ) {}
 
-  async create(options: CreateOptions): Promise<CreateResult> {
-    const result = await this.prepareCreate(options);
+  async probeAvailability(signal?: AbortSignal): Promise<void> {
+    // Docker discovery applies its short backend deadline whenever it receives a
+    // signal. Supply an inert signal when the fleet caller did not provide one
+    // so ordinary create/provision selection is bounded too.
+    await this.backend.verifyHost(signal ?? new AbortController().signal);
+  }
+
+  async create(options: CreateOptions, hostVerified = false): Promise<CreateResult> {
+    const result = await this.prepareCreate(options, undefined, hostVerified);
     return await this.waitForCreate(result, options.readyTimeoutSeconds ?? 120);
   }
 
-  async provision(options: ProvisionOptions): Promise<CreateResult> {
+  async provision(options: ProvisionOptions, hostVerified = false): Promise<CreateResult> {
     const result = await this.withProviderAllocationLock(async () => {
       validateName(options.name);
-      await this.backend.verifyHost();
+      if (!hostVerified) await this.backend.verifyHost();
       const [recorded, managed] = await Promise.all([
         this.readTarget(options.name),
         this.backend.listManagedContainers(),
       ]);
+      this.verifyReceiptBackend(recorded);
       const existing = managed.find((browser) => browser.name === options.name);
       const usedSlots = new Set(managed.map((browser) => browser.slot));
       const slot = existing?.slot ?? recorded?.slot ?? this.firstFreeSlot(usedSlots);
@@ -172,6 +91,7 @@ export class BrowserFarm {
           ...(options.image === undefined ? {} : { image: options.image }),
         },
         managed,
+        true,
       );
     });
     return await this.waitForCreate(result, PROVIDER_READY_TIMEOUT_SECONDS);
@@ -180,11 +100,42 @@ export class BrowserFarm {
   private async prepareCreate(
     options: CreateOptions,
     knownManaged?: readonly ManagedContainerRecord[],
+    hostVerified = false,
   ): Promise<CreateResult> {
-    const target = targetFor(options.name, options.slot);
-    await this.verifyRecordedTarget(target);
-    if (knownManaged === undefined) await this.backend.verifyHost();
-    const managed = knownManaged ?? (await this.backend.listManagedContainers());
+    validateName(options.name);
+    if (!hostVerified && knownManaged === undefined) await this.backend.verifyHost();
+    const [recorded, managed] = await Promise.all([
+      this.readTarget(options.name),
+      knownManaged === undefined ? this.backend.listManagedContainers() : knownManaged,
+    ]);
+    this.verifyReceiptBackend(recorded);
+    if (recorded !== undefined && recorded.slot !== options.slot) {
+      throw new CliError(
+        "target_slot_mismatch",
+        `browser target ${options.name} already records slot ${recorded.slot}, not ${options.slot}`,
+        `run agentbrowse destroy ${options.name} before choosing another slot`,
+      );
+    }
+    const existingRecord = managed.find((browser) => browser.name === options.name);
+    if (
+      existingRecord === undefined &&
+      recorded === undefined &&
+      managed.length >= this.backend.maxTargets
+    ) {
+      throw new CliError(
+        "backend_capacity_exhausted",
+        `backend ${this.backend.id} already has its maximum ${this.backend.maxTargets} Browser target${this.backend.maxTargets === 1 ? "" : "s"}`,
+        "destroy the existing Browser target before launching another",
+      );
+    }
+    const target = targetFor(
+      options.name,
+      options.slot,
+      this.backend.id,
+      recorded?.container ??
+        existingRecord?.container ??
+        this.backend.newContainerName(options.name),
+    );
     const occupant = managed.find(
       (browser) => browser.slot === target.slot && browser.container !== target.container,
     );
@@ -195,29 +146,24 @@ export class BrowserFarm {
         "choose another slot or destroy the occupying browser target",
       );
     }
-    const [networkAddress, image] = await Promise.all([
-      this.backend.resolveNetworkAddress(),
-      this.backend.resolveImage(options.image),
-    ]);
-    const existing = await this.backend.inspectContainer(target.container);
+    const image = await this.backend.resolveImage(options.image);
+    let state = await this.backend.inspectContainer(target.container);
     let created = false;
-    if (existing !== undefined) {
-      verifyManagedContainer(existing, target, image, networkAddress);
-      if (!existing.running) await this.backend.startContainer(target.container);
+    if (state !== undefined) {
+      await this.backend.verifyContainer(state, target, image);
+      if (!state.running) {
+        await this.backend.startContainer(target.container);
+        state = await this.backend.inspectContainer(target.container);
+      }
     } else {
       if (!(await this.backend.imageExists(image))) {
         throw new CliError(
           "image_missing",
-          `image ${image} is not present on the browser host`,
-          "build or load the Kernel image, or select one with --image",
+          `image ${image} is not present on backend ${this.backend.id}`,
+          this.backend.missingImageRecovery(image),
         );
       }
-      await this.backend.runBrowser({
-        target,
-        image,
-        networkAddress,
-        nekoLogLevel: this.nekoLogLevel,
-      });
+      await this.backend.runBrowser({ target, image, nekoLogLevel: this.nekoLogLevel });
       created = true;
     }
 
@@ -226,32 +172,35 @@ export class BrowserFarm {
     } catch (error) {
       if (created) {
         throw new CliError(
-          "browser_not_ready",
-          `${target.container} was created but did not become ready: ${(error as Error).message}`,
-          `inspect ${target.container} logs on the configured browser host, then run agentbrowse destroy ${target.name}`,
+          "target_receipt_failed",
+          `${target.container} was created but its backend-bound receipt failed: ${(error as Error).message}`,
+          `inspect ${target.container} on backend ${target.backend}, then run agentbrowse destroy ${target.name}`,
         );
       }
       throw error;
     }
 
-    return {
-      ...target,
-      image,
-      cdpUrl: `http://${networkAddress}:${target.cdpPort}`,
-      liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
-      created,
-    };
+    state ??= await this.backend.inspectContainer(target.container);
+    if (state === undefined) {
+      throw new CliError(
+        "target_inspect_failed",
+        `${target.container} was created but is absent during post-create inspection`,
+        `inspect backend ${target.backend}, then run agentbrowse destroy ${target.name}`,
+      );
+    }
+    const access = await this.backend.browserAccess(target, state);
+    return { ...target, image, ...access, created };
   }
 
   private async waitForCreate(result: CreateResult, timeoutSeconds: number): Promise<CreateResult> {
     try {
-      await this.backend.waitReady(result.container, timeoutSeconds);
+      await this.backend.waitReady(result, timeoutSeconds);
     } catch (error) {
       if (result.created) {
         throw new CliError(
           "browser_not_ready",
           `${result.container} was created but did not become ready: ${(error as Error).message}`,
-          `inspect ${result.container} logs on the configured browser host, then run agentbrowse destroy ${result.name}`,
+          `inspect ${result.container} on backend ${result.backend}, then run agentbrowse destroy ${result.name}`,
         );
       }
       throw error;
@@ -259,59 +208,54 @@ export class BrowserFarm {
     return result;
   }
 
-  async list(signal?: AbortSignal): Promise<readonly BrowserListEntry[]> {
+  async list(signal?: AbortSignal, hostVerified = false): Promise<readonly BrowserListEntry[]> {
     signal?.throwIfAborted();
-    await this.backend.verifyHost(signal);
-    const [networkAddress, managed] = await Promise.all([
-      this.backend.resolveNetworkAddress(signal),
-      this.backend.listManagedContainers(signal),
-    ]);
+    if (!hostVerified) await this.backend.verifyHost(signal);
+    const managed = await this.backend.listManagedContainers(signal);
     const slotCounts = new Map<number, number>();
     for (const browser of managed) {
       slotCounts.set(browser.slot, (slotCounts.get(browser.slot) ?? 0) + 1);
     }
-    return managed
-      .map((browser) => {
-        const target = targetFor(browser.name, browser.slot);
+    const rows = await Promise.all(
+      managed.map(async (browser) => {
+        const target = targetFor(browser.name, browser.slot, this.backend.id, browser.container);
+        const access = await this.backend.browserAccess(target);
         return {
           ...browser,
-          cdpUrl: `http://${networkAddress}:${target.cdpPort}`,
-          liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
+          backend: this.backend.id,
+          ...access,
           slotConflict: (slotCounts.get(browser.slot) ?? 0) > 1,
         };
-      })
-      .sort((left, right) => left.slot - right.slot || left.name.localeCompare(right.name));
+      }),
+    );
+    return rows.sort(
+      (left, right) => left.slot - right.slot || left.name.localeCompare(right.name),
+    );
   }
 
-  async destroy(name: string): Promise<DestroyResult> {
+  async destroy(name: string, hostVerified = false): Promise<DestroyResult> {
     validateName(name);
-    await this.backend.verifyHost();
-    const recorded = await this.readTarget(name);
-    const container = recorded?.container ?? `agentbrowse-browser-${name}`;
+    if (!hostVerified) await this.backend.verifyHost();
+    const [recorded, managed] = await Promise.all([
+      this.readTarget(name),
+      this.backend.listManagedContainers(),
+    ]);
+    this.verifyReceiptBackend(recorded);
+    const discovered = managed.find((record) => record.name === name);
+    const container = recorded?.container ?? discovered?.container ?? `agentbrowse-browser-${name}`;
     const state = await this.backend.inspectContainer(container);
     if (state === undefined) {
       await this.removeTarget(name);
-      return { name, container, destroyed: false };
+      return { name, backend: this.backend.id, container, destroyed: false };
     }
-    const target = recorded ?? targetFromLabels(name, state);
+    const target = recorded ?? targetFromLabels(name, this.backend.id, container, state);
     verifyDestroyOwnership(state, target);
     await this.backend.removeContainer(target.container);
     await this.removeTarget(name);
-    return { name, container: target.container, destroyed: true };
+    return { name, backend: this.backend.id, container: target.container, destroyed: true };
   }
 
-  private async verifyRecordedTarget(target: Target): Promise<void> {
-    const recorded = await this.readTarget(target.name);
-    if (recorded !== undefined && recorded.slot !== target.slot) {
-      throw new CliError(
-        "target_slot_mismatch",
-        `browser target ${target.name} already records slot ${recorded.slot}, not ${target.slot}`,
-        `run agentbrowse destroy ${target.name} before choosing another slot`,
-      );
-    }
-  }
-
-  private async readTarget(name: string): Promise<Target | undefined> {
+  async readTarget(name: string): Promise<Target | undefined> {
     const path = configPath(this.runtimeDir, name);
     try {
       return parseTargetConfig(await readFile(path, "utf8"));
@@ -321,15 +265,28 @@ export class BrowserFarm {
     }
   }
 
+  private verifyReceiptBackend(recorded: Target | undefined): void {
+    if (recorded !== undefined && recorded.backend !== this.backend.id) {
+      throw new CliError(
+        "target_backend_mismatch",
+        `browser target ${recorded.name} is bound to backend ${recorded.backend}, not ${this.backend.id}`,
+      );
+    }
+  }
+
   private async writeTarget(target: Target): Promise<void> {
     const path = configPath(this.runtimeDir, target.name);
     const directory = dirname(path);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
-    const temporaryPath = `${path}.tmp-${process.pid}`;
-    await writeFile(temporaryPath, renderTargetConfig(target), { mode: 0o600 });
-    await rename(temporaryPath, path);
-    await chmod(path, 0o600);
+    const temporaryPath = `${path}.tmp-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await writeFile(temporaryPath, renderTargetConfig(target), { mode: 0o600, flag: "wx" });
+      await rename(temporaryPath, path);
+      await chmod(path, 0o600);
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
   }
 
   private async removeTarget(name: string): Promise<void> {

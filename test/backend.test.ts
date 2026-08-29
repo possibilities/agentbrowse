@@ -8,13 +8,21 @@ const ok = (stdout = ""): CommandResult => ({ exitCode: 0, stdout, stderr: "" })
 function backend(command: BackendCommand, commandTimeoutMs = 2_000): DockerFarmBackend {
   const config = loadAgentbrowseConfig({
     AGENTBROWSE_CONFIG: "/tmp/agentbrowse-backend-test-does-not-exist.json",
-    AGENTBROWSE_DOCKER_CONTEXT: "remote-browser",
-    AGENTBROWSE_DOCKER_ENDPOINT: "ssh://remote-browser",
-    AGENTBROWSE_DOCKER_ENGINE: "browser-engine",
-    AGENTBROWSE_REMOTE_HOST: "remote-browser",
-    AGENTBROWSE_NETWORK_ADDRESS_COMMAND: "network-tool address --ipv4",
   });
-  return new DockerFarmBackend({ ...config, discovery: { commandTimeoutMs } }, { command });
+  return new DockerFarmBackend(
+    {
+      id: "remote-browser",
+      type: "docker",
+      context: "remote-browser",
+      expectedEndpoint: "ssh://remote-browser",
+      expectedEngine: "browser-engine",
+      remoteHost: "remote-browser",
+      networkAddress: null,
+      networkAddressCommand: "network-tool address --ipv4",
+    },
+    { ...config, discovery: { commandTimeoutMs } },
+    { command },
+  );
 }
 
 test("remote discovery has a shorter host deadline when the caller supplies cancellation", async () => {

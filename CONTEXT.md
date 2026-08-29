@@ -11,6 +11,22 @@ output. It provisions or reuses one Browser target for a launch request and
 destroys that target for the matching close request.
 _Avoid: provider server, deployment-specific provider names._
 
+**Ordered backend set** — The configured sequence of independently identified
+Browser target runtimes. Provisioning considers them in order and advances only
+when the current backend reports a classified availability failure.
+_Avoid: failover list, provider chain._
+
+**Availability classification** — A pre-mutation result that says a backend's
+host or container service cannot currently be reached. It is the only failure
+class that permits provisioning to continue to the next configured backend.
+_Avoid: retryable error, generic fallback error._
+
+**Backend-bound target receipt** — The versioned local record that binds one
+Browser target to its backend identity, exact generated container identity,
+target name, and slot. Cleanup routes through that backend and rechecks runtime
+ownership labels before deletion.
+_Avoid: env file, generic target metadata._
+
 **Live View session** — One authenticated connection to a Kernel/Neko endpoint,
 including its WebSocket control plane, WebRTC peer, control ownership, decoded
 frames, and input state.

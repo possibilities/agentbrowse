@@ -9,6 +9,7 @@ import type {
   ManagedContainerRecord,
   RunBrowserInput,
 } from "../cli/backend.ts";
+import { drift, verifyCommonOwnership } from "../cli/backend.ts";
 import { CliError } from "../cli/errors.ts";
 import { BrowserFarm } from "../cli/farm.ts";
 import { CHROMIUM_FLAGS, configPath, targetFor } from "../cli/model.ts";
@@ -34,6 +35,7 @@ function managedState(name: string, slot: number, image: string, ip: string): Co
     labels: {
       "dev.agentbrowse.managed": "true",
       "dev.agentbrowse.role": "kernel-browser",
+      "dev.agentbrowse.backend": "docker",
       "dev.agentbrowse.target": name,
       "dev.agentbrowse.slot": String(slot),
     },
@@ -43,7 +45,9 @@ function managedState(name: string, slot: number, image: string, ip: string): Co
       `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`,
       `NEKO_WEBRTC_NAT1TO1=${ip}`,
     ],
+    command: [],
     running: true,
+    addresses: [],
     bindings: {
       "8080/tcp": [{ hostIp: "127.0.0.1", hostPort: String(target.httpPort) }],
       [`${target.webrtcPort}/udp`]: [{ hostIp: ip, hostPort: String(target.webrtcPort) }],
@@ -53,6 +57,9 @@ function managedState(name: string, slot: number, image: string, ip: string): Co
 }
 
 class FakeBackend implements FarmBackend {
+  readonly id = "docker";
+  readonly type = "docker" as const;
+  readonly maxTargets = 1_000;
   readonly ip = "100.64.0.8";
   readonly image = "agentbrowse/kernel-headful:test";
   existing: ContainerState | undefined;
@@ -64,6 +71,10 @@ class FakeBackend implements FarmBackend {
   waitTimeouts: number[] = [];
   removed: string[] = [];
   runs: RunBrowserInput[] = [];
+
+  newContainerName(name: string): string {
+    return `agentbrowse-browser-${name}`;
+  }
 
   async verifyHost(): Promise<void> {
     this.verified += 1;
@@ -89,28 +100,50 @@ class FakeBackend implements FarmBackend {
     return this.existing;
   }
 
+  async verifyContainer(
+    state: ContainerState,
+    target: ReturnType<typeof targetFor>,
+    image: string,
+  ) {
+    verifyCommonOwnership(state, target, image);
+    if (!state.environment.includes(`CHROMIUM_FLAGS=${CHROMIUM_FLAGS}`)) {
+      drift(`${target.container} uses different Chromium window flags`);
+    }
+  }
+
+  async browserAccess(target: ReturnType<typeof targetFor>) {
+    return {
+      cdpUrl: `http://${this.ip}:${target.cdpPort}`,
+      liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
+      liveViewAccess: {
+        mode: "ssh" as const,
+        remoteHost: "browser-host",
+        remotePort: target.httpPort,
+      },
+    };
+  }
+
   async runBrowser(input: RunBrowserInput): Promise<void> {
     this.runs.push(input);
-    this.existing = managedState(
-      input.target.name,
-      input.target.slot,
-      input.image,
-      input.networkAddress,
-    );
+    this.existing = managedState(input.target.name, input.target.slot, input.image, this.ip);
   }
 
   async startContainer(container: string): Promise<void> {
     this.started.push(container);
   }
 
-  async waitReady(container: string, timeoutSeconds = 120): Promise<void> {
-    this.waited.push(container);
+  async waitReady(target: ReturnType<typeof targetFor>, timeoutSeconds = 120): Promise<void> {
+    this.waited.push(target.container);
     this.waitTimeouts.push(timeoutSeconds);
   }
 
   async removeContainer(container: string): Promise<void> {
     this.removed.push(container);
     this.existing = undefined;
+  }
+
+  missingImageRecovery(): string {
+    return "load it";
   }
 }
 
@@ -122,6 +155,7 @@ test("create launches a combined CDP and Live View target and records it", async
 
   expect(result).toMatchObject({
     name: "testing",
+    backend: "docker",
     slot: 3,
     container: "agentbrowse-browser-testing",
     image: backend.image,
@@ -134,7 +168,13 @@ test("create launches a combined CDP and Live View target and records it", async
     target: { cdpPort: 9225, httpPort: 18083, webrtcPort: 56003 },
     nekoLogLevel: "info",
   });
-  expect(readFileSync(configPath(directory, "testing"), "utf8")).toContain("CDP_PORT=9225");
+  expect(JSON.parse(readFileSync(configPath(directory, "testing"), "utf8"))).toMatchObject({
+    version: 2,
+    backend: "docker",
+    container: "agentbrowse-browser-testing",
+    target: "testing",
+    slot: 3,
+  });
   expect(backend.waited).toEqual(["agentbrowse-browser-testing"]);
 });
 
@@ -315,6 +355,7 @@ test("destroy verifies ownership before removing the exact container", async () 
 
   expect(result).toEqual({
     name: "testing",
+    backend: "docker",
     container: "agentbrowse-browser-testing",
     destroyed: true,
   });
@@ -342,6 +383,7 @@ test("destroy is idempotent when both metadata and container are absent", async 
 
   expect(await farm.destroy("missing")).toEqual({
     name: "missing",
+    backend: "docker",
     container: "agentbrowse-browser-missing",
     destroyed: false,
   });
@@ -355,6 +397,7 @@ test("destroy recovers ownership from labels when local metadata is absent", asy
 
   expect(await farm.destroy("testing")).toEqual({
     name: "testing",
+    backend: "docker",
     container: "agentbrowse-browser-testing",
     destroyed: true,
   });

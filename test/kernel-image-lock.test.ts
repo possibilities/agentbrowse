@@ -81,13 +81,25 @@ test("ordinary runtime selection never follows a mutable registry tag", async ()
 
   const config = loadAgentbrowseConfig({
     AGENTBROWSE_CONFIG: "/tmp/agentbrowse-lock-test-does-not-exist.json",
-    AGENTBROWSE_DOCKER_CONTEXT: "artbird",
   });
-  const backend = new DockerFarmBackend(config, {
-    command: async () => {
-      throw new Error("runtime must not inspect Git or the registry");
+  const backend = new DockerFarmBackend(
+    {
+      id: "artbird",
+      type: "docker",
+      context: "artbird",
+      expectedEndpoint: null,
+      expectedEngine: null,
+      remoteHost: "artbird",
+      networkAddress: "192.0.2.1",
+      networkAddressCommand: null,
     },
-  });
+    config,
+    {
+      command: async () => {
+        throw new Error("runtime must not inspect Git or the registry");
+      },
+    },
+  );
   expect(await backend.resolveImage()).toBe(KERNEL_HEADFUL_IMAGE_LOCK.runtimeReference);
   expect(await backend.resolveImage("explicit@sha256:test")).toBe("explicit@sha256:test");
 });

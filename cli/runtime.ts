@@ -1,8 +1,10 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
+import { AppleContainerFarmBackend } from "./apple-backend.ts";
 import { DockerFarmBackend } from "./backend.ts";
 import { BrowserFarm } from "./farm.ts";
+import { BrowserFleet } from "./fleet.ts";
 
 export function runtimeDir(env: Readonly<Record<string, string | undefined>>): string {
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
@@ -11,11 +13,19 @@ export function runtimeDir(env: Readonly<Record<string, string | undefined>>): s
 
 export function browserFarm(
   env: Readonly<Record<string, string | undefined>> = process.env,
-): BrowserFarm {
+): BrowserFleet {
   const config = loadAgentbrowseConfig(env);
-  return new BrowserFarm(
-    new DockerFarmBackend(config),
-    runtimeDir(env),
-    config.browser.nekoLogLevel,
+  const directory = runtimeDir(env);
+  return new BrowserFleet(
+    config.backends.map(
+      (backend) =>
+        new BrowserFarm(
+          backend.type === "docker"
+            ? new DockerFarmBackend(backend, config)
+            : new AppleContainerFarmBackend(backend, config),
+          directory,
+          config.browser.nekoLogLevel,
+        ),
+    ),
   );
 }

@@ -19,6 +19,7 @@ test("slot deterministically assigns all browser ports", () => {
   expect(targetFor("testing", 7)).toEqual({
     name: "testing",
     slot: 7,
+    backend: "docker",
     container: "agentbrowse-browser-testing",
     httpPort: 18087,
     webrtcPort: 56007,
@@ -42,9 +43,9 @@ test("provider target names preserve compatible sessions and safely map the rest
 });
 
 test("runtime metadata round trips and rejects drift", () => {
-  const target = targetFor("testing", 7);
+  const target = targetFor("testing", 7, "artbird", "agentbrowse-browser-testing-generation");
   expect(parseTargetConfig(renderTargetConfig(target))).toEqual(target);
   expect(() =>
-    parseTargetConfig(renderTargetConfig(target).replace("CDP_PORT=9229", "CDP_PORT=9999")),
+    parseTargetConfig(renderTargetConfig(target).replace('"slot": 7', '"slot": 1000')),
   ).toThrow(CliError);
 });

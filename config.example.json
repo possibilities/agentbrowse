@@ -1,28 +1,39 @@
 {
-  "version": 1,
-  "docker": {
-    "context": "remote-browser",
-    "expectedEndpoint": "ssh://remote-browser",
-    "expectedEngine": "remote-browser"
-  },
-  "remote": {
-    "host": "remote-browser",
-    "networkAddress": "192.0.2.10"
-  },
+  "version": 2,
+  "backends": [
+    {
+      "id": "artbird",
+      "type": "docker",
+      "context": "artbird",
+      "expectedEndpoint": "ssh://artbird",
+      "expectedEngine": "artbird",
+      "remoteHost": "artbird",
+      "networkAddressCommand": "tailscale ip -4"
+    },
+    {
+      "id": "apple-container-local",
+      "type": "apple-container",
+      "command": "/usr/local/bin/container",
+      "maxTargets": 1,
+      "cpus": 2,
+      "memory": "6G"
+    }
+  ],
   "images": {
     "defaultImage": "docker.io/onkernel/chromium-headful@sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3"
   },
   "browser": {
+    "nekoLogLevel": "info",
     "timezone": "UTC"
   },
   "provider": {
-    "name": "remote-browser",
-    "description": "Manage remote Kernel browser targets"
+    "name": "agentbrowse",
+    "description": "Manage ordered Kernel browser backends"
   },
   "liveView": {
-    "labelPrefix": "remote-browser",
+    "labelPrefix": "agentbrowse",
     "username": "kernel",
-    "password": "replace-me",
+    "password": "admin",
     "readOnly": false
   },
   "discovery": {

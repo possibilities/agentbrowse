@@ -1,8 +1,8 @@
-# Remote browser runtime
+# Browser backend runtime
 
-The `agentbrowse` CLI manages named Kernel/Neko browser targets on a configured host
-without modifying the `kernel-images` checkout. Each name maps to a numeric
-slot, which gives it unique CDP, loopback HTTP, and WebRTC UDP ports.
+`agentbrowse` manages Kernel/Neko Browser targets across the configured ordered
+backend set. The installed version 2 configuration keeps Artbird's SSH-backed
+Docker engine first and an already-enabled Apple `container` session second.
 
 ```sh
 agentbrowse create testing --slot 1
@@ -10,76 +10,49 @@ agentbrowse list
 tools/live-view status testing
 ```
 
-Slot 0 maps CDP to port 9222, Live View HTTP to 18080, and WebRTC UDP to
-56000. Each additional slot increments all three ports. CDP and WebRTC bind
-only to the configured network address; Live View HTTP binds only to the
-browser host's loopback interface.
+Docker slots determine published CDP, loopback Live View HTTP, and WebRTC UDP
+ports. Apple targets expose the container's Direct `192.168.64.x` address
+instead: CDP is port 9222, Live View HTTP is port 8080, and Neko's UDP mux is
+the slot-derived port inside the container. Apple publishes no host ports.
 
-The create result contains the CDP URL used by `agent-browser`:
-
-```sh
-agent-browser --cdp http://BROWSER_HOST_ADDRESS:9223 open https://example.com
-```
-
-The same runtime is available through the browser provider. Configure
-agent-browser with a plugin whose name matches `provider.name`, whose command is `agentbrowse`, whose
-arguments are `["provider"]`, and whose capability is `browser.provider`.
-Then the agent-browser session owns the Browser target lifecycle:
+The provider is short-lived and communicates over standard input/output. It
+tries backends in order only while availability probes report an unreachable
+host or unavailable service. Authentication, wrong Docker identity, missing
+images, drift, and capacity are terminal. After launch, provider cleanup data
+contains both the backend id and Browser target name, so close routes directly
+to the original backend even if order or availability changes.
 
 ```sh
-agent-browser --session research --provider remote-browser open https://example.com
-agent-browser --session research --provider remote-browser close
+agent-browser --session research --provider agentbrowse open https://example.com
+agent-browser --session research --provider agentbrowse close
 ```
 
-`browser.launch` reuses the target named for the agent-browser session or
-allocates its first free slot. `browser.close` destroys that target
-unconditionally. The provider is a short-lived standard-input/standard-output
-process, not a server; CDP continues to flow directly between agent-browser
-and the configured browser host.
-
-Open that Browser target in the native GUI using the original agent-browser
-session name:
-
-```sh
-agentbrowse view
-```
-
-`view` applies the provider's stable session-to-target mapping and owns the
-Live View SSH tunnel until the GUI closes. It does not provision a target, so
-the agent-browser session must already have launched one. With no session
-argument, it opens agent-browser's `default` session; pass a name to open a
-different session.
-
-Launch the native app. The command opens the HTTP/WebSocket tunnel, waits for
-it to become ready, and emits the sensitive connection descriptor into a
-pipe; the descriptor never appears in the process arguments:
+Open the matching target in AppKit with `agentbrowse view`, or name it directly:
 
 ```sh
 tools/live-view launch testing
 ```
 
-Additional browsers use additional names, slots, and app processes:
+The launcher and OpenTUI adapter consume the same typed access descriptor.
+Docker access owns an ephemeral SSH local forward; Apple access uses the Direct
+base URL and its close operation owns no process. Connection credentials flow
+through a bounded descriptor on standard input, never argv.
+
+`agentbrowse destroy NAME` removes only the exact backend-bound target after
+re-inspecting all ownership, role, backend, target, and slot labels. It keeps
+the image. Apple container names include a unique generation suffix and the
+exact generated name is stored in the version 2 target receipt.
+
+Apple preparation is always explicit:
 
 ```sh
-agentbrowse create research --slot 2
-tools/live-view launch research
+agentbrowse-infra enable
+agentbrowse-infra pull docker.io/onkernel/chromium-headful@sha256:...
+# or: agentbrowse-infra load /path/to/locked-image.oci.tar
 ```
 
-Each process creates its own outbound input channel. The deployed Neko server
-also opens a same-labeled inbound channel; this is expected and the bridge
-deliberately keeps the client-created channel for pointer and keyboard packets.
-
-Tunnel lifecycle remains external to the app but is owned by the launcher.
-Closing the AppKit window returns control to the launcher, which reaps its SSH
-process.
-
-`agentbrowse destroy NAME` removes only that named, ownership-verified
-container and its generated local target metadata. The pinned image remains
-available. `create` validates an existing container's image, labels, CDP,
-WebRTC settings, configured-address direct binds, and loopback-only HTTP bind before
-reusing it. It fails closed on drift.
-
-`AGENTBROWSE_NEKO_LOG_LEVEL=trace` can be supplied when creating a fresh
-browser target. Trace logs contain signaling material and must be treated as
-sensitive; the default is `info`, and transient trace targets should be
-destroyed after the diagnostic run.
+Agentbrowse never invokes those commands, `container system start`, an image
+pull, or a builder. If Apple is stopped or the digest is absent, the error says
+which manual command is required. `agentbrowse-infra disable` remains the only
+supported cleanup for the owned local runtime and leaves Apple services
+stopped.

@@ -1,160 +1,102 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env bun
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly ROOT_DIR
-CONFIG_VALUES="$(bun "$ROOT_DIR/tools/runtime-config.ts" shell)" || exit 1
-IFS=$'\t' read -r DOCKER_CONTEXT REMOTE_HOST RUNTIME_DIR <<<"$CONFIG_VALUES"
-readonly DOCKER_CONTEXT REMOTE_HOST RUNTIME_DIR
-readonly APP_EXECUTABLE="${ROOT_DIR}/zig-out/Kernel Live View.app/Contents/MacOS/kernel-live-view"
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
-NAME=""
-CONTAINER=""
-HTTP_PORT=""
-WEBRTC_PORT=""
-CDP_PORT=""
+import { browserFarm } from "../cli/runtime.ts";
+import { connectionDescriptor } from "../client/connection.ts";
+import { LiveViewTunnel } from "../client/tunnel.ts";
+import { loadAgentbrowseConfig } from "../config/deployment.ts";
 
-die() {
-  printf 'live-view: %s\n' "$*" >&2
-  exit 1
-}
+const appExecutable = join(
+  import.meta.dir,
+  "..",
+  "zig-out",
+  "Kernel Live View.app",
+  "Contents",
+  "MacOS",
+  "kernel-live-view",
+);
 
-usage() {
-  cat <<'EOF'
-Usage: tools/live-view <command> NAME
+function usage(): never {
+  process.stderr.write(`Usage: tools/live-view <command> NAME
 
 Commands:
-  status NAME      Show the browser container and service state.
+  status NAME      Show the backend, container, and access state.
   descriptor NAME  Emit its connection descriptor as JSON.
-  launch NAME      Tunnel to the configured browser host and run the AppKit app.
-
-Create targets with `agentbrowse create NAME --slot N` and remove them with
-`agentbrowse destroy NAME`. Provider users should prefer the wrapper command
-`agentbrowse view SESSION`; this helper only connects the native Live View UI.
-EOF
+  launch NAME      Open the configured access and run the AppKit app.
+`);
+  process.exit(2);
 }
 
-validate_name() {
-  [[ "$1" =~ ^[a-z][a-z0-9-]{0,31}$ ]] ||
-    die "name must match [a-z][a-z0-9-]{0,31}: $1"
+async function targetNamed(name: string) {
+  const target = (await browserFarm().list()).find((entry) => entry.name === name);
+  if (target === undefined) throw new Error(`unknown Browser target: ${name}`);
+  return target;
 }
 
-config_path() {
-  printf '%s/%s.env\n' "$RUNTIME_DIR" "$1"
+async function withAccess<T>(
+  name: string,
+  operation: (descriptor: ReturnType<typeof connectionDescriptor>) => Promise<T>,
+): Promise<T> {
+  const target = await targetNamed(name);
+  if (target.state !== "running") throw new Error(`${target.container} is not running`);
+  const access = await LiveViewTunnel.open(target);
+  try {
+    const config = loadAgentbrowseConfig().liveView;
+    return await operation(
+      connectionDescriptor(target, access.baseUrl, {
+        labelPrefix: config.labelPrefix,
+        username: config.username,
+        password: config.password,
+        readOnly: config.readOnly,
+      }),
+    );
+  } finally {
+    await access.close();
+  }
 }
 
-load_config() {
-  local name="$1" path
-  validate_name "$name"
-  path="$(config_path "$name")"
-  [[ -f "$path" ]] ||
-    die "unknown target '$name'; run 'agentbrowse create $name --slot N' first"
-  # agentbrowse writes this mode-0600 file from validated names and numeric ports.
-  # shellcheck disable=SC1090
-  source "$path"
-  [[ "$NAME" == "$name" ]] || die "target metadata name mismatch for $name"
-  [[ "$CONTAINER" == "agentbrowse-browser-${name}" ]] ||
-    die "target metadata container mismatch for $name"
-  [[ "$HTTP_PORT" =~ ^[0-9]+$ && "$WEBRTC_PORT" =~ ^[0-9]+$ && "$CDP_PORT" =~ ^[0-9]+$ ]] ||
-    die "target metadata contains invalid ports for $name"
+async function main(argv: readonly string[]): Promise<number> {
+  const [command, name, extra] = argv;
+  if (command === undefined || name === undefined || extra !== undefined) usage();
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(name)) throw new Error(`invalid Browser target: ${name}`);
+
+  if (command === "status") {
+    const target = await targetNamed(name);
+    process.stdout.write(
+      `${target.name}\t${target.backend}\t${target.container}\t${target.state}\t${target.liveViewUrl}\n`,
+    );
+    return 0;
+  }
+  if (command === "descriptor") {
+    return await withAccess(name, async (descriptor) => {
+      process.stdout.write(`${JSON.stringify(descriptor)}\n`);
+      return 0;
+    });
+  }
+  if (command === "launch") {
+    if (!existsSync(appExecutable)) {
+      throw new Error("app is not built; run 'tools/fetch-webrtc && zig build'");
+    }
+    return await withAccess(name, async (descriptor) => {
+      const child = Bun.spawn([appExecutable, "--connection-stdin"], {
+        env: process.env,
+        stdin: "pipe",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      child.stdin.write(JSON.stringify(descriptor));
+      child.stdin.end();
+      return await child.exited;
+    });
+  }
+  usage();
 }
 
-container_exists() {
-  docker --context "$DOCKER_CONTEXT" container inspect "$CONTAINER" >/dev/null 2>&1
+try {
+  process.exit(await main(process.argv.slice(2)));
+} catch (error) {
+  process.stderr.write(`live-view: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exit(1);
 }
-
-container_running() {
-  [[ "$(docker --context "$DOCKER_CONTEXT" container inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" == true ]]
-}
-
-show_status() {
-  container_exists || die "$CONTAINER does not exist"
-  docker --context "$DOCKER_CONTEXT" ps --all \
-    --filter "name=^/${CONTAINER}$" \
-    --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
-  if container_running; then
-    docker --context "$DOCKER_CONTEXT" exec "$CONTAINER" \
-      supervisorctl -c /etc/supervisor/supervisord.conf status \
-      xorg mutter chromium neko kernel-images-api
-  fi
-}
-
-TUNNEL_PID=""
-
-close_tunnel() {
-  if [[ -n "$TUNNEL_PID" ]] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
-    kill "$TUNNEL_PID" 2>/dev/null || true
-    wait "$TUNNEL_PID" 2>/dev/null || true
-  fi
-  TUNNEL_PID=""
-}
-
-start_tunnel() {
-  printf 'Forwarding http://127.0.0.1:%s to %s through %s\n' "$HTTP_PORT" "$CONTAINER" "$REMOTE_HOST"
-  ssh -N \
-    -o BatchMode=yes \
-    -o ExitOnForwardFailure=yes \
-    -o ServerAliveInterval=30 \
-    -L "127.0.0.1:${HTTP_PORT}:127.0.0.1:${HTTP_PORT}" \
-    "$REMOTE_HOST" </dev/null &
-  TUNNEL_PID=$!
-}
-
-wait_for_tunnel() {
-  local attempts=0 tunnel_status
-  while [[ "$attempts" -lt 50 ]]; do
-    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
-      if wait "$TUNNEL_PID"; then
-        tunnel_status=0
-      else
-        tunnel_status=$?
-      fi
-      die "SSH tunnel exited before becoming ready (status ${tunnel_status})"
-    fi
-    if curl --fail --silent --connect-timeout 1 --max-time 2 \
-      "http://127.0.0.1:${HTTP_PORT}/" >/dev/null; then
-      return
-    fi
-    attempts=$((attempts + 1))
-    sleep 0.1
-  done
-  die "SSH tunnel did not become ready within 5 seconds"
-}
-
-emit_descriptor() {
-  bun "$ROOT_DIR/tools/runtime-config.ts" descriptor "$NAME" "$HTTP_PORT"
-}
-
-launch_target() {
-  [[ -x "$APP_EXECUTABLE" ]] || die "app is not built; run 'tools/fetch-webrtc && zig build'"
-  container_running || die "$CONTAINER is not running"
-  trap close_tunnel EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  start_tunnel
-  wait_for_tunnel
-  emit_descriptor | "$APP_EXECUTABLE" --connection-stdin
-}
-
-command_name="${1:-}"
-target_name="${2:-}"
-case "$command_name" in
-  status)
-    [[ -n "$target_name" ]] || die "status requires a target name"
-    load_config "$target_name"
-    show_status
-    ;;
-  descriptor)
-    [[ -n "$target_name" ]] || die "descriptor requires a target name"
-    load_config "$target_name"
-    emit_descriptor
-    ;;
-  launch)
-    [[ -n "$target_name" ]] || die "launch requires a target name"
-    load_config "$target_name"
-    launch_target
-    ;;
-  help|-h|--help) usage ;;
-  *) usage >&2; exit 2 ;;
-esac

@@ -7,7 +7,7 @@ import { runProvider } from "./provider.ts";
 import { browserFarm } from "./runtime.ts";
 import { runView } from "./view.ts";
 
-const HELP = `agentbrowse: create remote Kernel browsers
+const HELP = `agentbrowse: create Kernel browsers on ordered backends
 
 Usage:
   agentbrowse create NAME --slot N [--image REF] [--json]
@@ -129,6 +129,7 @@ function success(data: unknown): string {
 function createPayload(result: CreateResult): Record<string, unknown> {
   return {
     name: result.name,
+    backend: result.backend,
     slot: result.slot,
     container: result.container,
     image: result.image,
@@ -159,6 +160,7 @@ function failure(error: CliError): string {
 function humanCreate(result: CreateResult): string {
   const verb = result.created ? "Created" : "Ready";
   return `${verb} browser target ${result.name}
+  Backend: ${result.backend}
   Container: ${result.container}
   Image: ${result.image}
   CDP: ${result.cdpUrl}
@@ -174,14 +176,15 @@ View:
 
 function humanDestroy(result: DestroyResult): string {
   return result.destroyed
-    ? `Deleted ${result.container}; its Kernel image was preserved\n`
-    : `${result.container} was already absent; removed its runtime metadata\n`;
+    ? `Deleted ${result.container} from ${result.backend}; its Kernel image was preserved\n`
+    : `${result.container} was already absent from ${result.backend}; removed its runtime metadata\n`;
 }
 
 function listPayload(results: readonly BrowserListEntry[]): Record<string, unknown> {
   return {
     browsers: results.map((browser) => ({
       name: browser.name,
+      backend: browser.backend,
       slot: browser.slot,
       container: browser.container,
       state: browser.state,
@@ -198,12 +201,13 @@ function humanList(results: readonly BrowserListEntry[]): string {
   if (results.length === 0) return "No agentbrowse browser targets found\n";
   const rows = results.map((browser) => [
     browser.name,
+    browser.backend,
     String(browser.slot),
     browser.slotConflict ? `${browser.state} !` : browser.state,
     browser.cdpUrl,
     browser.liveViewUrl,
   ]);
-  const headings = ["NAME", "SLOT", "STATE", "CDP", "LIVE VIEW"];
+  const headings = ["NAME", "BACKEND", "SLOT", "STATE", "CDP", "LIVE VIEW"];
   const widths = headings.map((heading, index) =>
     Math.max(heading.length, ...rows.map((row) => row[index]!.length)),
   );
