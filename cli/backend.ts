@@ -1,5 +1,6 @@
 import type { AgentbrowseConfig } from "../config/deployment.ts";
 import { requireConfigured } from "../config/deployment.ts";
+import { KERNEL_HEADFUL_IMAGE_LOCK } from "../config/kernel-headful-image.ts";
 import { CliError } from "./errors.ts";
 import { CHROMIUM_FLAGS, type Target } from "./model.ts";
 
@@ -162,7 +163,6 @@ function normalizedBindings(inspect: DockerInspect): Record<string, readonly Por
 export class DockerFarmBackend implements FarmBackend {
   readonly context: string;
   readonly remoteHost: string | null;
-  readonly sourceDir: string | null;
   private readonly runCommand: BackendCommand;
 
   constructor(
@@ -176,7 +176,6 @@ export class DockerFarmBackend implements FarmBackend {
       config.path,
     );
     this.remoteHost = config.remote.host;
-    this.sourceDir = config.images.sourceDirectory;
     this.runCommand = dependencies.command ?? defaultCommand;
   }
 
@@ -255,29 +254,7 @@ export class DockerFarmBackend implements FarmBackend {
     if (configured !== undefined && configured !== null && configured.trim() !== "") {
       return configured;
     }
-    if (this.sourceDir === null) {
-      throw new CliError(
-        "kernel_images_not_configured",
-        "Browser image source is not configured",
-        `set images.sourceDirectory in ${this.config.path}, set AGENTBROWSE_KERNEL_IMAGES, or select an image with --image`,
-      );
-    }
-    const revision = await this.runCommand([
-      "git",
-      "-C",
-      this.sourceDir,
-      "rev-parse",
-      "--short=12",
-      "HEAD",
-    ]);
-    if (revision.exitCode !== 0) {
-      throw new CliError(
-        "kernel_images_unavailable",
-        `kernel-images checkout is unavailable at ${this.sourceDir}`,
-        "set --image or AGENTBROWSE_IMAGE to an image already loaded on the browser host",
-      );
-    }
-    return `agentbrowse/kernel-headful:${revision.stdout}`;
+    return KERNEL_HEADFUL_IMAGE_LOCK.runtimeReference;
   }
 
   async imageExists(image: string): Promise<boolean> {

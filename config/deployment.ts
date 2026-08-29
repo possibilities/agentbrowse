@@ -20,7 +20,6 @@ export interface AgentbrowseConfig {
   };
   readonly images: {
     readonly defaultImage: string | null;
-    readonly sourceDirectory: string | null;
   };
   readonly browser: {
     readonly nekoLogLevel: string;
@@ -155,13 +154,6 @@ export function loadAgentbrowseConfig(
     },
     images: {
       defaultImage: configuredString(env, "AGENTBROWSE_IMAGE", images, "defaultImage", path),
-      sourceDirectory: configuredString(
-        env,
-        "AGENTBROWSE_KERNEL_IMAGES",
-        images,
-        "sourceDirectory",
-        path,
-      ),
     },
     browser: {
       nekoLogLevel:

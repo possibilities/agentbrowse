@@ -8,6 +8,9 @@ may be present.
 
 The version 1 fields are:
 
+When `images.defaultImage` is omitted, agentbrowse uses the exact `linux/amd64`
+digest in the checked-in Kernel image lock.
+
 | Field | Purpose | Environment override |
 |---|---|---|
 | `docker.context` | Docker context used for browser containers | `AGENTBROWSE_DOCKER_CONTEXT` |
@@ -17,7 +20,6 @@ The version 1 fields are:
 | `remote.networkAddress` | Stable IPv4 address used for CDP and WebRTC binds | `AGENTBROWSE_NETWORK_ADDRESS` |
 | `remote.networkAddressCommand` | Alternative remote command that prints the IPv4 address | `AGENTBROWSE_NETWORK_ADDRESS_COMMAND` |
 | `images.defaultImage` | Optional already-loaded default image | `AGENTBROWSE_IMAGE` |
-| `images.sourceDirectory` | Checkout whose Git revision selects the default image tag | `AGENTBROWSE_KERNEL_IMAGES` |
 | `browser.nekoLogLevel` | Neko log level; defaults to `info` | `AGENTBROWSE_NEKO_LOG_LEVEL` |
 | `browser.timezone` | Optional `TZ` passed into new browser containers | `AGENTBROWSE_BROWSER_TIMEZONE` |
 | `provider.name` | agent-browser provider identity; defaults to `agentbrowse` | `AGENTBROWSE_PROVIDER_NAME` |

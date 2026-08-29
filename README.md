@@ -121,10 +121,12 @@ agentbrowse destroy testing
 ```
 
 Pass `--json` to either lifecycle command for a stable
-`{schema_version,ok,error,data}` envelope. With `images.sourceDirectory`
-configured, the CLI selects the SHA-tagged image matching that checkout;
-`images.defaultImage`, `--image`, or `AGENTBROWSE_IMAGE` selects an
-already-loaded image explicitly.
+`{schema_version,ok,error,data}` envelope. By default the CLI selects the exact
+`linux/amd64` platform digest in `config/kernel-headful.lock.json`;
+`images.defaultImage`, `--image`, or `AGENTBROWSE_IMAGE` selects another
+already-loaded image explicitly. Maintainers intentionally refresh the lock
+with `bun run images:update-lock FULL_KERNEL_COMMIT`; ordinary installation and
+browser launch never inspect the registry or mutate the lock.
 
 ## Native Live View
 

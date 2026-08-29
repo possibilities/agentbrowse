@@ -10,7 +10,7 @@
     "networkAddress": "192.0.2.10"
   },
   "images": {
-    "sourceDirectory": "/absolute/path/to/kernel-images"
+    "defaultImage": "docker.io/onkernel/chromium-headful@sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3"
   },
   "browser": {
     "timezone": "UTC"
