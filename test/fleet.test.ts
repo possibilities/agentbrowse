@@ -324,10 +324,44 @@ test("backend-bound receipt routes cleanup even when order changes", async () =>
   const apple = new FleetBackend("apple-container-local");
   const launched = await fleet([apple], directory).provisionProfile({ profile: "testing" });
   const artbird = new FleetBackend("artbird");
+  artbird.probeError = new CliError("browser_host_unreachable", "Artbird is offline");
+  apple.events.splice(0);
 
   const result = await fleet([artbird, apple], directory).destroy(launched.name);
 
   expect(result.backend).toBe("apple-container-local");
+  expect(apple.events).toContain("remove");
+  expect(artbird.events).toEqual([]);
+});
+
+test("receiptless cleanup fails closed before listing an available backend", async () => {
+  const apple = new FleetBackend("apple-container-local");
+  const launched = await fleet([apple]).provisionProfile({ profile: "testing" });
+  const artbird = new FleetBackend("artbird");
+  artbird.probeError = new CliError("browser_host_unreachable", "Artbird is offline");
+  apple.events.splice(0);
+
+  await expect(fleet([apple, artbird]).destroy(launched.name)).rejects.toMatchObject({
+    code: "cleanup_backend_unavailable",
+    message: expect.stringContaining("without a backend-bound receipt"),
+  });
+
+  expect(artbird.events).toEqual(["probe"]);
+  expect(apple.events).toEqual(["probe"]);
+  expect(apple.state).toBeDefined();
+});
+
+test("explicit backend cleanup ignores an unrelated unavailable backend", async () => {
+  const apple = new FleetBackend("apple-container-local");
+  const launched = await fleet([apple]).provisionProfile({ profile: "testing" });
+  const artbird = new FleetBackend("artbird");
+  artbird.probeError = new CliError("browser_host_unreachable", "Artbird is offline");
+  apple.events.splice(0);
+
+  const result = await fleet([artbird, apple]).destroy(launched.name, apple.id);
+
+  expect(result.backend).toBe("apple-container-local");
+  expect(result.destroyed).toBe(true);
   expect(apple.events).toContain("remove");
   expect(artbird.events).toEqual([]);
 });

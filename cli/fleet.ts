@@ -200,8 +200,11 @@ export class BrowserFleet {
       } catch (error) {
         if (!isAvailabilityFailure(error)) throw error;
         outcomes.push({ backend: farm.backend.id, error });
-        continue;
       }
+    }
+    if (outcomes.length > 0) throw unavailableCleanup(name, outcomes);
+
+    for (const farm of this.farms) {
       const match = (await farm.list(undefined, true)).find((target) => target.name === name);
       if (match !== undefined) {
         const result = await farm.destroy(name, true);
@@ -209,12 +212,7 @@ export class BrowserFleet {
         return result;
       }
     }
-    if (outcomes.length === this.farms.length && this.farms.length > 0) {
-      throw unavailableSet(outcomes);
-    }
-    const firstAvailable = this.farms.find(
-      (farm) => !outcomes.some((outcome) => outcome.backend === farm.backend.id),
-    );
+    const firstAvailable = this.farms[0];
     if (firstAvailable === undefined) throw noBackendsConfigured();
     const result = await firstAvailable.destroy(name, true);
     await this.clearDestroyedTarget(result, profileHint);
@@ -320,6 +318,24 @@ function unavailableSet(outcomes: readonly AvailabilityOutcome[]): CliError {
     "no_backend_available",
     `no Browser backend is available (${summary})`,
     recovery === "" ? undefined : recovery,
+  );
+}
+
+function unavailableCleanup(name: string, outcomes: readonly AvailabilityOutcome[]): CliError {
+  const summary = outcomes.map(({ backend, error }) => `${backend}: ${error.message}`).join("; ");
+  const backendRecovery = outcomes
+    .map(({ backend, error }) =>
+      error.recovery === undefined ? null : `${backend}: ${error.recovery}`,
+    )
+    .filter((value): value is string => value !== null)
+    .join("; ");
+  const recovery = `restore access to every configured backend or name the exact backend for cleanup${
+    backendRecovery === "" ? "" : `; ${backendRecovery}`
+  }`;
+  return new CliError(
+    "cleanup_backend_unavailable",
+    `cannot safely destroy Browser target ${name} without a backend-bound receipt because not every configured backend is available (${summary})`,
+    recovery,
   );
 }
 
