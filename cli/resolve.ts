@@ -1,8 +1,9 @@
 import { CliError } from "./errors.ts";
-import type { BrowserFarm, BrowserListEntry } from "./farm.ts";
+import type { BrowserListEntry } from "./farm.ts";
+import type { BrowserFleet } from "./fleet.ts";
 import { providerProfileName } from "./model.ts";
 
-type ResolveFarm = Pick<BrowserFarm, "targetForProfile">;
+type ResolveFarm = Pick<BrowserFleet, "targetForProfile">;
 
 export interface ResolvedProviderTarget {
   readonly session: string;
@@ -24,7 +25,7 @@ export async function resolveProviderTarget(
   if (target === undefined) {
     throw new CliError(
       "browser_target_not_found",
-      `browser profile ${profile} has no live Browser target`,
+      `Browser profile ${profile} has no current bound target`,
       `launch agent-browser session ${session} before resolving its Browser target`,
     );
   }

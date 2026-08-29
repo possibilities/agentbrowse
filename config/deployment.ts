@@ -6,39 +6,43 @@ import { CliError } from "../cli/errors.ts";
 
 export type AgentbrowseEnvironment = Readonly<Record<string, string | undefined>>;
 
+export interface DockerBackendConfig {
+  readonly id: string;
+  readonly type: "docker";
+  readonly context: string;
+  readonly expectedEndpoint: string | null;
+  readonly expectedEngine: string | null;
+  readonly remoteHost: string;
+  readonly networkAddress: string | null;
+  readonly networkAddressCommand: string | null;
+}
+
+export interface AppleContainerBackendConfig {
+  readonly id: string;
+  readonly type: "apple-container";
+  readonly command: string;
+  readonly applicationRoot: string;
+  readonly maxTargets: 1;
+  readonly cpus: 2;
+  readonly memory: "6G";
+}
+
+export type BackendConfig = DockerBackendConfig | AppleContainerBackendConfig;
+
 export interface AgentbrowseConfig {
+  readonly version: 2;
   readonly path: string;
-  readonly docker: {
-    readonly context: string | null;
-    readonly expectedEndpoint: string | null;
-    readonly expectedEngine: string | null;
-  };
-  readonly remote: {
-    readonly host: string | null;
-    readonly networkAddress: string | null;
-    readonly networkAddressCommand: string | null;
-  };
-  readonly images: {
-    readonly defaultImage: string | null;
-    readonly sourceDirectory: string | null;
-  };
-  readonly browser: {
-    readonly nekoLogLevel: string;
-    readonly timezone: string | null;
-  };
-  readonly provider: {
-    readonly name: string;
-    readonly description: string;
-  };
+  readonly backends: readonly BackendConfig[];
+  readonly images: { readonly defaultImage: string | null };
+  readonly browser: { readonly nekoLogLevel: string; readonly timezone: string | null };
+  readonly provider: { readonly name: string; readonly description: string };
   readonly liveView: {
     readonly labelPrefix: string;
     readonly username: string;
     readonly password: string;
     readonly readOnly: boolean;
   };
-  readonly discovery: {
-    readonly commandTimeoutMs: number;
-  };
+  readonly discovery: { readonly commandTimeoutMs: number };
 }
 
 type JsonObject = Record<string, unknown>;
@@ -46,6 +50,7 @@ type JsonObject = Record<string, unknown>;
 const DEFAULT_DISCOVERY_COMMAND_TIMEOUT_MS = 2_000;
 const MIN_DISCOVERY_COMMAND_TIMEOUT_MS = 100;
 const MAX_DISCOVERY_COMMAND_TIMEOUT_MS = 4_000;
+const BACKEND_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 
 export function agentbrowseConfigPath(env: AgentbrowseEnvironment = process.env): string {
   const explicit = env.AGENTBROWSE_CONFIG;
@@ -67,101 +72,25 @@ export function loadAgentbrowseConfig(
 ): AgentbrowseConfig {
   const path = agentbrowseConfigPath(env);
   const root = readConfigFile(path);
-  const docker = objectValue(root, "docker", path);
-  const remote = objectValue(root, "remote", path);
   const images = objectValue(root, "images", path);
   const browser = objectValue(root, "browser", path);
   const provider = objectValue(root, "provider", path);
   const liveView = objectValue(root, "liveView", path);
   const discovery = objectValue(root, "discovery", path);
 
-  const version = root.version;
-  if (version !== undefined && version !== 1) {
-    throw invalidConfiguration(`${path} has unsupported version ${String(version)}`);
+  if (root.version === undefined && Object.keys(root).length > 0) {
+    throw invalidConfiguration(`${path} must declare version 2`);
   }
-  const environmentNetworkAddress =
-    env.AGENTBROWSE_NETWORK_ADDRESS === undefined
-      ? null
-      : configuredString(env, "AGENTBROWSE_NETWORK_ADDRESS", {}, "networkAddress", path);
-  const environmentNetworkAddressCommand =
-    env.AGENTBROWSE_NETWORK_ADDRESS_COMMAND === undefined
-      ? null
-      : configuredString(
-          env,
-          "AGENTBROWSE_NETWORK_ADDRESS_COMMAND",
-          {},
-          "networkAddressCommand",
-          path,
-        );
-  if (environmentNetworkAddress !== null && environmentNetworkAddressCommand !== null) {
-    throw invalidConfiguration(
-      "AGENTBROWSE_NETWORK_ADDRESS and AGENTBROWSE_NETWORK_ADDRESS_COMMAND are mutually exclusive",
-    );
+  if (root.version !== undefined && root.version !== 2) {
+    throw invalidConfiguration(`${path} has unsupported version ${String(root.version)}`);
   }
-  const fileNetworkAddress = configuredString(
-    {},
-    "AGENTBROWSE_NETWORK_ADDRESS",
-    remote,
-    "networkAddress",
-    path,
-  );
-  const fileNetworkAddressCommand = configuredString(
-    {},
-    "AGENTBROWSE_NETWORK_ADDRESS_COMMAND",
-    remote,
-    "networkAddressCommand",
-    path,
-  );
-  if (
-    environmentNetworkAddress === null &&
-    environmentNetworkAddressCommand === null &&
-    fileNetworkAddress !== null &&
-    fileNetworkAddressCommand !== null
-  ) {
-    throw invalidConfiguration(
-      `${path}: remote.networkAddress and remote.networkAddressCommand are mutually exclusive`,
-    );
-  }
-  const networkAddress =
-    environmentNetworkAddress ??
-    (environmentNetworkAddressCommand === null ? fileNetworkAddress : null);
-  const networkAddressCommand =
-    environmentNetworkAddressCommand ??
-    (environmentNetworkAddress === null ? fileNetworkAddressCommand : null);
 
   return {
+    version: 2,
     path,
-    docker: {
-      context: configuredString(env, "AGENTBROWSE_DOCKER_CONTEXT", docker, "context", path),
-      expectedEndpoint: configuredString(
-        env,
-        "AGENTBROWSE_DOCKER_ENDPOINT",
-        docker,
-        "expectedEndpoint",
-        path,
-      ),
-      expectedEngine: configuredString(
-        env,
-        "AGENTBROWSE_DOCKER_ENGINE",
-        docker,
-        "expectedEngine",
-        path,
-      ),
-    },
-    remote: {
-      host: configuredString(env, "AGENTBROWSE_REMOTE_HOST", remote, "host", path),
-      networkAddress,
-      networkAddressCommand,
-    },
+    backends: parseBackends(root.backends, path),
     images: {
       defaultImage: configuredString(env, "AGENTBROWSE_IMAGE", images, "defaultImage", path),
-      sourceDirectory: configuredString(
-        env,
-        "AGENTBROWSE_KERNEL_IMAGES",
-        images,
-        "sourceDirectory",
-        path,
-      ),
     },
     browser: {
       nekoLogLevel:
@@ -174,7 +103,7 @@ export function loadAgentbrowseConfig(
         configuredString(env, "AGENTBROWSE_PROVIDER_NAME", provider, "name", path) ?? "agentbrowse",
       description:
         configuredString(env, "AGENTBROWSE_PROVIDER_DESCRIPTION", provider, "description", path) ??
-        "Manage remote Kernel browser targets",
+        "Manage ordered Kernel browser backends",
     },
     liveView: {
       labelPrefix:
@@ -215,18 +144,85 @@ export function loadAgentbrowseConfig(
   };
 }
 
-export function requireConfigured(
-  value: string | null,
-  field: string,
-  envName: string,
-  configPath: string,
-): string {
-  if (value !== null) return value;
-  throw new CliError(
-    "browser_host_not_configured",
-    "Browser host is not configured",
-    `set ${field} in ${configPath} or set ${envName}`,
-  );
+function parseBackends(value: unknown, path: string): readonly BackendConfig[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length === 0) {
+    throw invalidConfiguration(`${path}: backends must be a non-empty array`);
+  }
+  const ids = new Set<string>();
+  return value.map((entry, index) => {
+    if (!isObject(entry)) {
+      throw invalidConfiguration(`${path}: backends[${index}] must be a JSON object`);
+    }
+    const id = requiredString(entry, "id", `${path}: backends[${index}]`);
+    if (!BACKEND_ID_PATTERN.test(id)) {
+      throw invalidConfiguration(`${path}: backend id must match [a-z][a-z0-9-]{0,31}: ${id}`);
+    }
+    if (ids.has(id)) throw invalidConfiguration(`${path}: duplicate backend id: ${id}`);
+    ids.add(id);
+
+    if (entry.type === "docker") return parseDockerBackend(entry, id, path, index);
+    if (entry.type === "apple-container") return parseAppleBackend(entry, id, path, index);
+    throw invalidConfiguration(`${path}: backends[${index}].type is unsupported`);
+  });
+}
+
+function parseDockerBackend(
+  entry: JsonObject,
+  id: string,
+  path: string,
+  index: number,
+): DockerBackendConfig {
+  const location = `${path}: backends[${index}]`;
+  const networkAddress = optionalString(entry, "networkAddress", location);
+  const networkAddressCommand = optionalString(entry, "networkAddressCommand", location);
+  if ((networkAddress === null) === (networkAddressCommand === null)) {
+    throw invalidConfiguration(
+      `${location} must set exactly one of networkAddress and networkAddressCommand`,
+    );
+  }
+  return {
+    id,
+    type: "docker",
+    context: requiredString(entry, "context", location),
+    expectedEndpoint: optionalString(entry, "expectedEndpoint", location),
+    expectedEngine: optionalString(entry, "expectedEngine", location),
+    remoteHost: requiredString(entry, "remoteHost", location),
+    networkAddress,
+    networkAddressCommand,
+  };
+}
+
+function parseAppleBackend(
+  entry: JsonObject,
+  id: string,
+  path: string,
+  index: number,
+): AppleContainerBackendConfig {
+  const location = `${path}: backends[${index}]`;
+  const command = optionalString(entry, "command", location) ?? "/usr/local/bin/container";
+  const applicationRoot =
+    optionalString(entry, "applicationRoot", location) ??
+    join(homedir(), "Library", "Application Support", "agentbrowse-infra", "runtime");
+  if (!isAbsolute(command)) throw invalidConfiguration(`${location}.command must be absolute`);
+  if (!isAbsolute(applicationRoot)) {
+    throw invalidConfiguration(`${location}.applicationRoot must be absolute`);
+  }
+  const maxTargets = optionalInteger(entry, "maxTargets", 1, location);
+  const cpus = optionalInteger(entry, "cpus", 2, location);
+  const memory = optionalString(entry, "memory", location) ?? "6G";
+  if (maxTargets !== 1) throw invalidConfiguration(`${location}.maxTargets must be 1`);
+  if (cpus !== 2) throw invalidConfiguration(`${location}.cpus must be 2`);
+  if (memory !== "6G") throw invalidConfiguration(`${location}.memory must be 6G`);
+  return {
+    id,
+    type: "apple-container",
+    command,
+    applicationRoot,
+    maxTargets: 1,
+    cpus: 2,
+    memory,
+  };
 }
 
 function readConfigFile(path: string): JsonObject {
@@ -263,6 +259,35 @@ function configuredString(
     throw invalidConfiguration(`${envName} or ${path}: ${key} must be a non-empty string`);
   }
   return value;
+}
+
+function requiredString(object: JsonObject, key: string, location: string): string {
+  const value = optionalString(object, key, location);
+  if (value === null) throw invalidConfiguration(`${location}.${key} is required`);
+  return value;
+}
+
+function optionalString(object: JsonObject, key: string, location: string): string | null {
+  const value = object[key];
+  if (value === undefined) return null;
+  if (typeof value !== "string" || value.trim() === "" || hasControlCharacter(value)) {
+    throw invalidConfiguration(`${location}.${key} must be a non-empty string`);
+  }
+  return value;
+}
+
+function optionalInteger(
+  object: JsonObject,
+  key: string,
+  fallback: number,
+  location: string,
+): number {
+  const value = object[key];
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value)) {
+    throw invalidConfiguration(`${location}.${key} must be an integer`);
+  }
+  return Number(value);
 }
 
 function configuredBoolean(

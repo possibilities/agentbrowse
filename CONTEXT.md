@@ -21,6 +21,28 @@ provider maps to one Browser profile and, while running, one exact Browser targe
 incarnation. Closing and relaunching it preserves the profile but changes the target.
 _Avoid: Browser session, target name, profile name._
 
+**Ordered backend set** — The configured sequence of independently identified
+Browser target runtimes. Provisioning considers them in order and advances only
+when the current backend reports a classified availability failure.
+_Avoid: failover list, provider chain._
+
+**Availability classification** — A pre-mutation result that says a backend's
+host or container service cannot currently be reached. It is the only failure
+class that permits provisioning to continue to the next configured backend.
+_Avoid: retryable error, generic fallback error._
+
+**Backend-bound target receipt** — The versioned runtime record that binds one
+Browser target to its Browser profile, backend identity, exact generated container
+identity, target name, and slot. Cleanup routes through that backend and rechecks
+runtime ownership labels before deletion.
+_Avoid: env file, generic target metadata._
+
+**Profile binding receipt** — The durable local record that assigns one Browser
+profile to the backend that owns its authentication state and, while running, its
+current exact Browser target. Target deletion clears the target but preserves the
+backend home; explicit profile deletion removes the receipt.
+_Avoid: target receipt, session receipt, failover cache._
+
 **Live View session** — One authenticated connection to a Kernel/Neko endpoint,
 including its WebSocket control plane, WebRTC peer, control ownership, decoded
 frames, and input state.

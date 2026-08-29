@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 
-import type { BrowserFarm } from "./farm.ts";
+import type { BrowserFleet } from "./fleet.ts";
 import { providerSessionProfileName, resolveProviderTarget } from "./resolve.ts";
 import { browserFarm } from "./runtime.ts";
 
@@ -24,7 +24,7 @@ async function launchLiveView(
   return await child.exited;
 }
 
-type ViewFarm = Pick<BrowserFarm, "targetForProfile">;
+type ViewFarm = Pick<BrowserFleet, "targetForProfile">;
 
 export function viewProfileName(session: string): string {
   return providerSessionProfileName(session);

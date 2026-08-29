@@ -9,34 +9,40 @@ const entries: BrowserListEntry[] = [
   {
     name: "ready",
     profile: "ready",
+    backend: "artbird",
     slot: 1,
     container: "agentbrowse-browser-ready",
     state: "running",
     status: "Up 2 minutes",
     cdpUrl: "http://100.64.0.8:9223",
     liveViewUrl: "http://127.0.0.1:18081",
+    liveViewAccess: { mode: "ssh", remoteHost: "browser-host", remotePort: 18081 },
     slotConflict: false,
   },
   {
     name: "stopped",
     profile: "stopped",
+    backend: "artbird",
     slot: 2,
     container: "agentbrowse-browser-stopped",
     state: "exited",
     status: "Exited (0)",
     cdpUrl: "http://100.64.0.8:9224",
     liveViewUrl: "http://127.0.0.1:18082",
+    liveViewAccess: { mode: "ssh", remoteHost: "browser-host", remotePort: 18082 },
     slotConflict: false,
   },
   {
     name: "collision",
     profile: "collision",
+    backend: "artbird",
     slot: 3,
     container: "agentbrowse-browser-collision",
     state: "running",
     status: "Up 1 minute",
     cdpUrl: "http://100.64.0.8:9225",
     liveViewUrl: "http://127.0.0.1:18083",
+    liveViewAccess: { mode: "ssh", remoteHost: "browser-host", remotePort: 18083 },
     slotConflict: true,
   },
 ];
@@ -115,7 +121,6 @@ test("aborting tunnel startup reaps the SSH child before rejecting", async () =>
   };
   const controller = new AbortController();
   const opening = LiveViewTunnel.open(entries[0]!, {
-    remoteHost: "browser-host",
     signal: controller.signal,
     dependencies: {
       allocatePort: async () => 49_152,
@@ -137,4 +142,28 @@ test("aborting tunnel startup reaps the SSH child before rejecting", async () =>
   expect(result).toBe(controller.signal.reason);
   expect(signals).toEqual([15]);
   expect(await exited).toBe(143);
+});
+
+test("direct Live View access returns the Apple URL without spawning SSH", async () => {
+  let spawned = false;
+  const access = await LiveViewTunnel.open(
+    {
+      name: "ready",
+      slot: 1,
+      liveViewAccess: { mode: "direct", baseUrl: "http://192.168.64.2:8080" },
+    },
+    {
+      dependencies: {
+        spawn: () => {
+          spawned = true;
+          throw new Error("direct access must not spawn");
+        },
+      },
+    },
+  );
+
+  expect(access.baseUrl).toBe("http://192.168.64.2:8080");
+  expect(access.localPort).toBeNull();
+  expect(spawned).toBe(false);
+  await access.close();
 });

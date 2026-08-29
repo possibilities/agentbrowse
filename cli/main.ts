@@ -15,7 +15,7 @@ import { type ResolvedProviderTarget, resolveProviderTarget } from "./resolve.ts
 import { browserFarm } from "./runtime.ts";
 import { runView } from "./view.ts";
 
-const HELP = `agentbrowse: create remote Kernel browsers
+const HELP = `agentbrowse: create Kernel browsers on ordered backends
 
 Usage:
   agentbrowse create NAME --slot N [--profile PROFILE] [--image REF] [--json]
@@ -214,6 +214,7 @@ function createPayload(result: CreateResult): Record<string, unknown> {
   return {
     name: result.name,
     profile: result.profile,
+    backend: result.backend,
     slot: result.slot,
     container: result.container,
     image: result.image,
@@ -245,6 +246,7 @@ function humanCreate(result: CreateResult): string {
   const verb = result.created ? "Created" : "Ready";
   return `${verb} browser target ${result.name}
   Browser profile: ${result.profile}
+  Backend: ${result.backend}
   Container: ${result.container}
   Image: ${result.image}
   CDP: ${result.cdpUrl}
@@ -261,9 +263,9 @@ View:
 function humanDestroy(result: DestroyResult): string {
   return result.destroyed
     ? result.profile === null
-      ? `Deleted ${result.container}; its Kernel image was preserved\n`
-      : `Deleted ${result.container}; Browser profile ${result.profile} and its Kernel image were preserved\n`
-    : `${result.container} was already absent; removed its runtime metadata\n`;
+      ? `Deleted ${result.container} from ${result.backend}; its Kernel image was preserved\n`
+      : `Deleted ${result.container} from ${result.backend}; Browser profile ${result.profile} and its Kernel image were preserved\n`
+    : `${result.container} was already absent from ${result.backend}; removed its runtime metadata\n`;
 }
 
 function listPayload(results: readonly BrowserListEntry[]): Record<string, unknown> {
@@ -271,6 +273,7 @@ function listPayload(results: readonly BrowserListEntry[]): Record<string, unkno
     browsers: results.map((browser) => ({
       name: browser.name,
       profile: browser.profile,
+      backend: browser.backend,
       slot: browser.slot,
       container: browser.container,
       state: browser.state,
@@ -288,12 +291,13 @@ function humanList(results: readonly BrowserListEntry[]): string {
   const rows = results.map((browser) => [
     browser.name,
     browser.profile ?? "-",
+    browser.backend,
     String(browser.slot),
     browser.slotConflict ? `${browser.state} !` : browser.state,
     browser.cdpUrl,
     browser.liveViewUrl,
   ]);
-  const headings = ["NAME", "PROFILE", "SLOT", "STATE", "CDP", "LIVE VIEW"];
+  const headings = ["NAME", "PROFILE", "BACKEND", "SLOT", "STATE", "CDP", "LIVE VIEW"];
   const widths = headings.map((heading, index) =>
     Math.max(heading.length, ...rows.map((row) => row[index]!.length)),
   );
@@ -306,7 +310,7 @@ function humanList(results: readonly BrowserListEntry[]): string {
 }
 
 function humanProfileCreate(result: ProfileCreateResult): string {
-  return `${result.created ? "Created" : "Ready"} Browser profile ${result.name} (${result.volume})\n`;
+  return `${result.created ? "Created" : "Ready"} Browser profile ${result.name} on ${result.backend} (${result.volume})\n`;
 }
 
 function profileListPayload(results: readonly ProfileListEntry[]): Record<string, unknown> {
@@ -317,10 +321,11 @@ function humanProfileList(results: readonly ProfileListEntry[]): string {
   if (results.length === 0) return "No agentbrowse Browser profiles found\n";
   const rows = results.map((profile) => [
     profile.name,
+    profile.backend,
     profile.volume,
     profile.consumers.length === 0 ? "-" : profile.consumers.join(","),
   ]);
-  const headings = ["NAME", "VOLUME", "CONSUMERS"];
+  const headings = ["NAME", "BACKEND", "VOLUME", "CONSUMERS"];
   const widths = headings.map((heading, index) =>
     Math.max(heading.length, ...rows.map((row) => row[index]!.length)),
   );
@@ -334,8 +339,8 @@ function humanProfileList(results: readonly ProfileListEntry[]): string {
 
 function humanProfileDelete(result: ProfileDeleteResult): string {
   return result.deleted
-    ? `Deleted Browser profile ${result.name} (${result.volume})\n`
-    : `Browser profile ${result.name} was already absent\n`;
+    ? `Deleted Browser profile ${result.name} from ${result.backend} (${result.volume})\n`
+    : `Browser profile ${result.name} was already absent from ${result.backend}\n`;
 }
 
 function resolvePayload(result: ResolvedProviderTarget): Record<string, unknown> {
@@ -344,6 +349,7 @@ function resolvePayload(result: ResolvedProviderTarget): Record<string, unknown>
     profile: result.profile,
     target: {
       name: result.target.name,
+      backend: result.target.backend,
       slot: result.target.slot,
       container: result.target.container,
       state: result.target.state,
@@ -353,7 +359,7 @@ function resolvePayload(result: ResolvedProviderTarget): Record<string, unknown>
 }
 
 function humanResolve(result: ResolvedProviderTarget): string {
-  return `agent-browser session ${result.session}\n  Browser profile: ${result.profile}\n  Browser target: ${result.target.name}\n  Slot: ${result.target.slot}\n  State: ${result.target.state}\n`;
+  return `agent-browser session ${result.session}\n  Browser profile: ${result.profile}\n  Backend: ${result.target.backend}\n  Browser target: ${result.target.name}\n  Slot: ${result.target.slot}\n  State: ${result.target.state}\n`;
 }
 
 export async function run(argv: readonly string[], env = process.env): Promise<number> {

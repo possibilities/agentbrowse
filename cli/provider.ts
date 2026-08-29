@@ -1,5 +1,6 @@
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
-import type { BrowserFarm, CreateResult, DestroyResult } from "./farm.ts";
+import type { CreateResult, DestroyResult } from "./farm.ts";
+import type { BrowserFleet } from "./fleet.ts";
 import { providerProfileName } from "./model.ts";
 import { browserFarm } from "./runtime.ts";
 
@@ -7,7 +8,7 @@ const PROTOCOL = "agent-browser.plugin.v1";
 const CAPABILITY = "browser.provider";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
-type ProviderFarm = Pick<BrowserFarm, "provisionProfile" | "destroy">;
+type ProviderFarm = Pick<BrowserFleet, "provisionProfile" | "destroy">;
 
 export interface ProviderIdentity {
   readonly name: string;
@@ -16,7 +17,7 @@ export interface ProviderIdentity {
 
 const DEFAULT_PROVIDER_IDENTITY: ProviderIdentity = {
   name: "agentbrowse",
-  description: "Manage remote Kernel browser targets",
+  description: "Manage ordered Kernel browser backends",
 };
 
 interface PluginRequest {
@@ -91,25 +92,42 @@ function launchResponse(result: CreateResult): string {
       cdpUrl: result.cdpUrl,
       directPage: false,
       metadata: {
+        backend: result.backend,
         browserTarget: result.name,
         browserProfile: result.profile,
         slot: result.slot,
         liveViewUrl: result.liveViewUrl,
       },
-      cleanup: { browserTarget: result.name, browserProfile: result.profile },
+      cleanup: {
+        backend: result.backend,
+        browserTarget: result.name,
+        browserProfile: result.profile,
+      },
     },
   });
 }
 
-function closeTarget(request: PluginRequest): string {
+function closeTarget(request: PluginRequest): {
+  backend: string;
+  browserTarget: string;
+  browserProfile: string;
+} {
   if (request.capability !== CAPABILITY) {
     throw new Error(`browser.close requires capability ${CAPABILITY}`);
   }
   const name = request.request.browserTarget;
+  const backend = request.request.backend;
+  const profile = request.request.browserProfile;
   if (typeof name !== "string" || name === "") {
     throw new Error("browser.close requires browserTarget cleanup data");
   }
-  return name;
+  if (typeof backend !== "string" || backend === "") {
+    throw new Error("browser.close requires backend cleanup data");
+  }
+  if (typeof profile !== "string" || profile === "") {
+    throw new Error("browser.close requires browserProfile cleanup data");
+  }
+  return { backend, browserTarget: name, browserProfile: profile };
 }
 
 function closeResponse(result: DestroyResult): string {
@@ -117,6 +135,7 @@ function closeResponse(result: DestroyResult): string {
     data: {
       browserTarget: result.name,
       browserProfile: result.profile,
+      backend: result.backend,
       destroyed: result.destroyed,
     },
   });
@@ -143,7 +162,10 @@ export async function handleProviderRequest(
       return launchResponse(await farm.provisionProfile({ profile }));
     }
     if (input.type === "browser.close") {
-      return closeResponse(await farm.destroy(closeTarget(input)));
+      const cleanup = closeTarget(input);
+      return closeResponse(
+        await farm.destroy(cleanup.browserTarget, cleanup.backend, cleanup.browserProfile),
+      );
     }
     throw new Error(`unsupported provider request type: ${input.type}`);
   } catch (error) {

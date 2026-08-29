@@ -6,8 +6,9 @@ The compatibility target is Kernel's customized Neko client at
 reconfirmed against a runtime-only remote browser container on 2026-08-26. Values
 that identify a session, authenticate a peer, or fingerprint DTLS are omitted.
 
-The native client opens `ws://127.0.0.1:<slot>/ws` through the SSH tunnel with
-the descriptor username/password encoded as query items. The Kernel proxy
+The native client opens the descriptor's `/ws` URL—through a loopback SSH
+forward for Docker or directly at `192.168.64.x:8080` for Apple—with the
+descriptor username/password encoded as query items. The Kernel proxy
 adapts the current Neko protocol to the legacy event contract used by its web
 client. The useful order is:
 

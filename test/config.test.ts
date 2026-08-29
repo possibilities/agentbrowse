@@ -19,19 +19,19 @@ function configPath(): string {
   return join(directory, "config.json");
 }
 
-test("deployment defaults are generic and leave host choices unconfigured", () => {
+test("deployment defaults retain shared policy but require installed backends", () => {
   const path = configPath();
   const config = loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path });
 
   expect(config).toMatchObject({
+    version: 2,
     path,
-    docker: { context: null, expectedEndpoint: null, expectedEngine: null },
-    remote: { host: null, networkAddress: null, networkAddressCommand: null },
-    images: { defaultImage: null, sourceDirectory: null },
+    backends: [],
+    images: { defaultImage: null },
     browser: { nekoLogLevel: "info", timezone: null },
     provider: {
       name: "agentbrowse",
-      description: "Manage remote Kernel browser targets",
+      description: "Manage ordered Kernel browser backends",
     },
     liveView: {
       labelPrefix: "agentbrowse",
@@ -43,87 +43,91 @@ test("deployment defaults are generic and leave host choices unconfigured", () =
   });
 });
 
-test("versioned deployment config is shared and environment values override it", () => {
+test("version 2 preserves backend order and applies safe Apple defaults", () => {
   const path = configPath();
   writeFileSync(
     path,
     JSON.stringify({
-      version: 1,
-      docker: {
-        context: "remote-browser",
-        expectedEndpoint: "ssh://remote-browser",
-        expectedEngine: "browser-engine",
-      },
-      remote: {
-        host: "remote-browser",
-        networkAddressCommand: "network-tool address --ipv4",
-      },
-      images: { defaultImage: "browser:test", sourceDirectory: "/srv/kernel-images" },
+      version: 2,
+      backends: [
+        {
+          id: "artbird",
+          type: "docker",
+          context: "artbird",
+          expectedEndpoint: "ssh://artbird",
+          expectedEngine: "artbird",
+          remoteHost: "artbird",
+          networkAddressCommand: "tailscale ip -4",
+        },
+        { id: "apple-container-local", type: "apple-container" },
+      ],
+      images: { defaultImage: "browser@test" },
       browser: { nekoLogLevel: "debug", timezone: "UTC" },
-      provider: { name: "remote-browser", description: "Remote browsers" },
-      liveView: {
-        labelPrefix: "remote",
-        username: "viewer",
-        password: "secret",
-        readOnly: true,
-      },
+      provider: { name: "browser-provider", description: "Ordered browsers" },
+      liveView: { labelPrefix: "browser", username: "viewer", password: "secret" },
       discovery: { commandTimeoutMs: 1_500 },
     }),
   );
 
   const config = loadAgentbrowseConfig({
     AGENTBROWSE_CONFIG: path,
-    AGENTBROWSE_REMOTE_HOST: "override-host",
-    AGENTBROWSE_NETWORK_ADDRESS: "198.51.100.10",
+    AGENTBROWSE_IMAGE: "override@test",
     AGENTBROWSE_DISCOVERY_COMMAND_TIMEOUT_MS: "1200",
   });
 
-  expect(config).toMatchObject({
-    docker: {
-      context: "remote-browser",
-      expectedEndpoint: "ssh://remote-browser",
-      expectedEngine: "browser-engine",
-    },
-    remote: {
-      host: "override-host",
-      networkAddress: "198.51.100.10",
-      networkAddressCommand: null,
-    },
-    images: { defaultImage: "browser:test", sourceDirectory: "/srv/kernel-images" },
-    browser: { nekoLogLevel: "debug", timezone: "UTC" },
-    provider: { name: "remote-browser", description: "Remote browsers" },
-    liveView: {
-      labelPrefix: "remote",
-      username: "viewer",
-      password: "secret",
-      readOnly: true,
-    },
-    discovery: { commandTimeoutMs: 1_200 },
+  expect(config.backends.map((backend) => [backend.id, backend.type])).toEqual([
+    ["artbird", "docker"],
+    ["apple-container-local", "apple-container"],
+  ]);
+  expect(config.backends[1]).toMatchObject({
+    command: "/usr/local/bin/container",
+    maxTargets: 1,
+    cpus: 2,
+    memory: "6G",
   });
+  expect(config.images.defaultImage).toBe("override@test");
+  expect(config.discovery.commandTimeoutMs).toBe(1_200);
 });
 
-test("invalid deployment config fails before any remote command", () => {
+test("invalid versions, duplicate ids, and unsafe Apple capacity fail locally", () => {
   const path = configPath();
-  writeFileSync(path, JSON.stringify({ version: 2 }));
-
+  writeFileSync(path, JSON.stringify({ docker: { context: "legacy" } }));
   expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow(
-    "unsupported version 2",
+    "must declare version 2",
   );
-  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: "relative.json" })).toThrow(
-    "must be an absolute path",
+
+  writeFileSync(path, JSON.stringify({ version: 1 }));
+  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow(
+    "unsupported version 1",
   );
 
   writeFileSync(
     path,
     JSON.stringify({
-      version: 1,
-      remote: {
-        networkAddress: "192.0.2.10",
-        networkAddressCommand: "network-tool address --ipv4",
-      },
+      version: 2,
+      backends: [
+        {
+          id: "same",
+          type: "docker",
+          context: "one",
+          remoteHost: "one",
+          networkAddress: "192.0.2.1",
+        },
+        { id: "same", type: "apple-container" },
+      ],
     }),
   );
-  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow(
-    "are mutually exclusive",
+  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow("duplicate backend id");
+
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 2,
+      backends: [{ id: "local", type: "apple-container", maxTargets: 2 }],
+    }),
+  );
+  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow("maxTargets must be 1");
+  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: "relative.json" })).toThrow(
+    "must be an absolute path",
   );
 });

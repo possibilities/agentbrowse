@@ -22,6 +22,7 @@ test("slot deterministically assigns all browser ports", () => {
     name: "testing",
     profile: "testing",
     slot: 7,
+    backend: "docker",
     container: "agentbrowse-browser-testing",
     httpPort: 18087,
     webrtcPort: 56007,
@@ -55,15 +56,19 @@ test("Browser profiles and target incarnations have separate identities", () => 
 });
 
 test("runtime metadata round trips and rejects drift", () => {
-  const target = targetFor("testing-deadbeef", 7, "testing");
+  const target = targetFor("testing-deadbeef", 7, {
+    profile: "testing",
+    backend: "artbird",
+    container: "agentbrowse-browser-testing-generation",
+  });
   expect(parseTargetConfig(renderTargetConfig(target))).toEqual(target);
   expect(() =>
-    parseTargetConfig(renderTargetConfig(target).replace("CDP_PORT=9229", "CDP_PORT=9999")),
+    parseTargetConfig(renderTargetConfig(target).replace('"slot": 7', '"slot": 1000')),
   ).toThrow(CliError);
 });
 
-test("legacy runtime metadata defaults the Browser profile to the target name", () => {
+test("backend-bound runtime metadata requires an explicit Browser profile", () => {
   const target = targetFor("testing", 7);
-  const legacy = renderTargetConfig(target).replace("PROFILE=testing\n", "");
-  expect(parseTargetConfig(legacy)).toEqual(target);
+  const incomplete = renderTargetConfig(target).replace('  "profile": "testing",\n', "");
+  expect(() => parseTargetConfig(incomplete)).toThrow(CliError);
 });

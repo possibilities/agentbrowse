@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { type BackendCommand, type CommandResult, DockerFarmBackend } from "../cli/backend.ts";
-import { profileFor, targetFor } from "../cli/model.ts";
+import { targetFor } from "../cli/model.ts";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
 
 const ok = (stdout = ""): CommandResult => ({ exitCode: 0, stdout, stderr: "" });
@@ -9,13 +9,21 @@ const ok = (stdout = ""): CommandResult => ({ exitCode: 0, stdout, stderr: "" })
 function backend(command: BackendCommand, commandTimeoutMs = 2_000): DockerFarmBackend {
   const config = loadAgentbrowseConfig({
     AGENTBROWSE_CONFIG: "/tmp/agentbrowse-backend-test-does-not-exist.json",
-    AGENTBROWSE_DOCKER_CONTEXT: "remote-browser",
-    AGENTBROWSE_DOCKER_ENDPOINT: "ssh://remote-browser",
-    AGENTBROWSE_DOCKER_ENGINE: "browser-engine",
-    AGENTBROWSE_REMOTE_HOST: "remote-browser",
-    AGENTBROWSE_NETWORK_ADDRESS_COMMAND: "network-tool address --ipv4",
   });
-  return new DockerFarmBackend({ ...config, discovery: { commandTimeoutMs } }, { command });
+  return new DockerFarmBackend(
+    {
+      id: "remote-browser",
+      type: "docker",
+      context: "remote-browser",
+      expectedEndpoint: "ssh://remote-browser",
+      expectedEngine: "browser-engine",
+      remoteHost: "remote-browser",
+      networkAddress: null,
+      networkAddressCommand: "network-tool address --ipv4",
+    },
+    { ...config, discovery: { commandTimeoutMs } },
+    { command },
+  );
 }
 
 test("remote discovery has a shorter host deadline when the caller supplies cancellation", async () => {
@@ -131,23 +139,24 @@ test("browser launch mounts the exact durable profile volume writable", async ()
   const seen: string[][] = [];
   const docker = backend(async (args) => {
     seen.push([...args]);
+    if (args[0] === "ssh") return ok("100.64.0.8");
     return ok("container-id");
   });
-  const target = targetFor("testing-deadbeef", 3, "testing");
-  const profile = profileFor("testing");
+  const target = targetFor("testing-deadbeef", 3, {
+    profile: "testing",
+    backend: "remote-browser",
+  });
 
   await docker.runBrowser({
     target,
-    profile,
     image: "agentbrowse/kernel-headful:test",
-    networkAddress: "100.64.0.8",
     nekoLogLevel: "info",
   });
 
-  expect(seen).toHaveLength(1);
-  expect(seen[0]).toContain("dev.agentbrowse.profile=testing");
-  const mountIndex = seen[0]!.indexOf("--mount");
-  expect(seen[0]?.[mountIndex + 1]).toBe(
+  expect(seen).toHaveLength(2);
+  expect(seen[1]).toContain("dev.agentbrowse.profile=testing");
+  const mountIndex = seen[1]!.indexOf("--mount");
+  expect(seen[1]?.[mountIndex + 1]).toBe(
     "type=volume,src=agentbrowse-profile-testing,dst=/home/kernel/user-data",
   );
 });
@@ -155,7 +164,7 @@ test("browser launch mounts the exact durable profile volume writable", async ()
 test("managed profile discovery parses only exact labeled volumes", async () => {
   const docker = backend(async (args) => {
     if (args[3] === "volume" && args[4] === "list") {
-      return ok("signed-in\tagentbrowse-profile-signed-in");
+      return ok("signed-in\tremote-browser\tagentbrowse-profile-signed-in");
     }
     return ok();
   });

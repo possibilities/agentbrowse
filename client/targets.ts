@@ -10,7 +10,7 @@ export interface BrowserTargetSource {
   list(signal?: AbortSignal): Promise<readonly BrowserListEntry[]>;
 }
 
-/** Discover Browser targets through the typed farm API, never CLI JSON. */
+/** Discover Browser targets through the typed fleet API, never CLI JSON. */
 export async function listBrowserTargets(
   source: BrowserTargetSource = browserFarm(),
   signal?: AbortSignal,

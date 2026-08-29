@@ -12,6 +12,7 @@ import type {
   ProfileState,
   RunBrowserInput,
 } from "../cli/backend.ts";
+import { drift, verifyCommonOwnership } from "../cli/backend.ts";
 import { CliError } from "../cli/errors.ts";
 import { BrowserFarm } from "../cli/farm.ts";
 import {
@@ -44,12 +45,13 @@ function managedState(
   ip: string,
   profile = name,
 ): ContainerState {
-  const target = targetFor(name, slot, profile);
+  const target = targetFor(name, slot, { profile });
   return {
     image,
     labels: {
       "dev.agentbrowse.managed": "true",
       "dev.agentbrowse.role": "kernel-browser",
+      "dev.agentbrowse.backend": "docker",
       "dev.agentbrowse.target": name,
       "dev.agentbrowse.profile": profile,
       "dev.agentbrowse.slot": String(slot),
@@ -60,7 +62,9 @@ function managedState(
       `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`,
       `NEKO_WEBRTC_NAT1TO1=${ip}`,
     ],
+    command: [],
     running: true,
+    addresses: [],
     bindings: {
       "8080/tcp": [{ hostIp: "127.0.0.1", hostPort: String(target.httpPort) }],
       [`${target.webrtcPort}/udp`]: [{ hostIp: ip, hostPort: String(target.webrtcPort) }],
@@ -84,6 +88,7 @@ function profileState(profile: BrowserProfile): ProfileState {
     labels: {
       "dev.agentbrowse.managed": "true",
       "dev.agentbrowse.role": "browser-profile",
+      "dev.agentbrowse.backend": "docker",
       "dev.agentbrowse.profile": profile.name,
       "dev.agentbrowse.profile.schema": String(PROFILE_SCHEMA_VERSION),
     },
@@ -91,6 +96,9 @@ function profileState(profile: BrowserProfile): ProfileState {
 }
 
 class FakeBackend implements FarmBackend {
+  readonly id = "docker";
+  readonly type = "docker" as const;
+  readonly maxTargets = 1_000;
   readonly ip = "100.64.0.8";
   readonly image = "agentbrowse/kernel-headful:test";
   existing: ContainerState | undefined;
@@ -106,6 +114,10 @@ class FakeBackend implements FarmBackend {
   removed: string[] = [];
   removedProfiles: string[] = [];
   runs: RunBrowserInput[] = [];
+
+  newContainerName(name: string): string {
+    return `agentbrowse-browser-${name}`;
+  }
 
   async verifyHost(): Promise<void> {
     this.verified += 1;
@@ -158,6 +170,29 @@ class FakeBackend implements FarmBackend {
     return this.existing;
   }
 
+  async verifyContainer(
+    state: ContainerState,
+    target: ReturnType<typeof targetFor>,
+    image: string,
+  ) {
+    verifyCommonOwnership(state, target, image);
+    if (!state.environment.includes(`CHROMIUM_FLAGS=${CHROMIUM_FLAGS}`)) {
+      drift(`${target.container} uses different Chromium window flags`);
+    }
+  }
+
+  async browserAccess(target: ReturnType<typeof targetFor>) {
+    return {
+      cdpUrl: `http://${this.ip}:${target.cdpPort}`,
+      liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
+      liveViewAccess: {
+        mode: "ssh" as const,
+        remoteHost: "browser-host",
+        remotePort: target.httpPort,
+      },
+    };
+  }
+
   async runBrowser(input: RunBrowserInput): Promise<void> {
     this.runs.push(input);
     this.existingContainer = input.target.container;
@@ -165,8 +200,8 @@ class FakeBackend implements FarmBackend {
       input.target.name,
       input.target.slot,
       input.image,
-      input.networkAddress,
-      input.profile.name,
+      this.ip,
+      input.target.profile,
     );
   }
 
@@ -174,8 +209,8 @@ class FakeBackend implements FarmBackend {
     this.started.push(container);
   }
 
-  async waitReady(container: string, timeoutSeconds = 120): Promise<void> {
-    this.waited.push(container);
+  async waitReady(target: ReturnType<typeof targetFor>, timeoutSeconds = 120): Promise<void> {
+    this.waited.push(target.container);
     this.waitTimeouts.push(timeoutSeconds);
   }
 
@@ -185,6 +220,10 @@ class FakeBackend implements FarmBackend {
       this.existing = undefined;
       this.existingContainer = undefined;
     }
+  }
+
+  missingImageRecovery(): string {
+    return "load it";
   }
 }
 
@@ -197,6 +236,7 @@ test("create launches a combined CDP and Live View target and records it", async
   expect(result).toMatchObject({
     name: "testing",
     profile: "testing",
+    backend: "docker",
     slot: 3,
     container: "agentbrowse-browser-testing",
     image: backend.image,
@@ -207,10 +247,16 @@ test("create launches a combined CDP and Live View target and records it", async
   expect(backend.runs).toHaveLength(1);
   expect(backend.runs[0]).toMatchObject({
     target: { profile: "testing", cdpPort: 9225, httpPort: 18083, webrtcPort: 56003 },
-    profile: { name: "testing", volume: "agentbrowse-profile-testing" },
     nekoLogLevel: "info",
   });
-  expect(readFileSync(configPath(directory, "testing"), "utf8")).toContain("CDP_PORT=9225");
+  expect(JSON.parse(readFileSync(configPath(directory, "testing"), "utf8"))).toMatchObject({
+    version: 2,
+    backend: "docker",
+    container: "agentbrowse-browser-testing",
+    target: "testing",
+    profile: "testing",
+    slot: 3,
+  });
   expect(backend.waited).toEqual(["agentbrowse-browser-testing"]);
 });
 
@@ -368,7 +414,7 @@ test("create rejects a slot occupied by another managed browser", async () => {
 
   await expect(farm.create({ name: "testing", slot: 2 })).rejects.toMatchObject({
     code: "slot_in_use",
-    message: "slot 2 is already used by browser target existing (running)",
+    message: "slot 2 is already used by Browser target existing (running)",
   });
   expect(backend.runs).toHaveLength(0);
 });
@@ -423,11 +469,11 @@ test("manual create can bind a target name to a separate durable Browser profile
   const result = await farm.create({ name: "one-run", profile: "signed-in", slot: 6 });
 
   expect(result).toMatchObject({ name: "one-run", profile: "signed-in", created: true });
-  expect(backend.runs[0]?.profile).toEqual({
-    name: "signed-in",
-    volume: "agentbrowse-profile-signed-in",
+  expect(backend.runs[0]?.target.profile).toBe("signed-in");
+  expect(JSON.parse(readFileSync(configPath(directory, "one-run"), "utf8"))).toMatchObject({
+    profile: "signed-in",
+    backend: "docker",
   });
-  expect(readFileSync(configPath(directory, "one-run"), "utf8")).toContain("PROFILE=signed-in");
 });
 
 test("a stopped target prevents another target from mounting the same Browser profile", async () => {
@@ -476,6 +522,7 @@ test("profile lifecycle is explicit and deletion refuses every mounted consumer"
   expect(await farm.createProfile("testing")).toEqual({
     name: "testing",
     volume: "agentbrowse-profile-testing",
+    backend: "docker",
     created: true,
   });
   expect((await farm.createProfile("testing")).created).toBe(false);
@@ -487,6 +534,7 @@ test("profile lifecycle is explicit and deletion refuses every mounted consumer"
     {
       name: "testing",
       volume: "agentbrowse-profile-testing",
+      backend: "docker",
       consumers: ["agentbrowse-browser-testing-deadbeef"],
     },
   ]);
@@ -498,6 +546,7 @@ test("profile lifecycle is explicit and deletion refuses every mounted consumer"
   expect(await farm.deleteProfile("testing")).toEqual({
     name: "testing",
     volume: "agentbrowse-profile-testing",
+    backend: "docker",
     deleted: true,
   });
   expect(backend.removedProfiles).toEqual(["testing"]);
@@ -538,6 +587,7 @@ test("relaunch gives one durable profile a fresh exact target identity", async (
   expect(await farm.destroy(first.name)).toEqual({
     name: "testing-1111111111111111",
     profile: null,
+    backend: "docker",
     container: "agentbrowse-browser-testing-1111111111111111",
     destroyed: false,
   });
@@ -556,6 +606,7 @@ test("destroy verifies ownership before removing the exact container", async () 
   expect(result).toEqual({
     name: "testing",
     profile: "testing",
+    backend: "docker",
     container: "agentbrowse-browser-testing",
     destroyed: true,
   });
@@ -585,6 +636,7 @@ test("destroy is idempotent when both metadata and container are absent", async 
   expect(await farm.destroy("missing")).toEqual({
     name: "missing",
     profile: null,
+    backend: "docker",
     container: "agentbrowse-browser-missing",
     destroyed: false,
   });
@@ -599,6 +651,7 @@ test("destroy recovers ownership from labels when local metadata is absent", asy
   expect(await farm.destroy("testing")).toEqual({
     name: "testing",
     profile: "testing",
+    backend: "docker",
     container: "agentbrowse-browser-testing",
     destroyed: true,
   });

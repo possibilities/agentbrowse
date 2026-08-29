@@ -7,17 +7,16 @@ const PROTOCOL = "agent-browser.plugin.v1";
 
 class FakeProviderFarm {
   provisioned: string[] = [];
-  destroyed: string[] = [];
-  profiles = new Map<string, string>();
+  destroyed: Array<{ name: string; backend?: string; profile?: string }> = [];
   created = true;
 
   async provisionProfile(options: { profile: string }): Promise<CreateResult> {
     this.provisioned.push(options.profile);
     const name = `${options.profile.slice(0, 15)}-deadbeefcafebabe`;
-    this.profiles.set(name, options.profile);
     return {
       name,
       profile: options.profile,
+      backend: "artbird",
       slot: 4,
       container: `agentbrowse-browser-${name}`,
       httpPort: 18084,
@@ -26,15 +25,21 @@ class FakeProviderFarm {
       image: "agentbrowse/kernel-headful:test",
       cdpUrl: "http://100.64.0.8:9226",
       liveViewUrl: "http://127.0.0.1:18084",
+      liveViewAccess: { mode: "ssh", remoteHost: "artbird", remotePort: 18084 },
       created: this.created,
     };
   }
 
-  async destroy(name: string): Promise<DestroyResult> {
-    this.destroyed.push(name);
+  async destroy(name: string, backend?: string, profile?: string): Promise<DestroyResult> {
+    this.destroyed.push({
+      name,
+      ...(backend === undefined ? {} : { backend }),
+      ...(profile === undefined ? {} : { profile }),
+    });
     return {
       name,
-      profile: this.profiles.get(name) ?? "demo",
+      profile: profile ?? "demo",
+      backend: backend ?? "artbird",
       container: `agentbrowse-browser-${name}`,
       destroyed: true,
     };
@@ -57,7 +62,7 @@ test("provider advertises the browser provider manifest", async () => {
     manifest: {
       name: "agentbrowse",
       capabilities: ["browser.provider"],
-      description: "Manage remote Kernel browser targets",
+      description: "Manage ordered Kernel browser backends",
     },
   });
 });
@@ -83,12 +88,17 @@ test("browser.launch provisions the session profile and returns exact target cle
       cdpUrl: "http://100.64.0.8:9226",
       directPage: false,
       metadata: {
+        backend: "artbird",
         browserTarget: "demo-deadbeefcafebabe",
         browserProfile: "demo",
         slot: 4,
         liveViewUrl: "http://127.0.0.1:18084",
       },
-      cleanup: { browserTarget: "demo-deadbeefcafebabe", browserProfile: "demo" },
+      cleanup: {
+        backend: "artbird",
+        browserTarget: "demo-deadbeefcafebabe",
+        browserProfile: "demo",
+      },
     },
   });
 });
@@ -111,19 +121,24 @@ test("browser.close always destroys the exact browser target named by cleanup da
   const response = JSON.parse(
     await handleProviderRequest(
       request("browser.close", "browser.provider", {
+        backend: "apple-container-local",
         browserTarget: "demo-deadbeefcafebabe",
+        browserProfile: "demo",
       }),
       farm,
     ),
   );
 
-  expect(farm.destroyed).toEqual(["demo-deadbeefcafebabe"]);
+  expect(farm.destroyed).toEqual([
+    { name: "demo-deadbeefcafebabe", backend: "apple-container-local", profile: "demo" },
+  ]);
   expect(response).toMatchObject({
     protocol: PROTOCOL,
     success: true,
     data: {
       browserTarget: "demo-deadbeefcafebabe",
       browserProfile: "demo",
+      backend: "apple-container-local",
       destroyed: true,
     },
   });
@@ -143,6 +158,7 @@ test("browser.launch returns cleanup data for an already-running target", async 
   );
 
   expect(response.browser.cleanup).toEqual({
+    backend: "artbird",
     browserTarget: "demo-deadbeefcafebabe",
     browserProfile: "demo",
   });

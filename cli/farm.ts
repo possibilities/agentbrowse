@@ -2,22 +2,20 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type {
-  ContainerState,
-  FarmBackend,
-  ManagedContainerRecord,
-  ManagedProfileRecord,
-  PortBinding,
-  ProfileState,
+import {
+  type FarmBackend,
+  type ManagedContainerRecord,
+  type ManagedProfileRecord,
+  type ProfileState,
+  targetFromLabels,
+  verifyDestroyOwnership,
 } from "./backend.ts";
 import { CliError } from "./errors.ts";
 import {
   type BrowserDescription,
   type BrowserProfile,
-  CHROMIUM_FLAGS,
   configPath,
   incarnatedTargetName,
-  PROFILE_MOUNT_PATH,
   PROFILE_SCHEMA_VERSION,
   parseTargetConfig,
   profileFor,
@@ -28,45 +26,51 @@ import {
 } from "./model.ts";
 
 export interface CreateOptions {
-  name: string;
-  profile?: string;
-  slot: number;
-  image?: string;
-  readyTimeoutSeconds?: number;
+  readonly name: string;
+  readonly profile?: string;
+  readonly slot: number;
+  readonly image?: string;
+  readonly readyTimeoutSeconds?: number;
 }
 
 export interface ProvisionOptions {
-  profile: string;
-  image?: string;
+  readonly profile: string;
+  readonly image?: string;
 }
 
 export interface CreateResult extends BrowserDescription {
-  created: boolean;
+  readonly created: boolean;
 }
 
 export interface DestroyResult {
-  name: string;
-  profile: string | null;
-  container: string;
-  destroyed: boolean;
+  readonly name: string;
+  readonly profile: string | null;
+  readonly backend: string;
+  readonly container: string;
+  readonly destroyed: boolean;
 }
 
 export interface ProfileCreateResult extends BrowserProfile {
-  created: boolean;
+  readonly backend: string;
+  readonly created: boolean;
 }
 
 export interface ProfileDeleteResult extends BrowserProfile {
-  deleted: boolean;
+  readonly backend: string;
+  readonly deleted: boolean;
 }
 
 export interface ProfileListEntry extends ManagedProfileRecord {
-  consumers: readonly string[];
+  readonly backend: string;
+  readonly consumers: readonly string[];
 }
 
 export interface BrowserListEntry extends ManagedContainerRecord {
-  cdpUrl: string;
-  liveViewUrl: string;
-  slotConflict: boolean;
+  readonly backend: string;
+  readonly cdpUrl: string;
+  readonly liveViewUrl: string;
+  readonly liveViewAccess: BrowserDescription["liveViewAccess"];
+  readonly slotConflict: boolean;
 }
 
 const PROVIDER_READY_TIMEOUT_SECONDS = 45;
@@ -98,129 +102,21 @@ async function allocationLockOwnerIsAlive(path: string): Promise<boolean> {
   }
 }
 
-function hasBinding(
-  state: ContainerState,
-  port: string,
-  hostIp: string,
-  hostPort: number,
-): boolean {
-  const bindings: readonly PortBinding[] = state.bindings[port] ?? [];
-  return bindings.some(
-    (binding) => binding.hostIp === hostIp && binding.hostPort === String(hostPort),
-  );
-}
-
-function hasEnvironment(state: ContainerState, value: string): boolean {
-  return state.environment.includes(value);
-}
-
-function hasProfileMount(state: ContainerState, profile: BrowserProfile): boolean {
-  return state.mounts.some(
-    (mount) =>
-      mount.type === "volume" &&
-      mount.name === profile.volume &&
-      mount.destination === PROFILE_MOUNT_PATH &&
-      mount.writable,
-  );
-}
-
-function drift(message: string): never {
-  throw new CliError(
-    "browser_drift",
-    message,
-    "destroy the browser target explicitly before recreating it",
-  );
-}
-
-export function verifyManagedContainer(
-  state: ContainerState,
-  target: Target,
-  image: string,
-  networkAddress: string,
-): void {
-  const profile = profileFor(target.profile);
-  if (state.labels["dev.agentbrowse.managed"] !== "true") {
-    drift(`${target.container} is not managed by agentbrowse`);
-  }
-  if (state.labels["dev.agentbrowse.role"] !== "kernel-browser") {
-    drift(`${target.container} has a different agentbrowse role`);
-  }
-  if (state.labels["dev.agentbrowse.target"] !== target.name) {
-    drift(`${target.container} belongs to a different browser target`);
-  }
-  if (state.labels["dev.agentbrowse.profile"] !== profile.name) {
-    drift(`${target.container} uses a different browser profile`);
-  }
-  if (state.labels["dev.agentbrowse.slot"] !== String(target.slot)) {
-    drift(`${target.container} uses a different slot`);
-  }
-  if (state.image !== image) drift(`${target.container} uses a different image`);
-  if (!hasEnvironment(state, "ENABLE_WEBRTC=true")) {
-    drift(`${target.container} does not enable Live View`);
-  }
-  if (!hasEnvironment(state, `CHROMIUM_FLAGS=${CHROMIUM_FLAGS}`)) {
-    drift(`${target.container} uses different Chromium window flags`);
-  }
-  if (!hasEnvironment(state, `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`)) {
-    drift(`${target.container} uses a different WebRTC mux port`);
-  }
-  if (!hasEnvironment(state, `NEKO_WEBRTC_NAT1TO1=${networkAddress}`)) {
-    drift(`${target.container} uses a different WebRTC NAT address`);
-  }
-  if (!hasBinding(state, "8080/tcp", "127.0.0.1", target.httpPort)) {
-    drift(`${target.container} uses a different Live View HTTP bind`);
-  }
-  if (!hasBinding(state, `${target.webrtcPort}/udp`, networkAddress, target.webrtcPort)) {
-    drift(`${target.container} uses a different WebRTC bind`);
-  }
-  if (!hasBinding(state, "9222/tcp", networkAddress, target.cdpPort)) {
-    drift(`${target.container} uses a different CDP bind`);
-  }
-  if (!hasProfileMount(state, profile)) {
-    drift(`${target.container} does not have the expected writable browser profile mount`);
-  }
-}
-
-function verifyManagedProfile(state: ProfileState, profile: BrowserProfile): void {
+function verifyManagedProfile(state: ProfileState, profile: BrowserProfile, backend: string): void {
   if (
     state.volume !== profile.volume ||
     state.labels["dev.agentbrowse.managed"] !== "true" ||
     state.labels["dev.agentbrowse.role"] !== "browser-profile" ||
+    state.labels["dev.agentbrowse.backend"] !== backend ||
     state.labels["dev.agentbrowse.profile"] !== profile.name ||
     state.labels["dev.agentbrowse.profile.schema"] !== String(PROFILE_SCHEMA_VERSION)
   ) {
     throw new CliError(
       "profile_drift",
-      `${profile.volume} is not the expected agentbrowse browser profile`,
-      "choose another profile name or inspect the exact Docker volume before changing it",
+      `${profile.volume} is not the expected ${backend} Browser profile`,
+      "choose another profile name or inspect the exact backend volume before changing it",
     );
   }
-}
-
-function verifyDestroyOwnership(state: ContainerState, target: Target): void {
-  if (
-    state.labels["dev.agentbrowse.managed"] !== "true" ||
-    state.labels["dev.agentbrowse.role"] !== "kernel-browser" ||
-    state.labels["dev.agentbrowse.target"] !== target.name ||
-    state.labels["dev.agentbrowse.slot"] !== String(target.slot)
-  ) {
-    throw new CliError(
-      "foreign_container",
-      `refusing to delete ${target.container}: its ownership labels do not match ${target.name}`,
-    );
-  }
-}
-
-function targetFromLabels(name: string, state: ContainerState): Target {
-  const slot = state.labels["dev.agentbrowse.slot"];
-  if (slot === undefined || !/^(0|[1-9][0-9]{0,2})$/.test(slot)) {
-    throw new CliError(
-      "foreign_container",
-      `refusing to delete agentbrowse-browser-${name}: its slot ownership label is invalid`,
-    );
-  }
-  const profile = state.labels["dev.agentbrowse.profile"] ?? name;
-  return targetFor(name, Number(slot), profile);
 }
 
 export class BrowserFarm {
@@ -231,21 +127,30 @@ export class BrowserFarm {
     readonly targetToken: TargetTokenFactory = defaultTargetToken,
   ) {}
 
-  async create(options: CreateOptions): Promise<CreateResult> {
-    const result = await this.withAllocationLock(async () => await this.prepareCreate(options));
+  async probeAvailability(signal?: AbortSignal): Promise<void> {
+    // Docker discovery applies its short backend deadline whenever it receives a
+    // signal. Supply an inert signal when the fleet caller did not provide one
+    // so ordinary create/provision selection is bounded too.
+    await this.backend.verifyHost(signal ?? new AbortController().signal);
+  }
+
+  async create(options: CreateOptions, hostVerified = false): Promise<CreateResult> {
+    const result = await this.withAllocationLock(
+      async () => await this.prepareCreate(options, undefined, hostVerified),
+    );
     return await this.waitForCreate(result, options.readyTimeoutSeconds ?? 120);
   }
 
-  async provisionProfile(options: ProvisionOptions): Promise<CreateResult> {
+  async provisionProfile(options: ProvisionOptions, hostVerified = false): Promise<CreateResult> {
     const result = await this.withAllocationLock(async () => {
       validateName(options.profile);
-      await this.backend.verifyHost();
+      if (!hostVerified) await this.backend.verifyHost();
       const managed = await this.backend.listManagedContainers();
       const profileTargets = managed.filter((browser) => browser.profile === options.profile);
       if (profileTargets.length > 1) {
         throw new CliError(
           "profile_conflict",
-          `browser profile ${options.profile} is bound to more than one Browser target`,
+          `Browser profile ${options.profile} is bound to more than one target on ${this.backend.id}`,
           "inspect the conflicting targets and destroy only the stale one",
         );
       }
@@ -262,6 +167,7 @@ export class BrowserFarm {
           ...(options.image === undefined ? {} : { image: options.image }),
         },
         managed,
+        true,
       );
     });
     return await this.waitForCreate(result, PROVIDER_READY_TIMEOUT_SECONDS);
@@ -270,19 +176,59 @@ export class BrowserFarm {
   private async prepareCreate(
     options: CreateOptions,
     knownManaged?: readonly ManagedContainerRecord[],
+    hostVerified = false,
   ): Promise<CreateResult> {
-    const target = targetFor(options.name, options.slot, options.profile ?? options.name);
-    await this.verifyRecordedTarget(target);
-    if (knownManaged === undefined) await this.backend.verifyHost();
-    const managed = knownManaged ?? (await this.backend.listManagedContainers());
+    validateName(options.name);
+    const profileName = options.profile ?? options.name;
+    validateName(profileName);
+    if (!hostVerified && knownManaged === undefined) await this.backend.verifyHost();
+    const [recorded, managed] = await Promise.all([
+      this.readTarget(options.name),
+      knownManaged === undefined ? this.backend.listManagedContainers() : knownManaged,
+    ]);
+    this.verifyReceiptBackend(recorded);
+    if (recorded !== undefined && recorded.slot !== options.slot) {
+      throw new CliError(
+        "target_slot_mismatch",
+        `Browser target ${options.name} already records slot ${recorded.slot}, not ${options.slot}`,
+        `run agentbrowse destroy ${options.name} before choosing another slot`,
+      );
+    }
+    if (recorded !== undefined && recorded.profile !== profileName) {
+      throw new CliError(
+        "target_profile_mismatch",
+        `Browser target ${options.name} already records profile ${recorded.profile}, not ${profileName}`,
+        `run agentbrowse destroy ${options.name} before choosing another profile`,
+      );
+    }
+    const existingRecord = managed.find((browser) => browser.name === options.name);
+    if (
+      existingRecord === undefined &&
+      recorded === undefined &&
+      managed.length >= this.backend.maxTargets
+    ) {
+      throw new CliError(
+        "backend_capacity_exhausted",
+        `backend ${this.backend.id} already has its maximum ${this.backend.maxTargets} Browser target${this.backend.maxTargets === 1 ? "" : "s"}`,
+        "destroy the existing Browser target before launching another",
+      );
+    }
+    const target = targetFor(options.name, options.slot, {
+      profile: profileName,
+      backend: this.backend.id,
+      container:
+        recorded?.container ??
+        existingRecord?.container ??
+        this.backend.newContainerName(options.name),
+    });
     const occupant = managed.find(
       (browser) => browser.slot === target.slot && browser.container !== target.container,
     );
     if (occupant !== undefined) {
       throw new CliError(
         "slot_in_use",
-        `slot ${target.slot} is already used by browser target ${occupant.name} (${occupant.state})`,
-        "choose another slot or destroy the occupying browser target",
+        `slot ${target.slot} is already used by Browser target ${occupant.name} (${occupant.state})`,
+        "choose another slot or destroy the occupying Browser target",
       );
     }
     const profileHolder = managed.find(
@@ -291,37 +237,32 @@ export class BrowserFarm {
     if (profileHolder !== undefined) {
       throw new CliError(
         "profile_in_use",
-        `browser profile ${target.profile} is already bound to Browser target ${profileHolder.name} (${profileHolder.state})`,
+        `Browser profile ${target.profile} is already bound to target ${profileHolder.name} (${profileHolder.state})`,
         `destroy Browser target ${profileHolder.name} before reusing the profile`,
       );
     }
+
     const profile = profileFor(target.profile);
     await this.ensureProfile(profile);
     await this.verifyExclusiveProfileConsumer(profile, target.container);
-    const [networkAddress, image] = await Promise.all([
-      this.backend.resolveNetworkAddress(),
-      this.backend.resolveImage(options.image),
-    ]);
-    const existing = await this.backend.inspectContainer(target.container);
+    const image = await this.backend.resolveImage(options.image);
+    let state = await this.backend.inspectContainer(target.container);
     let created = false;
-    if (existing !== undefined) {
-      verifyManagedContainer(existing, target, image, networkAddress);
-      if (!existing.running) await this.backend.startContainer(target.container);
+    if (state !== undefined) {
+      await this.backend.verifyContainer(state, target, image);
+      if (!state.running) {
+        await this.backend.startContainer(target.container);
+        state = await this.backend.inspectContainer(target.container);
+      }
     } else {
       if (!(await this.backend.imageExists(image))) {
         throw new CliError(
           "image_missing",
-          `image ${image} is not present on the browser host`,
-          "build or load the Kernel image, or select one with --image",
+          `image ${image} is not present on backend ${this.backend.id}`,
+          this.backend.missingImageRecovery(image),
         );
       }
-      await this.backend.runBrowser({
-        target,
-        profile,
-        image,
-        networkAddress,
-        nekoLogLevel: this.nekoLogLevel,
-      });
+      await this.backend.runBrowser({ target, image, nekoLogLevel: this.nekoLogLevel });
       created = true;
     }
 
@@ -330,32 +271,35 @@ export class BrowserFarm {
     } catch (error) {
       if (created) {
         throw new CliError(
-          "browser_not_ready",
-          `${target.container} was created but did not become ready: ${(error as Error).message}`,
-          `inspect ${target.container} logs on the configured browser host, then run agentbrowse destroy ${target.name}`,
+          "target_receipt_failed",
+          `${target.container} was created but its backend-bound receipt failed: ${(error as Error).message}`,
+          `inspect ${target.container} on backend ${target.backend}, then run agentbrowse destroy ${target.name}`,
         );
       }
       throw error;
     }
 
-    return {
-      ...target,
-      image,
-      cdpUrl: `http://${networkAddress}:${target.cdpPort}`,
-      liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
-      created,
-    };
+    state ??= await this.backend.inspectContainer(target.container);
+    if (state === undefined) {
+      throw new CliError(
+        "target_inspect_failed",
+        `${target.container} was created but is absent during post-create inspection`,
+        `inspect backend ${target.backend}, then run agentbrowse destroy ${target.name}`,
+      );
+    }
+    const access = await this.backend.browserAccess(target, state);
+    return { ...target, image, ...access, created };
   }
 
   private async waitForCreate(result: CreateResult, timeoutSeconds: number): Promise<CreateResult> {
     try {
-      await this.backend.waitReady(result.container, timeoutSeconds);
+      await this.backend.waitReady(result, timeoutSeconds);
     } catch (error) {
       if (result.created) {
         throw new CliError(
           "browser_not_ready",
           `${result.container} was created but did not become ready: ${(error as Error).message}`,
-          `inspect ${result.container} logs on the configured browser host, then run agentbrowse destroy ${result.name}`,
+          `inspect ${result.container} on backend ${result.backend}, then run agentbrowse destroy ${result.name}`,
         );
       }
       throw error;
@@ -363,64 +307,86 @@ export class BrowserFarm {
     return result;
   }
 
-  async list(signal?: AbortSignal): Promise<readonly BrowserListEntry[]> {
+  async list(signal?: AbortSignal, hostVerified = false): Promise<readonly BrowserListEntry[]> {
     signal?.throwIfAborted();
-    await this.backend.verifyHost(signal);
-    const [networkAddress, managed] = await Promise.all([
-      this.backend.resolveNetworkAddress(signal),
-      this.backend.listManagedContainers(signal),
-    ]);
+    if (!hostVerified) await this.backend.verifyHost(signal);
+    const managed = await this.backend.listManagedContainers(signal);
     const slotCounts = new Map<number, number>();
     for (const browser of managed) {
       slotCounts.set(browser.slot, (slotCounts.get(browser.slot) ?? 0) + 1);
     }
-    return managed
-      .map((browser) => {
-        const target = targetFor(browser.name, browser.slot, browser.profile ?? browser.name);
+    const rows = await Promise.all(
+      managed.map(async (browser) => {
+        const target = targetFor(browser.name, browser.slot, {
+          profile: browser.profile ?? browser.name,
+          backend: this.backend.id,
+          container: browser.container,
+        });
+        const access = await this.backend.browserAccess(target);
         return {
           ...browser,
-          cdpUrl: `http://${networkAddress}:${target.cdpPort}`,
-          liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
+          backend: this.backend.id,
+          ...access,
           slotConflict: (slotCounts.get(browser.slot) ?? 0) > 1,
         };
-      })
-      .sort((left, right) => left.slot - right.slot || left.name.localeCompare(right.name));
+      }),
+    );
+    return rows.sort(
+      (left, right) => left.slot - right.slot || left.name.localeCompare(right.name),
+    );
   }
 
-  async targetForProfile(
-    name: string,
+  async targetFromBinding(
+    target: Target,
     signal?: AbortSignal,
   ): Promise<BrowserListEntry | undefined> {
-    validateName(name);
-    const targets = (await this.list(signal)).filter((browser) => browser.profile === name);
-    if (targets.length > 1) {
+    if (target.backend !== this.backend.id) {
       throw new CliError(
-        "profile_conflict",
-        `browser profile ${name} is bound to more than one Browser target`,
-        "inspect the conflicting targets and destroy only the stale one",
+        "target_backend_mismatch",
+        `Browser target ${target.name} is bound to backend ${target.backend}, not ${this.backend.id}`,
       );
     }
-    return targets[0];
+    const matches = (await this.list(signal)).filter(
+      (entry) =>
+        entry.name === target.name &&
+        entry.profile === target.profile &&
+        entry.container === target.container,
+    );
+    if (matches.length > 1) {
+      throw new CliError(
+        "target_identity_conflict",
+        `backend ${this.backend.id} reported Browser target ${target.name} more than once`,
+      );
+    }
+    return matches[0];
   }
 
-  async createProfile(name: string): Promise<ProfileCreateResult> {
+  async createProfile(name: string, hostVerified = false): Promise<ProfileCreateResult> {
     return await this.withAllocationLock(async () => {
       validateName(name);
-      await this.backend.verifyHost();
+      if (!hostVerified) await this.backend.verifyHost();
       const profile = profileFor(name);
-      return { ...profile, created: await this.ensureProfile(profile) };
+      return {
+        ...profile,
+        backend: this.backend.id,
+        created: await this.ensureProfile(profile),
+      };
     });
   }
 
-  async listProfiles(signal?: AbortSignal): Promise<readonly ProfileListEntry[]> {
+  async listProfiles(
+    signal?: AbortSignal,
+    hostVerified = false,
+  ): Promise<readonly ProfileListEntry[]> {
     signal?.throwIfAborted();
-    await this.backend.verifyHost(signal);
+    if (!hostVerified) await this.backend.verifyHost(signal);
     const profiles = await this.backend.listManagedProfiles(signal);
     const entries: ProfileListEntry[] = [];
     for (const profile of profiles) {
       signal?.throwIfAborted();
       entries.push({
         ...profile,
+        backend: this.backend.id,
         consumers: (await this.backend.listProfileConsumers(profileFor(profile.name), signal))
           .map((consumer) => consumer.container)
           .sort(),
@@ -429,65 +395,67 @@ export class BrowserFarm {
     return entries.sort((left, right) => left.name.localeCompare(right.name));
   }
 
-  async deleteProfile(name: string): Promise<ProfileDeleteResult> {
+  async deleteProfile(name: string, hostVerified = false): Promise<ProfileDeleteResult> {
     return await this.withAllocationLock(async () => {
       validateName(name);
-      await this.backend.verifyHost();
+      if (!hostVerified) await this.backend.verifyHost();
       const profile = profileFor(name);
       const state = await this.backend.inspectProfile(profile);
-      if (state === undefined) return { ...profile, deleted: false };
-      verifyManagedProfile(state, profile);
+      if (state === undefined) {
+        return { ...profile, backend: this.backend.id, deleted: false };
+      }
+      verifyManagedProfile(state, profile, this.backend.id);
       const consumers = await this.backend.listProfileConsumers(profile);
       if (consumers.length > 0) {
         throw new CliError(
           "profile_in_use",
-          `browser profile ${name} is still mounted by ${consumers.map((entry) => entry.container).join(", ")}`,
+          `Browser profile ${name} is still mounted by ${consumers.map((entry) => entry.container).join(", ")}`,
           "destroy the exact Browser target before deleting its durable profile",
         );
       }
       await this.backend.removeProfile(profile);
-      return { ...profile, deleted: true };
+      return { ...profile, backend: this.backend.id, deleted: true };
     });
   }
 
-  async destroy(name: string): Promise<DestroyResult> {
+  async destroy(name: string, hostVerified = false): Promise<DestroyResult> {
     validateName(name);
     return await this.withAllocationLock(async () => {
-      await this.backend.verifyHost();
-      const recorded = await this.readTarget(name);
-      const container = recorded?.container ?? `agentbrowse-browser-${name}`;
+      if (!hostVerified) await this.backend.verifyHost();
+      const [recorded, managed] = await Promise.all([
+        this.readTarget(name),
+        this.backend.listManagedContainers(),
+      ]);
+      this.verifyReceiptBackend(recorded);
+      const discovered = managed.find((record) => record.name === name);
+      const container =
+        recorded?.container ?? discovered?.container ?? `agentbrowse-browser-${name}`;
       const state = await this.backend.inspectContainer(container);
       if (state === undefined) {
         await this.removeTarget(name);
-        return { name, profile: recorded?.profile ?? null, container, destroyed: false };
+        return {
+          name,
+          profile: recorded?.profile ?? discovered?.profile ?? null,
+          backend: this.backend.id,
+          container,
+          destroyed: false,
+        };
       }
-      const target = recorded ?? targetFromLabels(name, state);
+      const target = recorded ?? targetFromLabels(name, this.backend.id, container, state);
       verifyDestroyOwnership(state, target);
       await this.backend.removeContainer(target.container);
       await this.removeTarget(name);
-      return { name, profile: target.profile, container: target.container, destroyed: true };
+      return {
+        name,
+        profile: target.profile,
+        backend: this.backend.id,
+        container: target.container,
+        destroyed: true,
+      };
     });
   }
 
-  private async verifyRecordedTarget(target: Target): Promise<void> {
-    const recorded = await this.readTarget(target.name);
-    if (recorded !== undefined && recorded.slot !== target.slot) {
-      throw new CliError(
-        "target_slot_mismatch",
-        `browser target ${target.name} already records slot ${recorded.slot}, not ${target.slot}`,
-        `run agentbrowse destroy ${target.name} before choosing another slot`,
-      );
-    }
-    if (recorded !== undefined && recorded.profile !== target.profile) {
-      throw new CliError(
-        "target_profile_mismatch",
-        `browser target ${target.name} already records profile ${recorded.profile}, not ${target.profile}`,
-        `run agentbrowse destroy ${target.name} before choosing another profile`,
-      );
-    }
-  }
-
-  private async readTarget(name: string): Promise<Target | undefined> {
+  async readTarget(name: string): Promise<Target | undefined> {
     const path = configPath(this.runtimeDir, name);
     try {
       return parseTargetConfig(await readFile(path, "utf8"));
@@ -497,15 +465,28 @@ export class BrowserFarm {
     }
   }
 
+  private verifyReceiptBackend(recorded: Target | undefined): void {
+    if (recorded !== undefined && recorded.backend !== this.backend.id) {
+      throw new CliError(
+        "target_backend_mismatch",
+        `Browser target ${recorded.name} is bound to backend ${recorded.backend}, not ${this.backend.id}`,
+      );
+    }
+  }
+
   private async writeTarget(target: Target): Promise<void> {
     const path = configPath(this.runtimeDir, target.name);
     const directory = dirname(path);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
-    const temporaryPath = `${path}.tmp-${process.pid}`;
-    await writeFile(temporaryPath, renderTargetConfig(target), { mode: 0o600 });
-    await rename(temporaryPath, path);
-    await chmod(path, 0o600);
+    const temporaryPath = `${path}.tmp-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await writeFile(temporaryPath, renderTargetConfig(target), { mode: 0o600, flag: "wx" });
+      await rename(temporaryPath, path);
+      await chmod(path, 0o600);
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
   }
 
   private async removeTarget(name: string): Promise<void> {
@@ -518,8 +499,8 @@ export class BrowserFarm {
     }
     throw new CliError(
       "no_free_slots",
-      "all browser target slots from 0 to 999 are in use",
-      "destroy an unused browser target before launching another agent-browser session",
+      "all Browser target slots from 0 to 999 are in use",
+      "destroy an unused Browser target before launching another agent-browser session",
     );
   }
 
@@ -538,7 +519,7 @@ export class BrowserFarm {
   private async ensureProfile(profile: BrowserProfile): Promise<boolean> {
     const existing = await this.backend.inspectProfile(profile);
     if (existing !== undefined) {
-      verifyManagedProfile(existing, profile);
+      verifyManagedProfile(existing, profile, this.backend.id);
       return false;
     }
     await this.backend.createProfile(profile);
@@ -546,10 +527,10 @@ export class BrowserFarm {
     if (created === undefined) {
       throw new CliError(
         "profile_not_ready",
-        `browser profile ${profile.name} was not visible after Docker created it`,
+        `Browser profile ${profile.name} was not visible after backend ${this.backend.id} created it`,
       );
     }
-    verifyManagedProfile(created, profile);
+    verifyManagedProfile(created, profile, this.backend.id);
     return true;
   }
 
@@ -562,7 +543,7 @@ export class BrowserFarm {
     if (conflicting !== undefined) {
       throw new CliError(
         "profile_in_use",
-        `browser profile ${profile.name} is already mounted by ${conflicting.container} (${conflicting.state})`,
+        `Browser profile ${profile.name} is already mounted by ${conflicting.container} (${conflicting.state})`,
         "destroy or inspect that exact container before reusing the profile",
       );
     }
@@ -578,7 +559,10 @@ export class BrowserFarm {
       try {
         await mkdir(path, { mode: 0o700 });
         try {
-          await writeFile(join(path, "owner"), `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+          await writeFile(join(path, "owner"), `${process.pid}\n`, {
+            flag: "wx",
+            mode: 0o600,
+          });
         } catch (error) {
           await rm(path, { recursive: true, force: true });
           throw error;

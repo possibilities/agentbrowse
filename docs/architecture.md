@@ -13,7 +13,7 @@ BrowserTargetSource -> BrowserPickerController
                               v
                       selected Browser target
                               |
-                   LiveViewTunnel (managed ssh -L)
+               LiveView access (SSH forward or Direct URL)
                               |
                    connection descriptor bytes
                               |
@@ -28,16 +28,17 @@ OpenTUI <- NativeImage <- RGBA <- frame lease <- polling C ABI
                                             Kernel/Neko target
 ```
 
-`client/targets.ts` discovers Browser targets through the typed `BrowserFarm`
+`client/targets.ts` discovers Browser targets through the typed `BrowserFleet`
 API rather than parsing CLI output. Running, conflict-free targets are
 selectable. Stopped targets and slot conflicts remain visible with a disabled
 reason. `BrowserPickerController` owns asynchronous discovery, selection, and
 stale-result suppression; it has no rendering policy.
 
-Selecting a target opens one `LiveViewTunnel`. The tunnel reserves an ephemeral
-loopback port, starts an SSH local forward to the target's Live View HTTP port,
-probes readiness, and owns the SSH child until disconnect. WebSocket signaling
-uses that forward; WebRTC uses the target's configured network-reachable UDP candidate.
+Selecting a target opens one `LiveViewTunnel` access object. Docker access
+reserves an ephemeral loopback port, starts an SSH local forward, probes
+readiness, and owns the child until disconnect. Apple access returns the
+container's Direct `192.168.64.x:8080` URL and closes without owning a process.
+WebRTC uses the backend-returned network-reachable UDP candidate in either mode.
 The connection descriptor is passed to native code as bounded bytes and is
 never placed in argv or logs.
 
@@ -130,12 +131,12 @@ status, identifier, or frame queue is released. The embeddable session layer
 never writes diagnostics to stdout or stderr; hosts obtain status through the
 polling ABI so retained terminal surfaces cannot be corrupted.
 
-OpenTUI target switching uses a separate operation generation. A tunnel or
+OpenTUI target switching uses a separate operation generation. An access or
 session that completes after a newer connect, disconnect, or destroy operation
-closes itself without publishing stale state. In-flight tunnel startup is also
-abortable, and `dispose()` waits for that cancellation to reap its SSH child.
+closes itself without publishing stale state. In-flight SSH startup is also
+abortable, and `dispose()` waits for that cancellation to reap its child.
 Normal teardown order is polling timer, Live View session, displayed image,
-then SSH tunnel. `destroy()` remains safe for ordinary OpenTUI ownership
+then Live View access. `destroy()` remains safe for ordinary OpenTUI ownership
 teardown.
 
 ## Frontend adapters
@@ -148,7 +149,7 @@ guest image. Creating a headless Live View session does not initialize
 `NSApplication` or create a window.
 
 OpenTUI-specific behavior is confined to `src/opentui` and `client`: target
-discovery, the managed tunnel, Bun FFI, terminal image fitting, input mapping,
+discovery, managed Live View access, Bun FFI, terminal image fitting, input mapping,
 and the fxnk Ramp and fx-faithful theme resolver used by the example picker.
 The resolver chooses one complete fixed set before first paint and its live
 monitor replaces that set atomically; neither samples nor derives a host

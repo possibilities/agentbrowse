@@ -1,7 +1,5 @@
 import { createServer } from "node:net";
 import type { BrowserListEntry } from "../cli/farm.ts";
-import { targetFor } from "../cli/model.ts";
-import { loadAgentbrowseConfig, requireConfigured } from "../config/deployment.ts";
 
 const STDERR_LIMIT = 8 * 1024;
 const READY_TIMEOUT_MS = 5_000;
@@ -23,7 +21,6 @@ export interface TunnelDependencies {
 }
 
 export interface TunnelOptions {
-  remoteHost?: string;
   readyTimeoutMs?: number;
   /** Cancels tunnel startup. An already returned tunnel remains caller-owned. */
   signal?: AbortSignal;
@@ -63,36 +60,49 @@ export class LiveViewTunnel {
   private stderrText = "";
 
   private constructor(
-    readonly localPort: number,
-    readonly target: Pick<BrowserListEntry, "name" | "slot">,
-    private readonly process: TunnelProcess,
-    private readonly stderrPromise: Promise<string>,
+    readonly localPort: number | null,
+    readonly target: Pick<BrowserListEntry, "name" | "slot" | "liveViewAccess">,
+    private readonly process: TunnelProcess | null,
+    private readonly stderrPromise: Promise<string> | null,
     private readonly dependencies: TunnelDependencies,
+    baseUrl: string,
   ) {
-    this.baseUrl = `http://127.0.0.1:${localPort}`;
+    this.baseUrl = baseUrl;
   }
 
   static async open(
-    target: Pick<BrowserListEntry, "name" | "slot">,
+    target: Pick<BrowserListEntry, "name" | "slot" | "liveViewAccess">,
     options: TunnelOptions = {},
   ): Promise<LiveViewTunnel> {
     const dependencies = { ...defaults, ...options.dependencies };
     options.signal?.throwIfAborted();
+    if (target.liveViewAccess.mode === "direct") {
+      return new LiveViewTunnel(
+        null,
+        target,
+        null,
+        null,
+        dependencies,
+        target.liveViewAccess.baseUrl,
+      );
+    }
     const localPort = await dependencies.allocatePort();
     options.signal?.throwIfAborted();
-    const config = options.remoteHost === undefined ? loadAgentbrowseConfig() : null;
-    const remoteHost =
-      options.remoteHost ??
-      requireConfigured(
-        config!.remote.host,
-        "remote.host",
-        "AGENTBROWSE_REMOTE_HOST",
-        config!.path,
-      );
-    const args = sshArguments(remoteHost, localPort, targetFor(target.name, target.slot).httpPort);
+    const args = sshArguments(
+      target.liveViewAccess.remoteHost,
+      localPort,
+      target.liveViewAccess.remotePort,
+    );
     const child = dependencies.spawn(args);
     const stderrPromise = captureStderr(child.stderr, STDERR_LIMIT);
-    const tunnel = new LiveViewTunnel(localPort, target, child, stderrPromise, dependencies);
+    const tunnel = new LiveViewTunnel(
+      localPort,
+      target,
+      child,
+      stderrPromise,
+      dependencies,
+      `http://127.0.0.1:${localPort}`,
+    );
     try {
       await tunnel.waitUntilReady(options.readyTimeoutMs ?? READY_TIMEOUT_MS, options.signal);
       return tunnel;
@@ -118,15 +128,15 @@ export class LiveViewTunnel {
     try {
       while (this.dependencies.now() < deadline) {
         signal?.throwIfAborted();
-        if (this.process.exitCode !== null) {
-          await this.process.exited;
-          this.stderrText = await this.stderrPromise;
-          throw new Error(`SSH tunnel exited with status ${this.process.exitCode}`);
+        if (this.process!.exitCode !== null) {
+          await this.process!.exited;
+          this.stderrText = await this.stderrPromise!;
+          throw new Error(`SSH tunnel exited with status ${this.process!.exitCode}`);
         }
         if (await this.dependencies.probe(`${this.baseUrl}/`, signal)) return;
         await Promise.race([
           this.dependencies.sleep(100),
-          this.process.exited.then(() => undefined),
+          this.process!.exited.then(() => undefined),
           abort.promise,
         ]);
       }
@@ -137,6 +147,7 @@ export class LiveViewTunnel {
   }
 
   private async closeOnce(): Promise<void> {
+    if (this.process === null || this.stderrPromise === null) return;
     if (this.process.exitCode === null) tryKill(this.process, 15);
     await Promise.race([
       this.process.exited.catch(() => -1),

@@ -18,27 +18,22 @@ bun install
 bun link
 ```
 
-Copy [`config.example.json`](config.example.json) to
-`~/.config/agentbrowse/config.json` and replace its example deployment values.
-The file owns host-specific choices: Docker context and identity, SSH host,
-network address discovery, image source, browser timezone, provider identity,
-and Live View connection settings. `AGENTBROWSE_CONFIG` selects another
-absolute path. Environment variables documented in
-[`docs/configuration.md`](docs/configuration.md)
-override the file for automation, but agentbrowse has no built-in host,
-network, checkout, or timezone preference.
-
-`remote.networkAddress` can hold a stable IPv4 address. For a dynamic address,
-omit it and set `remote.networkAddressCommand` to a command that prints the
-host's IPv4 address; agentbrowse runs that configured command through
-`remote.host`. Keep the config private (`chmod 600`) because it can contain Live
-View credentials.
+The fleet installer owns `~/.config/agentbrowse/config.json`; for development,
+copy [`config.example.json`](config.example.json) there and replace its example
+deployment values. Its version 2 `backends` array is ordered: the Docker-backed
+Artbird host is first and an already-enabled Apple `container` session is
+second. Agentbrowse falls through only for classified host/service availability
+failures while a profile has no backend home yet. It never starts Apple services,
+pulls or builds an image, or publishes an Apple host port. `AGENTBROWSE_CONFIG`
+selects another absolute path for isolated tests. See
+[`docs/configuration.md`](docs/configuration.md).
 
 Browser profiles and Browser targets have separate lifetimes. A Browser profile
-is a durable Docker volume containing Chromium cookies, local storage,
+is a durable backend-owned volume containing Chromium cookies, local storage,
 IndexedDB, and authentication state. A Browser target is one Kernel container
-incarnation that mounts that profile. Destroying a target preserves its
-profile; deleting a profile is always an explicit operation.
+incarnation that mounts that profile. The profile stays bound to its home backend
+after target deletion so a later launch cannot silently substitute a same-named,
+empty volume elsewhere. Deleting a profile is always an explicit operation.
 
 Each named Browser target uses a numeric slot. The slot selects its CDP,
 loopback Live View HTTP, and WebRTC UDP ports. By default, manual creation uses
@@ -61,12 +56,13 @@ agentbrowse list
 agentbrowse list --json
 ```
 
-The list includes each target's profile, plus stopped and failed-created
-containers as well as running ones. A `!` beside the state means more than one
-target records the same slot. `create` refuses a slot already recorded by
-another managed target before it asks Docker to start a container. It also
-refuses to mount a profile already consumed by any other container, including
-a stopped or foreign container.
+The list includes each target's profile and backend, plus stopped and
+failed-created containers as well as running ones. A `!` beside the state means
+more than one target records the same slot on that backend. `create` refuses a
+slot already recorded by another managed target before it asks the selected
+backend to start a container. It also refuses to mount a profile already
+consumed by any other container, including a stopped or foreign container.
+Apple is additionally bounded to one 2-CPU, 6-GiB target.
 
 Profile creation is normally implicit. Use the profile commands to inspect or
 manage the durable state directly:
@@ -79,7 +75,7 @@ agentbrowse profile delete signed-in
 ```
 
 Deletion fails while any container still mounts the profile. It permanently
-removes that profile's browser state and cannot be undone.
+removes that profile's browser state and backend binding and cannot be undone.
 
 The command prints the target's configured network CDP endpoint. Use it directly
 with `agent-browser`:
@@ -100,7 +96,7 @@ use:
 {
   "plugins": [
     {
-      "name": "remote-browser",
+      "name": "agentbrowse",
       "command": "agentbrowse",
       "args": ["provider"],
       "capabilities": ["browser.provider"]
@@ -112,9 +108,9 @@ use:
 Launch an agent-browser session through the configured provider:
 
 ```sh
-agent-browser --session research --provider remote-browser open https://example.com
-agent-browser --session research --provider remote-browser snapshot -i
-agent-browser --session research --provider remote-browser close
+agent-browser --session research --provider agentbrowse open https://example.com
+agent-browser --session research --provider agentbrowse snapshot -i
+agent-browser --session research --provider agentbrowse close
 ```
 
 Resolve a running agent-browser session to the exact Browser target incarnation
@@ -126,18 +122,20 @@ agentbrowse resolve research
 agentbrowse resolve research --json
 ```
 
-Set `AGENT_BROWSER_PROVIDER=remote-browser` to omit `--provider remote-browser`
+Set `AGENT_BROWSER_PROVIDER=agentbrowse` to omit `--provider agentbrowse`
 from each command. The plugin name must match `provider.name` in the agentbrowse
 config.
 
 The provider maps the agent-browser session name to a stable Browser profile;
 session names outside agentbrowse's name grammar receive a stable safe profile
-name. A launch reuses the target currently bound to that profile or allocates
-the first free slot and creates a uniquely named target incarnation. Close
-always destroys that exact target, including one that was already running when
-the provider received the launch request, while preserving the profile. A
-later launch gets a new target name with the same cookies and authentication
-state, so an old target reference cannot silently resolve to the replacement.
+name. The first launch selects the first available backend, then durably binds
+the profile to it. A launch reuses the target currently bound to that profile or
+allocates the first free slot and creates a uniquely named target incarnation on
+the same backend. Close always destroys that exact target, including one that
+was already running when the provider received the launch request, while
+preserving the profile and its backend home. A later launch gets a new target
+name with the same cookies and authentication state, so an old target reference
+cannot silently resolve to the replacement.
 
 The fleet's `browser` skill composes this provider lifecycle with agent-browser's
 version-matched command guide and Agentattention. A sign-in, MFA prompt, or
@@ -163,10 +161,12 @@ agentbrowse destroy testing
 ```
 
 Pass `--json` to the target or profile lifecycle commands for a stable
-`{schema_version,ok,error,data}` envelope. With `images.sourceDirectory`
-configured, the CLI selects the SHA-tagged image matching that checkout;
-`images.defaultImage`, `--image`, or `AGENTBROWSE_IMAGE` selects an
-already-loaded image explicitly.
+`{schema_version,ok,error,data}` envelope. By default the CLI selects the exact
+`linux/amd64` platform digest in `config/kernel-headful.lock.json`;
+`images.defaultImage`, `--image`, or `AGENTBROWSE_IMAGE` selects another
+already-loaded image explicitly. Maintainers intentionally refresh the lock
+with `bun run images:update-lock FULL_KERNEL_COMMIT`; ordinary installation and
+browser launch never inspect the registry or mutate the lock.
 
 ## Native Live View
 
@@ -177,10 +177,11 @@ agentbrowse view
 ```
 
 `view` applies the provider's stable session-to-profile mapping, resolves the
-profile's current Browser target, then owns the Live View SSH tunnel until the
-GUI closes. The Browser target must already exist; create it first with an
-agent-browser command such as `agent-browser open https://example.com`. Pass a
-session name to both commands when using a session other than `default`.
+profile's durable binding to its current exact Browser target, then owns the
+backend-returned Live View access until the GUI closes. The Browser target must
+already exist; create it first with an agent-browser command such as
+`agent-browser open https://example.com`. Pass a session name to both commands
+when using a session other than `default`.
 
 The application receives one connection descriptor on standard input and
 connects immediately. It deliberately has no connection chooser:
@@ -189,8 +190,9 @@ connects immediately. It deliberately has no connection chooser:
 tools/live-view launch testing
 ```
 
-`launch` opens the SSH forwarding connection needed by Live View, waits for
-it to become ready, and closes it when the application exits.
+`launch` opens the target's access descriptor and closes it when the application
+exits. Docker targets use a managed SSH forward; Apple targets connect directly
+to their `192.168.64.x` address without spawning SSH.
 
 For a descriptor supplied by another integration:
 
@@ -217,9 +219,9 @@ bun run opentui:example
 The app opens on a blank stage showing `no browser`. Press `ctrl+shift+b` to
 open its Browser-target picker. Running targets are selectable; stopped targets
 and slot conflicts remain visible with a disabled reason. Choosing a target
-closes the picker, opens a managed SSH tunnel, and replaces the stage with the
+closes the picker, opens the backend-returned access, and replaces the stage with the
 live browser surface. `ctrl+c` exits and closes both the Live View session and
-tunnel.
+access.
 
 The reusable surface is independent of that picker:
 
@@ -253,7 +255,7 @@ async function shutdown(): Promise<void> {
 }
 ```
 
-`LiveViewRenderable` owns one headless native session and its SSH tunnel. It
+`LiveViewRenderable` owns one headless native session and its Live View access. It
 uses OpenTUI's public `NativeImage`/`ImageRenderable` API, forwards
 keyboard, pointer, scroll, and paste input, and releases held input on every
 focus or lifecycle boundary. Hosts keep ownership of layout, command routing,

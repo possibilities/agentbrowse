@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "repository": "docker.io/onkernel/chromium-headful",
+  "kernelSourceCommit": "57858c774681c646c238043d5cb75a9ff61797c6",
+  "upstreamTag": "57858c7",
+  "ociIndexDigest": "sha256:036cb0e97e9b836e2da43c50f8e74278b10449f738ed3cd7d7fc52d262303191",
+  "platform": {
+    "os": "linux",
+    "architecture": "amd64",
+    "digest": "sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3"
+  },
+  "runtimeReference": "docker.io/onkernel/chromium-headful@sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3",
+  "verifiedAt": "2026-08-29T00:20:53.385Z",
+  "verificationTool": "github.com/docker/buildx v0.36.1 Homebrew"
+}
