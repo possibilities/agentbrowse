@@ -92,3 +92,32 @@ position retained by a Live View session from either known Neko data channel.
 Frontend adapters decide whether and how to present it; it is not itself a
 rendered cursor.
 _Avoid: cursor event, cursor overlay, guest pointer._
+
+**Physical key target** — The guest keysym plus removed and forced modifier
+flags chosen when one physical key was pressed. The Live View session keeps it
+until that key's release so the release and its Shift level stay correct
+regardless of later modifier changes, and clears it together with held input.
+_Avoid: key translation entry, shortcut map, held key._
+
+**Shortcut translation** — A Frontend adapter's mapping of one macOS chord
+(Command or Option plus a key) to a Physical key target that carries the Linux
+guest's convention: Control chords, Home/End, Control-arrows. Chords without a
+translation reach the guest as ordinary Meta or Alt input.
+_Avoid: key remap, hotkey, keybinding._
+
+**Pixel mouse fence** — The serialized DECRQM 1016 query written after every
+pixel-mouse mode transition. The OpenTUI stdin parser changes SGR report units
+only at the byte that completes its DECRPM reply, so byte-identical cell and
+pixel reports are never misread across the transition.
+_Avoid: mouse mode flag, pixel toggle, capability sync._
+
+**Neko scroll unit** — One 1/120 of a wheel notch, the XI2 scroll valuator
+increment posted by the xf86-input-neko driver that ships in the Kernel image.
+Every scroll packet carries whole units; 120 is one discrete notch.
+_Avoid: pixel, line, tick, wheel delta._
+
+**Scroll residual bucket** — The Live View session's per-mode (ordinary or
+Control-scroll) fractional remainder of precision scrolling in Neko scroll
+units. Only whole units are admitted from it; it resets after idle, on discrete
+wheel input, and with every input cancellation.
+_Avoid: scroll accumulator, smoothing buffer, momentum state._
