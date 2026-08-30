@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-#define AB_LIVE_VIEW_ABI_VERSION 2u
+#define AB_LIVE_VIEW_ABI_VERSION 3u
 
 typedef struct ABLiveViewSession ABLiveViewSession;
 typedef struct ABLiveViewFrameLease ABLiveViewFrameLease;
@@ -23,21 +23,21 @@ typedef struct ABLiveViewFrameLease ABLiveViewFrameLease;
 // Do not race session destruction with another call using that session handle.
 
 typedef enum ABLiveViewResult {
-  AB_LIVE_VIEW_OK = 0,
-  AB_LIVE_VIEW_INVALID_ARGUMENT = 1,
-  AB_LIVE_VIEW_CLOSED = 2,
-  AB_LIVE_VIEW_BUFFER_TOO_SMALL = 3,
-  AB_LIVE_VIEW_UNSUPPORTED = 4,
-  AB_LIVE_VIEW_INTERNAL_ERROR = 5,
+  AB_LIVE_VIEW_RESULT_OK = 0,
+  AB_LIVE_VIEW_RESULT_INVALID_ARGUMENT = 1,
+  AB_LIVE_VIEW_RESULT_CLOSED = 2,
+  AB_LIVE_VIEW_RESULT_BUFFER_TOO_SMALL = 3,
+  AB_LIVE_VIEW_RESULT_UNSUPPORTED = 4,
+  AB_LIVE_VIEW_RESULT_INTERNAL_ERROR = 5,
 } ABLiveViewResult;
 
 typedef enum ABLiveViewLifecycle {
-  AB_LIVE_VIEW_IDLE = 0,
-  AB_LIVE_VIEW_CONNECTING = 1,
-  AB_LIVE_VIEW_CONNECTED = 2,
-  AB_LIVE_VIEW_RECONNECTING = 3,
-  AB_LIVE_VIEW_CLOSED = 4,
-  AB_LIVE_VIEW_FAILED = 5,
+  AB_LIVE_VIEW_LIFECYCLE_IDLE = 0,
+  AB_LIVE_VIEW_LIFECYCLE_CONNECTING = 1,
+  AB_LIVE_VIEW_LIFECYCLE_CONNECTED = 2,
+  AB_LIVE_VIEW_LIFECYCLE_RECONNECTING = 3,
+  AB_LIVE_VIEW_LIFECYCLE_CLOSED = 4,
+  AB_LIVE_VIEW_LIFECYCLE_FAILED = 5,
 } ABLiveViewLifecycle;
 
 typedef enum ABLiveViewFlags {
@@ -56,6 +56,15 @@ typedef enum ABLiveViewCursorFlags {
   AB_LIVE_VIEW_CURSOR_IMAGE_AVAILABLE = 1u << 0,
   AB_LIVE_VIEW_CURSOR_POSITION_AVAILABLE = 1u << 1,
 } ABLiveViewCursorFlags;
+
+typedef enum ABLiveViewInputKind {
+  AB_LIVE_VIEW_INPUT_MOVE = 0,
+  AB_LIVE_VIEW_INPUT_BUTTON = 1,
+  AB_LIVE_VIEW_INPUT_SCROLL = 2,
+  AB_LIVE_VIEW_INPUT_KEY = 3,
+  AB_LIVE_VIEW_INPUT_PASTE = 4,
+  AB_LIVE_VIEW_INPUT_KIND_COUNT = 5,
+} ABLiveViewInputKind;
 
 // Callers initialize no fields. The library writes the complete fixed-layout
 // snapshot when output_size is at least sizeof(ABLiveViewSnapshot).
@@ -84,6 +93,33 @@ typedef struct ABLiveViewMetrics {
   uint64_t data_packets_sent;
   uint64_t data_packets_failed;
 } ABLiveViewMetrics;
+
+typedef struct ABLiveViewInputKindMetrics {
+  uint64_t attempted;
+  uint64_t queued;
+  uint64_t sent;
+  uint64_t coalesced;
+  uint64_t control_dropped;
+  uint64_t send_failed;
+  uint64_t duplicate_suppressed;
+} ABLiveViewInputKindMetrics;
+
+// Input counters are monotonic for the lifetime of one session. queue_depth is
+// a current gauge; queue_capacity is the fixed serialized-delivery bound.
+// control_wait_ns/count accumulate completed explicit-control waits so callers
+// can derive an average without the ABI reporting a rate.
+typedef struct ABLiveViewInputMetrics {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t kind_count;
+  uint32_t queue_depth;
+  uint32_t queue_capacity;
+  uint32_t reserved;
+  uint64_t epoch;
+  uint64_t control_wait_ns;
+  uint64_t control_wait_count;
+  ABLiveViewInputKindMetrics kinds[AB_LIVE_VIEW_INPUT_KIND_COUNT];
+} ABLiveViewInputMetrics;
 
 typedef struct ABLiveViewFrameInfo {
   uint32_t struct_size;
@@ -137,6 +173,9 @@ AB_LIVE_VIEW_API uint32_t ab_live_view_session_snapshot(
 AB_LIVE_VIEW_API uint32_t ab_live_view_session_metrics(
     ABLiveViewSession *session, ABLiveViewMetrics *output,
     uint32_t output_size);
+AB_LIVE_VIEW_API uint32_t ab_live_view_session_input_metrics(
+    ABLiveViewSession *session, ABLiveViewInputMetrics *output,
+    uint32_t output_size);
 AB_LIVE_VIEW_API uint32_t ab_live_view_session_copy_status(
     ABLiveViewSession *session, uint8_t *output, uint32_t output_capacity);
 AB_LIVE_VIEW_API uint32_t ab_live_view_session_cursor_snapshot(
@@ -161,8 +200,10 @@ AB_LIVE_VIEW_API uint32_t ab_live_view_frame_convert_rgba(
 AB_LIVE_VIEW_API void
 ab_live_view_frame_release(ABLiveViewFrameLease *lease);
 
-// Control and input calls below return 1 when the request was accepted or the
-// packet was sent, and 0 otherwise. They do not return ABLiveViewResult.
+// Control and input calls below return 1 when the request was accepted for
+// ordered delivery (or its synchronous send succeeded), and 0 otherwise. An
+// event queued behind an active drainer may complete after its call returns;
+// input metrics expose that outcome. These calls do not return ABLiveViewResult.
 AB_LIVE_VIEW_API uint32_t
 ab_live_view_session_request_control(ABLiveViewSession *session);
 AB_LIVE_VIEW_API uint32_t

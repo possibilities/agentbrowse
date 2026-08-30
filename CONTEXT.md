@@ -68,6 +68,12 @@ _Avoid: viewer, skin._
 opens a same-labeled inbound channel; it must not replace this channel.
 _Avoid: data socket, remote data channel._
 
+**Input delivery queue** — The single bounded semantic FIFO that serializes
+Live View input across frontend and native callback threads. Explicit control
+waits keep events resident in this queue; authorization makes the same queue
+deliverable, without transferring into a separate replay buffer.
+_Avoid: pending input queue, replay queue._
+
 **Cursor observation** — The bounded latest-value cursor image and remote
 position retained by a Live View session from either known Neko data channel.
 Frontend adapters decide whether and how to present it; it is not itself a

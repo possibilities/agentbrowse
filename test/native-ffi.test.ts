@@ -14,6 +14,12 @@ const PACKAGE_JSON = fileURLToPath(new URL("../package.json", import.meta.url));
 const NEGOTIATION_FIXTURE = fileURLToPath(
   new URL("./fixtures/native-negotiation.ts", import.meta.url),
 );
+const ABI_V2_FIXTURE = fileURLToPath(new URL("./fixtures/native-v2-compat.ts", import.meta.url));
+const ABI_V2_COMPARISON = join(
+  resolve("zig-out/comparisons/03-control-admission"),
+  "lib",
+  "libagentbrowse-live-view.dylib",
+);
 
 test("named build prefixes select preserved Live View comparison artifacts", () => {
   const prefix = "zig-out/comparisons/00-baseline-debug";
@@ -35,6 +41,18 @@ test("Darwin export list matches every function in the public ABI header", () =>
   expect(exportedSymbols()).toEqual([...new Set(headerSymbols)].sort());
 });
 
+test("input telemetry is an additive ABI v3 snapshot with fixed layouts", () => {
+  const header = readFileSync(PUBLIC_HEADER, "utf8");
+  const enumConstants = [...header.matchAll(/^\s+(AB_LIVE_VIEW_[A-Z0-9_]+)\s*=/gmu)].map(
+    (match) => match[1]!,
+  );
+  expect(header).toContain("#define AB_LIVE_VIEW_ABI_VERSION 3u");
+  expect(new Set(enumConstants).size).toBe(enumConstants.length);
+  expect(header).toContain("AB_LIVE_VIEW_INPUT_KIND_COUNT = 5");
+  expect(header).toContain("ABLiveViewInputKindMetrics kinds[AB_LIVE_VIEW_INPUT_KIND_COUNT]");
+  expect(header).toContain("ab_live_view_session_input_metrics(");
+});
+
 test("embeddable native sessions never write process diagnostics", () => {
   expect(readFileSync(NATIVE_BRIDGE, "utf8")).not.toMatch(/fprintf\s*\(\s*stderr/gu);
   expect(readFileSync(NATIVE_SESSION, "utf8")).not.toContain("std.debug.print");
@@ -47,6 +65,23 @@ test("AppKit recovers focused Command-held key-up events and removes its monitor
   expect(bridge).toMatch(/\[inputView keyUp:event\];\s*return nil;/u);
   expect(bridge).toContain("[NSEvent removeMonitor:commandKeyUpMonitor]");
 });
+
+test("paste readiness leaves the native session monitor before draining Zig input", () => {
+  const bridge = readFileSync(NATIVE_BRIDGE, "utf8");
+  expect(bridge).toMatch(
+    /@synchronized \(session\)[\s\S]+callbacks = session\.callbacks;[\s\S]+\}\s*\/\/ Paste readiness[\s\S]+callbacks\.on_paste_ready/u,
+  );
+});
+
+test.skipIf(!existsSync(ABI_V2_COMPARISON))(
+  "current OpenTUI wrapper keeps ABI v2 comparison libraries usable",
+  () => {
+    const child = Bun.spawnSync([process.execPath, ABI_V2_FIXTURE, ABI_V2_COMPARISON]);
+    expect(child.exitCode).toBe(0);
+    expect(new TextDecoder().decode(child.stderr)).toBe("");
+    expect(JSON.parse(new TextDecoder().decode(child.stdout))).toEqual({ input: null });
+  },
+);
 
 test.skipIf(!existsSync(defaultNativeLibraryPath()))(
   "dylib exports only the public Live View ABI",
@@ -90,6 +125,18 @@ test.skipIf(!existsSync(defaultNativeLibraryPath()))(
         positionGeneration: 0n,
       });
       expect(session.cursorImage()).toBeNull();
+      expect(session.metrics().input).toEqual({
+        queueDepth: 0,
+        queueCapacity: 256,
+        epoch: 0n,
+        controlWaitNs: 0n,
+        controlWaitCount: 0n,
+        move: zeroInputKindMetrics(),
+        button: zeroInputKindMetrics(),
+        scroll: zeroInputKindMetrics(),
+        key: zeroInputKindMetrics(),
+        paste: zeroInputKindMetrics(),
+      });
       expect(session.status()).toBe("Ready");
       expect(session.acquireFrame(0n)).toBeNull();
       // Exercise immediate teardown with NSURLSession work outstanding. Native
@@ -142,4 +189,16 @@ function exportedSymbols(): string[] {
     .filter(Boolean)
     .map((symbol) => symbol.replace(/^_/u, ""))
     .sort();
+}
+
+function zeroInputKindMetrics() {
+  return {
+    attempted: 0n,
+    queued: 0n,
+    sent: 0n,
+    coalesced: 0n,
+    controlDropped: 0n,
+    sendFailed: 0n,
+    duplicateSuppressed: 0n,
+  };
 }

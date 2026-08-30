@@ -7,6 +7,8 @@ pub const coordinates = @import("session/coordinates.zig");
 pub const frame = @import("session/frame.zig");
 pub const frame_conversion = @import("session/frame_conversion.zig");
 pub const frame_queue = @import("session/frame_queue.zig");
+pub const input_event = @import("session/input_event.zig");
+pub const input_metrics = @import("session/input_metrics.zig");
 pub const input_state = @import("session/input_state.zig");
 pub const pending_input = @import("session/pending_input.zig");
 pub const cursor_state = @import("session/cursor_state.zig");
@@ -25,6 +27,8 @@ test {
     _ = frame;
     _ = frame_conversion;
     _ = frame_queue;
+    _ = input_event;
+    _ = input_metrics;
     _ = input_state;
     _ = pending_input;
     _ = cursor_state;

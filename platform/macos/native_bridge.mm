@@ -1239,12 +1239,22 @@ extern "C" void kl_native_schedule_paste(KLNativeSessionHandle *handle,
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                static_cast<int64_t>(delay_ms) * NSEC_PER_MSEC),
                  dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    KLNativeCallbacks callbacks = {};
+    BOOL invokeCallback = NO;
     @synchronized (session) {
       if (!session.closing && session.callbacks.on_paste_ready &&
           [session beginCallback]) {
-        session.callbacks.on_paste_ready(session.callbacks.context);
-        [session endCallback];
+        callbacks = session.callbacks;
+        invokeCallback = YES;
       }
+    }
+    // Paste readiness has no transport identity to order. Run it outside the
+    // session monitor so its serialized Zig input drain cannot block signaling,
+    // data-channel, or reconnect callbacks. beginCallback keeps the Zig session
+    // alive until this call returns.
+    if (invokeCallback) {
+      callbacks.on_paste_ready(callbacks.context);
+      [session endCallback];
     }
   });
 }

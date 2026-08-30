@@ -54,7 +54,9 @@ never placed in argv or logs.
 JavaScript. Bun polls lifecycle and the newest frame from its own event-loop
 thread, normally at 15 FPS, and sends input through synchronous session calls.
 This keeps WebRTC and NSURLSession worker threads on the native side of the
-runtime boundary.
+runtime boundary. The wrapper accepts preserved ABI version 2 comparison
+libraries and reports their unavailable input telemetry as `null`; ABI version
+3 adds the input metrics snapshot without changing the version-2 layouts.
 
 `LiveViewRenderable` subclasses OpenTUI's public `ImageRenderable`; it requires
 no private API or native plugin. For each new generation it:
@@ -90,7 +92,7 @@ raw press are treated as taps so a key cannot remain held indefinitely.
 
 Neko's selected `main` stream contains no cursor. OpenTUI deliberately leaves
 cursor presentation to the terminal host pointer and never composites the
-cursor observation exposed by ABI version 2. This produces one pointer for
+cursor observation available since ABI version 2. This produces one pointer for
 local interaction; movement by another control host is intentionally not
 shown in the OpenTUI frontend adapter.
 
@@ -99,12 +101,28 @@ opens. The adapter does the same when the renderable blurs, the terminal loses
 focus, the target changes, transport disconnects, or teardown begins. Control
 ownership remains a Live View session policy. When Neko announces implicit
 hosting, the core sends the triggering input immediately and requests ownership
-alongside it. With explicit hosting, the core retains at most 32 semantic events
-for two seconds and replays them only after Neko identifies this session as the
-host. Adjacent motion and compatible scroll events may coalesce; keys, buttons,
-paste, and incompatible scroll remain ordering barriers. Pending input is
-cleared on refusal expiry, another host, release, transport loss, focus cleanup,
-or queue overflow.
+alongside it. Every accepted event enters one 256-slot Input delivery queue and
+one drainer preserves FIFO order across frontend and native callback threads.
+With explicit hosting, that queue remains undeliverable and retains at most 32
+semantic events for two seconds; identifying this session as host opens the same
+queue rather than transferring events through a replay buffer. Adjacent motion
+and compatible scroll events may coalesce; keys, buttons, paste, and incompatible
+scroll remain ordering barriers. Repeated held-key downs are suppressed because
+Neko rejects them and X provides autorepeat after the original down.
+
+The drainer never holds the admission lock across a native call. A key or button
+changes committed held state only after its ordered send succeeds, so a failed
+down can be retried and a failed up stays eligible for focus/control cleanup.
+Control, transport, and focus cancellation clear resident events and advance one
+epoch without stopping an active drainer. If an old-epoch down reports success
+after cancellation, the drainer sends one best-effort up while the same transport
+is still open, then continues with any deliverable new-epoch input. In explicit
+mode an up sent after control has already moved to another host can be ignored by
+Neko; its ten-second stuck-input sweep remains the final server-side backstop.
+An immediately regained implicit host can also race a canceller's committed-key
+release burst against a new down for the same key; if the down reaches Neko
+first, the later release leaves guest and committed local state divergent until
+the next release cycle or that server sweep.
 
 ## Native frame ownership
 
@@ -168,7 +186,11 @@ covering the complete frame callback. Destruction disables new callbacks and
 waits for callbacks already inside Zig before any session-owned descriptor,
 status, identifier, or frame queue is released. The embeddable session layer
 never writes diagnostics to stdout or stderr; hosts obtain status through the
-polling ABI so retained terminal surfaces cannot be corrupted.
+polling ABI so retained terminal surfaces cannot be corrupted. Input admission
+and held-state locks are released before native sends. The delayed paste-ready
+callback carries no transport identity, so the bridge counts it as in flight
+under the native session monitor and invokes Zig after releasing that monitor;
+state and reconnect callbacks retain their monitor ordering.
 
 OpenTUI target switching uses a separate operation generation. An access or
 session that completes after a newer connect, disconnect, or destroy operation

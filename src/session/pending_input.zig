@@ -1,30 +1,23 @@
 const std = @import("std");
-const input_state = @import("input_state.zig");
+const input_event = @import("input_event.zig");
 
-pub const max_events = 32;
+pub const max_events = 256;
+pub const max_waiting_events = 32;
 pub const max_age_ns = 2 * std.time.ns_per_s;
 pub const max_paste_bytes = 1024 * 1024;
 
-pub const Event = union(enum) {
-    move: struct { x: u16, y: u16 },
-    button: struct { button: u3, pressed: bool },
-    scroll: struct { delta_x: i16, delta_y: i16, control_key: bool },
-    key: struct { keysym: u64, pressed: bool, repeat: bool },
-    paste: []u8,
+pub const Event = input_event.Event;
+pub const Counts = input_event.Counts;
 
-    pub fn deinit(self: *Event, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .paste => |text| allocator.free(text),
-            else => {},
-        }
-        self.* = undefined;
-    }
+pub const Entry = struct {
+    sequence: u64,
+    epoch: u64,
+    event: Event,
 };
 
 pub const PushResult = enum {
     queued,
     coalesced,
-    duplicate,
     overflow,
     aborted,
     out_of_memory,
@@ -34,300 +27,265 @@ pub const PushResult = enum {
     }
 };
 
+pub const PushOutcome = struct {
+    result: PushResult,
+    abandoned: Counts = .{},
+    wait_duration_ns: ?i128 = null,
+
+    pub fn accepted(self: PushOutcome) bool {
+        return self.result.accepted();
+    }
+};
+
+pub const ClearResult = struct {
+    abandoned: Counts = .{},
+    wait_duration_ns: ?i128 = null,
+};
+
 pub const Queue = struct {
-    events: [max_events]Event = undefined,
+    entries: [max_events]Entry = undefined,
     count: usize = 0,
     paste_bytes: usize = 0,
-    first_queued_ns: ?i128 = null,
+    wait_started_ns: ?i128 = null,
     aborted: bool = false,
-    desired_input: input_state.InputState = .{},
 
     pub fn len(self: *const Queue) usize {
         return self.count;
     }
 
-    pub fn isKeyHeld(self: *const Queue, keysym: u64) bool {
-        return self.desired_input.isKeyHeld(keysym);
+    pub fn capacity(self: *const Queue) usize {
+        _ = self;
+        return max_events;
     }
 
-    pub fn expire(self: *Queue, allocator: std.mem.Allocator, now_ns: i128) bool {
-        const started = self.first_queued_ns orelse return false;
-        if (now_ns < started or now_ns - started < max_age_ns) return false;
-        self.clear(allocator);
-        return true;
+    pub fn entry(self: *const Queue, index: usize) *const Entry {
+        std.debug.assert(index < self.count);
+        return &self.entries[index];
     }
 
-    pub fn pushMove(self: *Queue, allocator: std.mem.Allocator, x: u16, y: u16, now_ns: i128) PushResult {
-        if (self.aborted) return .aborted;
+    pub fn isWaiting(self: *const Queue) bool {
+        return self.wait_started_ns != null;
+    }
+
+    pub fn canAppend(self: *const Queue, amount: usize, waiting: bool) bool {
+        if (waiting and self.aborted) return false;
+        const limit: usize = if (waiting) max_waiting_events else max_events;
+        return amount <= limit -| self.count;
+    }
+
+    pub fn expireWait(self: *Queue, allocator: std.mem.Allocator, now_ns: i128) ?ClearResult {
+        const started = self.wait_started_ns orelse return null;
+        if (now_ns < started or now_ns - started < max_age_ns) return null;
+        return self.clear(allocator, now_ns);
+    }
+
+    pub fn finishWait(self: *Queue, now_ns: i128) ?i128 {
+        const duration = self.waitDuration(now_ns);
+        self.wait_started_ns = null;
+        self.aborted = false;
+        return duration;
+    }
+
+    pub fn abortWait(self: *Queue, allocator: std.mem.Allocator, now_ns: i128) ClearResult {
+        const result = ClearResult{
+            .abandoned = self.clearEntries(allocator),
+            .wait_duration_ns = self.waitDuration(now_ns),
+        };
+        self.wait_started_ns = now_ns;
+        self.aborted = true;
+        return result;
+    }
+
+    pub fn pushMove(self: *Queue, allocator: std.mem.Allocator, sequence: u64, epoch: u64, x: u16, y: u16, waiting: bool, now_ns: i128) PushOutcome {
+        if (waiting and self.aborted) return .{ .result = .aborted };
         if (self.count > 0) {
-            switch (self.events[self.count - 1]) {
+            const last = &self.entries[self.count - 1];
+            if (last.epoch == epoch) switch (last.event) {
                 .move => {
-                    self.events[self.count - 1] = .{ .move = .{ .x = x, .y = y } };
-                    return .coalesced;
+                    last.event = .{ .move = .{ .x = x, .y = y } };
+                    return .{ .result = .coalesced };
                 },
                 else => {},
-            }
+            };
         }
-        if (!self.reserve(allocator, now_ns)) return .overflow;
-        self.append(.{ .move = .{ .x = x, .y = y } }, now_ns);
-        return .queued;
+        if (self.reserve(allocator, waiting, now_ns)) |failure| return failure;
+        self.append(.{ .sequence = sequence, .epoch = epoch, .event = .{ .move = .{ .x = x, .y = y } } }, waiting, now_ns);
+        return .{ .result = .queued };
     }
 
-    pub fn pushButton(self: *Queue, allocator: std.mem.Allocator, button: u3, pressed: bool, now_ns: i128) PushResult {
-        if (self.aborted) return .aborted;
-        if (!self.reserve(allocator, now_ns)) return .overflow;
-        if (pressed) self.desired_input.pressButton(button) else self.desired_input.releaseButton(button);
-        self.append(.{ .button = .{ .button = button, .pressed = pressed } }, now_ns);
-        return .queued;
+    pub fn pushButton(self: *Queue, allocator: std.mem.Allocator, sequence: u64, epoch: u64, button: u3, pressed: bool, waiting: bool, now_ns: i128) PushOutcome {
+        return self.pushSimple(allocator, .{
+            .sequence = sequence,
+            .epoch = epoch,
+            .event = .{ .button = .{ .button = button, .pressed = pressed } },
+        }, waiting, now_ns);
     }
 
-    pub fn pushScroll(self: *Queue, allocator: std.mem.Allocator, delta_x: i16, delta_y: i16, control_key: bool, now_ns: i128) PushResult {
-        if (self.aborted) return .aborted;
+    pub fn pushScroll(self: *Queue, allocator: std.mem.Allocator, sequence: u64, epoch: u64, delta_x: i16, delta_y: i16, control_key: bool, waiting: bool, now_ns: i128) PushOutcome {
+        if (waiting and self.aborted) return .{ .result = .aborted };
         if (self.count > 0) {
-            switch (self.events[self.count - 1]) {
+            const last = &self.entries[self.count - 1];
+            if (last.epoch == epoch) switch (last.event) {
                 .scroll => |previous| {
                     if (previous.control_key == control_key) {
-                        self.events[self.count - 1] = .{ .scroll = .{
+                        last.event = .{ .scroll = .{
                             .delta_x = previous.delta_x +| delta_x,
                             .delta_y = previous.delta_y +| delta_y,
                             .control_key = control_key,
                         } };
-                        return .coalesced;
+                        return .{ .result = .coalesced };
                     }
                 },
                 else => {},
-            }
+            };
         }
-        if (!self.reserve(allocator, now_ns)) return .overflow;
-        self.append(.{ .scroll = .{
+        if (self.reserve(allocator, waiting, now_ns)) |failure| return failure;
+        self.append(.{ .sequence = sequence, .epoch = epoch, .event = .{ .scroll = .{
             .delta_x = delta_x,
             .delta_y = delta_y,
             .control_key = control_key,
-        } }, now_ns);
-        return .queued;
+        } } }, waiting, now_ns);
+        return .{ .result = .queued };
     }
 
-    pub fn pushKey(self: *Queue, allocator: std.mem.Allocator, keysym: u64, pressed: bool, repeat: bool, now_ns: i128) PushResult {
-        if (self.aborted) return .aborted;
-        if (pressed) {
-            // Neko debounces repeated key-down packets and X provides repeat
-            // after the original down is replayed, so retaining repeat events
-            // only consumes the bounded admission queue.
-            if (self.desired_input.isKeyHeld(keysym)) return .duplicate;
-        } else if (!self.desired_input.isKeyHeld(keysym)) {
-            return .duplicate;
-        }
-        if (!self.reserve(allocator, now_ns)) return .overflow;
-        if (pressed) {
-            if (!self.desired_input.isKeyHeld(keysym)) {
-                _ = self.desired_input.pressKey(keysym) catch {
-                    self.abort(allocator, now_ns);
-                    return .overflow;
-                };
-            }
-        } else {
-            _ = self.desired_input.releaseKey(keysym);
-        }
-        self.append(.{ .key = .{
-            .keysym = keysym,
-            .pressed = pressed,
-            .repeat = repeat,
-        } }, now_ns);
-        return .queued;
+    pub fn pushKey(self: *Queue, allocator: std.mem.Allocator, sequence: u64, epoch: u64, keysym: u64, pressed: bool, waiting: bool, now_ns: i128) PushOutcome {
+        return self.pushSimple(allocator, .{
+            .sequence = sequence,
+            .epoch = epoch,
+            .event = .{ .key = .{ .keysym = keysym, .pressed = pressed } },
+        }, waiting, now_ns);
     }
 
-    pub fn pushPaste(self: *Queue, allocator: std.mem.Allocator, text: []const u8, now_ns: i128) PushResult {
-        if (self.aborted) return .aborted;
-        if (text.len > max_paste_bytes -| self.paste_bytes) {
-            return .overflow;
-        }
-        if (!self.reserve(allocator, now_ns)) return .overflow;
-        const copy = allocator.dupe(u8, text) catch {
-            return .out_of_memory;
-        };
+    pub fn pushPaste(self: *Queue, allocator: std.mem.Allocator, sequence: u64, epoch: u64, text: []const u8, waiting: bool, now_ns: i128) PushOutcome {
+        if (waiting and self.aborted) return .{ .result = .aborted };
+        if (text.len > max_paste_bytes -| self.paste_bytes) return .{ .result = .overflow };
+        if (self.reserve(allocator, waiting, now_ns)) |failure| return failure;
+        const copy = allocator.dupe(u8, text) catch return .{ .result = .out_of_memory };
         self.paste_bytes += copy.len;
-        self.append(.{ .paste = copy }, now_ns);
-        return .queued;
+        self.append(.{
+            .sequence = sequence,
+            .epoch = epoch,
+            .event = .{ .paste = copy },
+        }, waiting, now_ns);
+        return .{ .result = .queued };
     }
 
-    pub fn pop(self: *Queue) ?Event {
+    pub fn pop(self: *Queue) ?Entry {
         if (self.count == 0) return null;
-        const event = self.events[0];
-        switch (event) {
+        const value = self.entries[0];
+        switch (value.event) {
             .paste => |text| self.paste_bytes -= text.len,
             else => {},
         }
-        for (1..self.count) |index| self.events[index - 1] = self.events[index];
+        for (1..self.count) |index| self.entries[index - 1] = self.entries[index];
         self.count -= 1;
-        if (self.count == 0) self.resetQueueMetadata();
-        return event;
+        return value;
     }
 
-    pub fn takeBatch(self: *Queue, output: *[max_events]Event) usize {
-        const length = self.count;
-        @memcpy(output[0..length], self.events[0..length]);
-        self.count = 0;
-        self.resetQueueMetadata();
-        return length;
+    pub fn clear(self: *Queue, allocator: std.mem.Allocator, now_ns: i128) ClearResult {
+        const result = ClearResult{
+            .abandoned = self.clearEntries(allocator),
+            .wait_duration_ns = self.waitDuration(now_ns),
+        };
+        self.wait_started_ns = null;
+        self.aborted = false;
+        return result;
     }
 
-    pub fn finishReplay(self: *Queue) void {
-        std.debug.assert(self.count == 0);
-        self.resetQueueMetadata();
-        self.desired_input.clear();
+    fn pushSimple(self: *Queue, allocator: std.mem.Allocator, value: Entry, waiting: bool, now_ns: i128) PushOutcome {
+        if (waiting and self.aborted) return .{ .result = .aborted };
+        if (self.reserve(allocator, waiting, now_ns)) |failure| return failure;
+        self.append(value, waiting, now_ns);
+        return .{ .result = .queued };
     }
 
-    pub fn clear(self: *Queue, allocator: std.mem.Allocator) void {
-        for (self.events[0..self.count]) |*event| event.deinit(allocator);
-        self.count = 0;
-        self.resetMetadata();
+    fn reserve(self: *Queue, allocator: std.mem.Allocator, waiting: bool, now_ns: i128) ?PushOutcome {
+        const limit: usize = if (waiting) max_waiting_events else max_events;
+        if (self.count < limit) return null;
+        if (!waiting) return .{ .result = .overflow };
+        const abandoned = self.abortWait(allocator, now_ns);
+        return .{
+            .result = .overflow,
+            .abandoned = abandoned.abandoned,
+            .wait_duration_ns = abandoned.wait_duration_ns,
+        };
     }
 
-    fn reserve(self: *Queue, allocator: std.mem.Allocator, now_ns: i128) bool {
-        if (self.count < self.events.len) return true;
-        self.abort(allocator, now_ns);
-        return false;
-    }
-
-    fn append(self: *Queue, event: Event, now_ns: i128) void {
-        if (self.first_queued_ns == null) self.first_queued_ns = now_ns;
-        self.events[self.count] = event;
+    fn append(self: *Queue, value: Entry, waiting: bool, now_ns: i128) void {
+        if (waiting and self.wait_started_ns == null) self.wait_started_ns = now_ns;
+        self.entries[self.count] = value;
         self.count += 1;
     }
 
-    fn abort(self: *Queue, allocator: std.mem.Allocator, now_ns: i128) void {
-        self.clear(allocator);
-        self.aborted = true;
-        self.first_queued_ns = now_ns;
-    }
-
-    fn resetMetadata(self: *Queue) void {
-        self.resetQueueMetadata();
-        self.desired_input.clear();
-    }
-
-    fn resetQueueMetadata(self: *Queue) void {
+    fn clearEntries(self: *Queue, allocator: std.mem.Allocator) Counts {
+        var abandoned: Counts = .{};
+        for (self.entries[0..self.count]) |*value| {
+            abandoned.add(value.event.kind(), 1);
+            value.event.deinit(allocator);
+        }
+        self.count = 0;
         self.paste_bytes = 0;
-        self.first_queued_ns = null;
-        self.aborted = false;
+        return abandoned;
+    }
+
+    fn waitDuration(self: *const Queue, now_ns: i128) ?i128 {
+        const started = self.wait_started_ns orelse return null;
+        return if (now_ns >= started) now_ns - started else 0;
     }
 };
 
-test "first semantic input is retained for replay" {
-    var queue: Queue = .{};
-    defer queue.clear(std.testing.allocator);
-
-    try std.testing.expectEqual(.queued, queue.pushKey(std.testing.allocator, 'a', true, false, 10));
-    try std.testing.expect(queue.isKeyHeld('a'));
-    var event = queue.pop().?;
-    defer event.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 0), queue.len());
-    try std.testing.expect(queue.isKeyHeld('a'));
-    queue.finishReplay();
-    try std.testing.expect(!queue.isKeyHeld('a'));
-    switch (event) {
-        .key => |key| {
-            try std.testing.expectEqual(@as(u64, 'a'), key.keysym);
-            try std.testing.expect(key.pressed);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-}
-
 test "motion coalesces only within semantic ordering barriers" {
     var queue: Queue = .{};
-    defer queue.clear(std.testing.allocator);
+    defer _ = queue.clear(std.testing.allocator, 100);
 
-    try std.testing.expectEqual(.queued, queue.pushMove(std.testing.allocator, 1, 2, 10));
-    try std.testing.expectEqual(.coalesced, queue.pushMove(std.testing.allocator, 3, 4, 11));
-    try std.testing.expectEqual(.queued, queue.pushKey(std.testing.allocator, 'x', true, false, 12));
-    try std.testing.expectEqual(.queued, queue.pushMove(std.testing.allocator, 5, 6, 13));
-    try std.testing.expectEqual(.coalesced, queue.pushMove(std.testing.allocator, 7, 8, 14));
+    try std.testing.expectEqual(.queued, queue.pushMove(std.testing.allocator, 1, 0, 1, 2, false, 10).result);
+    try std.testing.expectEqual(.coalesced, queue.pushMove(std.testing.allocator, 2, 0, 3, 4, false, 11).result);
+    try std.testing.expectEqual(.queued, queue.pushKey(std.testing.allocator, 3, 0, 'x', true, false, 12).result);
+    try std.testing.expectEqual(.queued, queue.pushMove(std.testing.allocator, 4, 0, 5, 6, false, 13).result);
     try std.testing.expectEqual(@as(usize, 3), queue.len());
 
-    var first = queue.pop().?;
-    defer first.deinit(std.testing.allocator);
-    switch (first) {
+    const first = queue.pop().?;
+    switch (first.event) {
         .move => |position| {
             try std.testing.expectEqual(@as(u16, 3), position.x);
             try std.testing.expectEqual(@as(u16, 4), position.y);
         },
         else => return error.TestUnexpectedResult,
     }
-    var barrier = queue.pop().?;
-    defer barrier.deinit(std.testing.allocator);
-    try std.testing.expect(barrier == .key);
-    var last = queue.pop().?;
-    defer last.deinit(std.testing.allocator);
-    switch (last) {
-        .move => |position| {
-            try std.testing.expectEqual(@as(u16, 7), position.x);
-            try std.testing.expectEqual(@as(u16, 8), position.y);
-        },
-        else => return error.TestUnexpectedResult,
-    }
 }
 
-test "compatible scroll bursts coalesce and keys still form barriers" {
+test "waiting overflow abandons 32 events and starts a bounded blackout" {
     var queue: Queue = .{};
-    defer queue.clear(std.testing.allocator);
+    defer _ = queue.clear(std.testing.allocator, 100 + max_age_ns);
 
-    try std.testing.expectEqual(.queued, queue.pushScroll(std.testing.allocator, 10, 20, false, 10));
-    try std.testing.expectEqual(.coalesced, queue.pushScroll(std.testing.allocator, 30, -5, false, 11));
-    try std.testing.expectEqual(.queued, queue.pushKey(std.testing.allocator, 'x', true, false, 12));
-    try std.testing.expectEqual(.queued, queue.pushScroll(std.testing.allocator, 1, 2, false, 13));
-    try std.testing.expectEqual(.queued, queue.pushScroll(std.testing.allocator, 3, 4, true, 14));
-    try std.testing.expectEqual(@as(usize, 4), queue.len());
-
-    var first = queue.pop().?;
-    defer first.deinit(std.testing.allocator);
-    switch (first) {
-        .scroll => |scroll| {
-            try std.testing.expectEqual(@as(i16, 40), scroll.delta_x);
-            try std.testing.expectEqual(@as(i16, 15), scroll.delta_y);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-test "repeat downs do not consume the bounded queue" {
-    var queue: Queue = .{};
-    defer queue.clear(std.testing.allocator);
-
-    try std.testing.expectEqual(.queued, queue.pushKey(std.testing.allocator, 'x', true, false, 10));
-    for (0..max_events * 2) |_| {
-        try std.testing.expectEqual(.duplicate, queue.pushKey(std.testing.allocator, 'x', true, true, 11));
-    }
-    try std.testing.expectEqual(@as(usize, 1), queue.len());
-}
-
-test "overflow abandons the entire pending batch until its time bound" {
-    var queue: Queue = .{};
-    defer queue.clear(std.testing.allocator);
-
-    for (0..max_events) |index| {
-        try std.testing.expectEqual(.queued, queue.pushScroll(
+    for (0..max_waiting_events) |index| {
+        const result = queue.pushScroll(
             std.testing.allocator,
+            index,
+            0,
             @intCast(index),
             0,
             index % 2 != 0,
+            true,
             10,
-        ));
+        );
+        try std.testing.expectEqual(.queued, result.result);
     }
-    try std.testing.expectEqual(.overflow, queue.pushKey(std.testing.allocator, 'z', true, false, 11));
+    const overflow = queue.pushKey(std.testing.allocator, 33, 0, 'z', true, true, 11);
+    try std.testing.expectEqual(.overflow, overflow.result);
+    try std.testing.expectEqual(@as(u64, max_waiting_events), overflow.abandoned.get(.scroll));
     try std.testing.expectEqual(@as(usize, 0), queue.len());
-    try std.testing.expectEqual(.aborted, queue.pushMove(std.testing.allocator, 9, 9, 12));
-    try std.testing.expect(queue.expire(std.testing.allocator, 11 + max_age_ns));
-    try std.testing.expectEqual(.queued, queue.pushMove(std.testing.allocator, 9, 9, 12 + max_age_ns));
+    try std.testing.expectEqual(.aborted, queue.pushMove(std.testing.allocator, 34, 0, 9, 9, true, 12).result);
+    const expired = queue.expireWait(std.testing.allocator, 11 + max_age_ns).?;
+    try std.testing.expectEqual(@as(u64, 0), expired.abandoned.get(.move));
+    try std.testing.expectEqual(.queued, queue.pushMove(std.testing.allocator, 35, 0, 9, 9, true, 12 + max_age_ns).result);
 }
 
-test "clear discards owned paste and desired held state" {
+test "popped paste is owned by the caller and clear frees only residents" {
     var queue: Queue = .{};
-    try std.testing.expectEqual(.queued, queue.pushPaste(std.testing.allocator, "clipboard", 10));
-    try std.testing.expectEqual(.queued, queue.pushKey(std.testing.allocator, 'v', true, false, 11));
-    queue.clear(std.testing.allocator);
-
+    try std.testing.expectEqual(.queued, queue.pushPaste(std.testing.allocator, 1, 0, "clipboard", false, 10).result);
+    var popped = queue.pop().?;
     try std.testing.expectEqual(@as(usize, 0), queue.len());
-    try std.testing.expect(!queue.isKeyHeld('v'));
-    try std.testing.expectEqual(@as(usize, 0), queue.paste_bytes);
+    _ = queue.clear(std.testing.allocator, 11);
+    popped.event.deinit(std.testing.allocator);
 }

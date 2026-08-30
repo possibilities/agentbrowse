@@ -1,7 +1,7 @@
 const std = @import("std");
 const klv = @import("kernel_live_view");
 
-const abi_version: u32 = 2;
+const abi_version: u32 = 3;
 const allocator = std.heap.page_allocator;
 const max_descriptor_bytes: u32 = 64 * 1024;
 const max_output_dimension: u32 = 8192;
@@ -41,6 +41,29 @@ const Metrics = extern struct {
     mapped_key_events: u64,
     data_packets_sent: u64,
     data_packets_failed: u64,
+};
+
+const InputKindMetrics = extern struct {
+    attempted: u64,
+    queued: u64,
+    sent: u64,
+    coalesced: u64,
+    control_dropped: u64,
+    send_failed: u64,
+    duplicate_suppressed: u64,
+};
+
+const InputMetrics = extern struct {
+    struct_size: u32,
+    abi_version: u32,
+    kind_count: u32,
+    queue_depth: u32,
+    queue_capacity: u32,
+    reserved: u32,
+    epoch: u64,
+    control_wait_ns: u64,
+    control_wait_count: u64,
+    kinds: [klv.input_event.kind_count]InputKindMetrics,
 };
 
 const FrameInfo = extern struct {
@@ -84,6 +107,8 @@ const Result = enum(u32) {
 comptime {
     if (@sizeOf(Snapshot) != 32) @compileError("ABLiveViewSnapshot layout changed");
     if (@sizeOf(Metrics) != 96) @compileError("ABLiveViewMetrics layout changed");
+    if (@sizeOf(InputKindMetrics) != 56) @compileError("ABLiveViewInputKindMetrics layout changed");
+    if (@sizeOf(InputMetrics) != 328) @compileError("ABLiveViewInputMetrics layout changed");
     if (@sizeOf(FrameInfo) != 48) @compileError("ABLiveViewFrameInfo layout changed");
     if (@sizeOf(CursorSnapshot) != 64) @compileError("ABLiveViewCursorSnapshot layout changed");
 }
@@ -197,6 +222,42 @@ export fn ab_live_view_session_metrics(
         .mapped_key_events = metrics.mapped_key_events,
         .data_packets_sent = metrics.data_packets_sent,
         .data_packets_failed = metrics.data_packets_failed,
+    };
+    return result(.ok);
+}
+
+export fn ab_live_view_session_input_metrics(
+    handle: ?*AbiSession,
+    output: ?*InputMetrics,
+    output_size: u32,
+) callconv(.c) u32 {
+    const session_handle = handle orelse return result(.invalid_argument);
+    const target = output orelse return result(.invalid_argument);
+    if (output_size < @sizeOf(InputMetrics)) return result(.buffer_too_small);
+    const metrics = session_handle.live_session.snapshotInputMetrics();
+    var kinds: [klv.input_event.kind_count]InputKindMetrics = undefined;
+    for (&kinds, metrics.kinds) |*abi_kind, kind| {
+        abi_kind.* = .{
+            .attempted = kind.attempted,
+            .queued = kind.queued,
+            .sent = kind.sent,
+            .coalesced = kind.coalesced,
+            .control_dropped = kind.control_dropped,
+            .send_failed = kind.send_failed,
+            .duplicate_suppressed = kind.duplicate_suppressed,
+        };
+    }
+    target.* = .{
+        .struct_size = @sizeOf(InputMetrics),
+        .abi_version = abi_version,
+        .kind_count = klv.input_event.kind_count,
+        .queue_depth = metrics.queue_depth,
+        .queue_capacity = metrics.queue_capacity,
+        .reserved = 0,
+        .epoch = metrics.epoch,
+        .control_wait_ns = metrics.control_wait_ns,
+        .control_wait_count = metrics.control_wait_count,
+        .kinds = kinds,
     };
     return result(.ok);
 }

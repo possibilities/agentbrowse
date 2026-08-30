@@ -66,13 +66,36 @@ generation gaps between frames handed to `ImageRenderable`.
   even when the OpenTUI poller will skip its generation. Producer-side
   throttling is a possible optimization only after measurements show that copy
   to be the limiting cost.
+- The Input delivery queue has 256 physical slots. While explicit control is
+  pending it admits at most 32 events for two seconds; adjacent motion and
+  compatible scroll bursts coalesce before consuming another slot. Native sends
+  occur outside its admission lock and only one drainer can call the outbound
+  input channel at a time.
 
 `LiveViewSubmissionMetrics` exposes frames submitted as `ImageRenderable`
 sources, skipped generations, RGBA bytes and byte rate, output dimensions,
 native conversion last/average/max duration, and time since the most recent
 submission. Terminals do not provide an acknowledgement that the pixels became
 visible. Native counters separately expose decode, queue, input-mapping, and
-data-channel results.
+data-channel results. ABI version 3 adds monotonic input counters for pointer
+move, pointer button, scroll, key, and paste. `attempted` counts semantic
+submissions; `queued` counts attempts retained while explicit control is
+pending; `coalesced` is the queued subset merged into an adjacent event; `sent`
+and `send_failed` report native send results; `duplicate_suppressed` reports
+state transitions intentionally omitted; and `control_dropped` reports
+admission rejection, resident cancellation, queue overflow, or an in-flight
+event invalidated by an epoch change. Cleanup and compensating release packets
+remain packet-level work and do not increment semantic input counters; the
+paste-ready Ctrl+V transitions are ordinary semantic key events and do.
+The stages are deliberately not mutually exclusive: a queued event may later be
+sent, and a native send that completes after cancellation is both sent and
+control-dropped.
+
+The same snapshot reports resident queue depth and capacity, the current input
+epoch, and the sum and count of completed explicit-control waits. These are raw
+counters and gauges rather than rates; consumers derive intervals or averages
+from successive snapshots. An ABI version 2 comparison library has no input
+snapshot, which the OpenTUI wrapper represents as `input: null`.
 
 Pointer-to-visible-response latency, terminal-protocol throughput, sustained
 CPU/RSS for Kitty graphics versus block fallback, and p50/p95 submission age

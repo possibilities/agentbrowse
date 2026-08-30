@@ -1,6 +1,8 @@
 const std = @import("std");
 
-pub const max_held_keys = 64;
+// This matches the serialized delivery queue's practical upper bound so a
+// successful key-down can always be represented locally before cleanup.
+pub const max_held_keys = 256;
 
 pub const InputState = struct {
     keys: [max_held_keys]u64 = [_]u64{0} ** max_held_keys,
@@ -34,6 +36,10 @@ pub const InputState = struct {
         self.buttons |= @as(u8, 1) << button;
     }
 
+    pub fn isButtonHeld(self: *const InputState, button: u3) bool {
+        return (self.buttons & (@as(u8, 1) << button)) != 0;
+    }
+
     pub fn releaseButton(self: *InputState, button: u3) void {
         self.buttons &= ~(@as(u8, 1) << button);
     }
@@ -49,6 +55,7 @@ test "held input is idempotent and clears" {
     try std.testing.expect(try state.pressKey(0xffe1));
     try std.testing.expect(!(try state.pressKey(0xffe1)));
     state.pressButton(0);
+    try std.testing.expect(state.isButtonHeld(0));
     try std.testing.expect(state.releaseKey(0xffe1));
     state.clear();
     try std.testing.expectEqual(@as(usize, 0), state.key_count);

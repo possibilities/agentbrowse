@@ -9,9 +9,13 @@ import {
 } from "../../client/connection.ts";
 import { liveViewBuildPrefix } from "../../client/live-view-build.ts";
 
-const ABI_VERSION = 2;
+const MIN_ABI_VERSION = 2;
+const ABI_VERSION = 3;
 const SNAPSHOT_SIZE = 32;
 const METRICS_SIZE = 96;
+const INPUT_KIND_METRICS_SIZE = 56;
+const INPUT_METRICS_SIZE = 328;
+const INPUT_KIND_COUNT = 5;
 const FRAME_INFO_SIZE = 48;
 const CURSOR_SNAPSHOT_SIZE = 64;
 const MAX_CURSOR_IMAGE_BYTES = 1024 * 1024;
@@ -93,11 +97,47 @@ const nativeSymbols = {
   },
 } as const;
 
-function openNativeLibrary(path: string) {
+const nativeSymbolsV3 = {
+  ...nativeSymbols,
+  ab_live_view_session_input_metrics: {
+    args: [FFIType.ptr, FFIType.ptr, FFIType.u32],
+    returns: FFIType.u32,
+  },
+} as const;
+
+function openNativeLibraryV2(path: string) {
   return dlopen(path, nativeSymbols);
 }
 
-type NativeLibrary = ReturnType<typeof openNativeLibrary>;
+function openNativeLibraryV3(path: string) {
+  return dlopen(path, nativeSymbolsV3);
+}
+
+type NativeLibraryV2 = ReturnType<typeof openNativeLibraryV2>;
+type NativeLibraryV3 = ReturnType<typeof openNativeLibraryV3>;
+type InputMetricsFunction = NativeLibraryV3["symbols"]["ab_live_view_session_input_metrics"];
+
+interface NativeLibrary {
+  abiVersion: number;
+  handle: NativeLibraryV2 | NativeLibraryV3;
+  symbols: NativeLibraryV2["symbols"];
+  inputMetrics: InputMetricsFunction | null;
+}
+
+function openNativeLibrary(path: string, abiVersion: number): NativeLibrary {
+  if (abiVersion === 2) {
+    const handle = openNativeLibraryV2(path);
+    return { abiVersion, handle, symbols: handle.symbols, inputMetrics: null };
+  }
+  const handle = openNativeLibraryV3(path);
+  return {
+    abiVersion,
+    handle,
+    symbols: handle.symbols,
+    inputMetrics: handle.symbols.ab_live_view_session_input_metrics,
+  };
+}
+
 const libraries = new Map<string, NativeLibrary>();
 
 export type LiveViewLifecycle =
@@ -132,6 +172,30 @@ export interface NativeLiveViewMetrics {
   mappedKeyEvents: bigint;
   dataPacketsSent: bigint;
   dataPacketsFailed: bigint;
+  input: NativeLiveViewInputMetrics | null;
+}
+
+export interface NativeInputKindMetrics {
+  attempted: bigint;
+  queued: bigint;
+  sent: bigint;
+  coalesced: bigint;
+  controlDropped: bigint;
+  sendFailed: bigint;
+  duplicateSuppressed: bigint;
+}
+
+export interface NativeLiveViewInputMetrics {
+  queueDepth: number;
+  queueCapacity: number;
+  epoch: bigint;
+  controlWaitNs: bigint;
+  controlWaitCount: bigint;
+  move: NativeInputKindMetrics;
+  button: NativeInputKindMetrics;
+  scroll: NativeInputKindMetrics;
+  key: NativeInputKindMetrics;
+  paste: NativeInputKindMetrics;
 }
 
 export interface NativeFrameInfo {
@@ -257,6 +321,37 @@ export class NativeLiveViewSession {
       mappedKeyEvents: values[8]!,
       dataPacketsSent: values[9]!,
       dataPacketsFailed: values[10]!,
+      input: this.inputMetrics(),
+    };
+  }
+
+  inputMetrics(): NativeLiveViewInputMetrics | null {
+    const readMetrics = this.native.inputMetrics;
+    if (!readMetrics) return null;
+    const output = Buffer.alloc(INPUT_METRICS_SIZE);
+    checkResult("input metrics", readMetrics(this.requireHandle(), ptr(output), output.byteLength));
+    const structSize = output.readUInt32LE(0);
+    const abiVersion = output.readUInt32LE(4);
+    const kindCount = output.readUInt32LE(8);
+    if (structSize < INPUT_METRICS_SIZE || abiVersion < 3 || kindCount < INPUT_KIND_COUNT) {
+      throw new Error(
+        `native Live View input metrics layout is unsupported: size=${structSize} abi=${abiVersion} kinds=${kindCount}`,
+      );
+    }
+    const kinds = Array.from({ length: INPUT_KIND_COUNT }, (_, index) =>
+      readInputKindMetrics(output, 48 + index * INPUT_KIND_METRICS_SIZE),
+    );
+    return {
+      queueDepth: output.readUInt32LE(12),
+      queueCapacity: output.readUInt32LE(16),
+      epoch: output.readBigUInt64LE(24),
+      controlWaitNs: output.readBigUInt64LE(32),
+      controlWaitCount: output.readBigUInt64LE(40),
+      move: kinds[0]!,
+      button: kinds[1]!,
+      scroll: kinds[2]!,
+      key: kinds[3]!,
+      paste: kinds[4]!,
     };
   }
 
@@ -494,12 +589,12 @@ function library(path: string): NativeLibrary {
   const probe = dlopen(path, abiSymbols);
   const actualAbi = probe.symbols.ab_live_view_abi_version();
   probe.close();
-  if (actualAbi !== ABI_VERSION) {
+  if (actualAbi < MIN_ABI_VERSION || actualAbi > ABI_VERSION) {
     throw new Error(
-      `native Live View ABI mismatch: client=${ABI_VERSION} library=${actualAbi}; rebuild agentbrowse`,
+      `native Live View ABI mismatch: client=${MIN_ABI_VERSION}-${ABI_VERSION} library=${actualAbi}; rebuild agentbrowse`,
     );
   }
-  const opened = openNativeLibrary(path);
+  const opened = openNativeLibrary(path, actualAbi);
   libraries.set(path, opened);
   return opened;
 }
@@ -515,6 +610,21 @@ function checkResult(action: string, value: number): void {
     "internal error",
   ];
   throw new Error(`native Live View ${action} failed: ${descriptions[value] ?? `result ${value}`}`);
+}
+
+function readInputKindMetrics(output: Buffer, offset: number): NativeInputKindMetrics {
+  const values = Array.from({ length: 7 }, (_, index) =>
+    output.readBigUInt64LE(offset + index * 8),
+  );
+  return {
+    attempted: values[0]!,
+    queued: values[1]!,
+    sent: values[2]!,
+    coalesced: values[3]!,
+    controlDropped: values[4]!,
+    sendFailed: values[5]!,
+    duplicateSuppressed: values[6]!,
+  };
 }
 
 function lifecycle(value: number): LiveViewLifecycle {
