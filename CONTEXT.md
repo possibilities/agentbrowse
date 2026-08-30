@@ -74,6 +74,13 @@ waits keep events resident in this queue; authorization makes the same queue
 deliverable, without transferring into a separate replay buffer.
 _Avoid: pending input queue, replay queue._
 
+**Input-to-decoded latency** — Local elapsed time from submitting one semantic
+input through a Live View session until its expected pixel transition is
+observed in a decoded Frame lease. It excludes AppKit Metal presentation and
+terminal presentation, so it is a controlled transport bound rather than a
+glass-to-glass claim.
+_Avoid: display latency, glass-to-glass latency._
+
 **Cursor observation** — The bounded latest-value cursor image and remote
 position retained by a Live View session from either known Neko data channel.
 Frontend adapters decide whether and how to present it; it is not itself a

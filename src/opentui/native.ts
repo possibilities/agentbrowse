@@ -274,6 +274,10 @@ export class NativeLiveViewSession {
     checkResult("connect", this.native.symbols.ab_live_view_session_connect(this.requireHandle()));
   }
 
+  abiVersion(): number {
+    return this.native.abiVersion;
+  }
+
   snapshot(): NativeLiveViewSnapshot {
     const output = Buffer.alloc(SNAPSHOT_SIZE);
     checkResult(

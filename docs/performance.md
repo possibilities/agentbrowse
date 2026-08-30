@@ -97,10 +97,48 @@ counters and gauges rather than rates; consumers derive intervals or averages
 from successive snapshots. An ABI version 2 comparison library has no input
 snapshot, which the OpenTUI wrapper represents as `input: null`.
 
-Pointer-to-visible-response latency, terminal-protocol throughput, sustained
-CPU/RSS for Kitty graphics versus block fallback, and p50/p95 submission age
-still need controlled benchmark runs. The design stays on OpenTUI's public
-`NativeImage` and `ImageRenderable` APIs while carrying only the measured
-native renderer correction. `config/opentui-carry.json` records its exact
-source and package artifact so the pin can be removed cleanly when upstream
-contains the same behavior.
+## Input-to-decoded latency probe
+
+`bun run live-view:latency NAME` measures local submit-to-decoded-pixel elapsed
+time through the headless ABI. It creates one temporary CDP page, waits for
+Live View control before measurement, submits keys and pointer moves through
+the normal Outbound input channel, and polls newer Frame leases at a declared
+one-millisecond resolution. A 3×3 native conversion samples only the source
+grid needed for detection and does not perform a full-frame conversion.
+
+The page exposes two controlled workloads. `cell` changes one 128×128 region
+around the decoded frame center, approximating a typing-sized residual without
+forcing a keyframe. `viewport` changes the whole page, exercising bitrate and
+keyframe behavior closer to a scroll or navigation. Dark and light sample
+values are measured after encoder settling; every viewport sample, or the
+center cell sample, must cross its own calibrated midpoint. Trial starts are
+seeded and randomized across one declared capture interval to avoid aliasing
+against the capture tick and one-second default keyframe cycle. Defaults are 60
+measured trials, five warmups, and one second of quiet rate-control time between
+trials.
+
+A separate cadence phase animates the center cell by default and reports decoded FPS,
+Frame-generation gaps, jitter-buffer render-timestamp intervals, and local
+observation intervals, including the measured polling sleep. Pass
+`--cadence-mode viewport` to exercise full-frame encoder cadence instead.
+`LKRTCVideoFrame.timeStampNs` is libwebrtc's scheduled
+local render time, not the RTP timestamp. Its deltas describe playout cadence;
+they are never subtracted from Bun's `performance.now()` clock. The JSON report
+also records the dylib path and size, comparison metadata, ABI version, Git
+commit and dirty state, backend, decoded dimensions, declared capture FPS,
+trial parameters, native counters, and Bun event-loop gaps.
+
+This is Input-to-decoded latency, not display acknowledgement. It bounds the
+shared capture/encode/network/jitter/decode path and headless poll, but excludes
+AppKit Metal presentation and OpenTUI conversion, terminal transport, and
+display refresh. The expected physical floor is 0–16.7 ms for Chromium paint,
+plus 0–40 ms at 25 fps for capture, then encode, LAN transport, jitter buffer,
+decode, and at most the declared poll interval. Neko exposes no per-frame
+server telemetry, so the probe cannot apportion those internal stages.
+
+Terminal-protocol throughput, sustained CPU/RSS for Kitty graphics versus
+block fallback, and presentation acknowledgement still need controlled adapter
+runs. The design stays on OpenTUI's public `NativeImage` and
+`ImageRenderable` APIs while carrying only measured native renderer changes.
+`config/opentui-carry.json` records its exact source and package artifact so the
+pin can be removed cleanly when upstream contains the same behavior.

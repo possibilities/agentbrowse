@@ -254,6 +254,24 @@ latency and CPU results than running two WebRTC decoders and renderers at once.
 Use the exact name printed by `agentbrowse list`; `testing` is not a reserved or
 automatically created Browser target.
 
+Measure Input-to-decoded latency against a running Browser target with the
+headless ABI:
+
+```sh
+bun run live-view:latency native-feel-test
+AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/00-baseline-debug \
+  bun run live-view:latency native-feel-test --scenario baseline-debug
+```
+
+The default run uses 60 measured trials plus five discarded warmups for each
+key/pointer and typing-like/full-viewport case. It takes about six minutes because
+each trial waits one second for encoder rate control to settle. Pass `--json`
+for complete provenance and raw trial results. The command creates and closes
+an exact temporary CDP tab; leave other browser automation idle on that target
+while it runs. Normal cleanup restores the previously visible tab, and dropping
+the Live View session releases Neko control. A forced process termination can
+leave the temporary probe tab open for manual closure.
+
 The app opens on a blank stage showing `no browser`. Press `ctrl+shift+b` to
 open its Browser-target picker. Running targets are selectable; stopped targets
 and slot conflicts remain visible with a disabled reason. Choosing a target
