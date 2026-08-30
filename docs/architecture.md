@@ -6,6 +6,12 @@ decoded frames, cursor observations, and held-input cleanup. AppKit and OpenTUI
 decide only how to present those observations and translate local input into
 that core.
 
+AppKit omits key-up events from its ordinary responder chain when a key is
+released while Command remains held. The AppKit frontend adapter installs one
+local key-up monitor, forwards only Command-modified releases for its focused
+Live View, consumes the recovered event to prevent duplicate delivery, and
+removes the monitor when the Live View session closes.
+
 ## OpenTUI path
 
 ```text

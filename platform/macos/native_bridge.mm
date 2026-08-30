@@ -354,6 +354,7 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 @property(nonatomic, copy) NSString *windowTitle;
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) KLInputView *inputView;
+@property(nonatomic, strong) id commandKeyUpMonitor;
 // The transport object graph and reconnect flags are accessed only while
 // synchronized on this session. NSURLSession and WebRTC use different worker
 // queues, so property-level atomicity would not make a reset coherent.
@@ -481,6 +482,27 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   self.window.contentView = self.inputView;
   [self.window center];
   __weak KLNativeSession *weakSelf = self;
+  // AppKit does not route a key-up through the ordinary responder chain when
+  // the key was released while Command remained held. Recover only events for
+  // this focused Live View and consume them so a future AppKit change cannot
+  // deliver the same release twice.
+  self.commandKeyUpMonitor = [NSEvent
+      addLocalMonitorForEventsMatchingMask:NSEventMaskKeyUp
+                                  handler:^NSEvent *(NSEvent *event) {
+    KLNativeSession *strongSelf = weakSelf;
+    if (!strongSelf || strongSelf.closing ||
+        (event.modifierFlags & NSEventModifierFlagCommand) == 0) {
+      return event;
+    }
+    NSWindow *window = strongSelf.window;
+    KLInputView *inputView = strongSelf.inputView;
+    if (!window || !inputView || event.window != window ||
+        window.firstResponder != inputView) {
+      return event;
+    }
+    [inputView keyUp:event];
+    return nil;
+  }];
   self.statusTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 30.0)
                                                      repeats:YES
                                                        block:^(NSTimer *timer) {
@@ -933,6 +955,7 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 
 - (void)closeNative {
   BOOL shouldReset = NO;
+  id commandKeyUpMonitor;
   NSString *baseURL;
   NSString *authToken;
   @synchronized (self) {
@@ -941,11 +964,14 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
     baseURL = self.baseURL;
     authToken = self.authToken;
     self.authToken = nil;
+    commandKeyUpMonitor = self.commandKeyUpMonitor;
+    self.commandKeyUpMonitor = nil;
     [self.statusTimer invalidate];
     self.statusTimer = nil;
     shouldReset = YES;
   }
   if (shouldReset) {
+    if (commandKeyUpMonitor) [NSEvent removeMonitor:commandKeyUpMonitor];
     [self disableCallbacks];
     [self logoutBaseURL:baseURL token:authToken];
     [self resetTransport];

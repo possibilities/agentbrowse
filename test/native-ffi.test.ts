@@ -40,6 +40,14 @@ test("embeddable native sessions never write process diagnostics", () => {
   expect(readFileSync(NATIVE_SESSION, "utf8")).not.toContain("std.debug.print");
 });
 
+test("AppKit recovers focused Command-held key-up events and removes its monitor", () => {
+  const bridge = readFileSync(NATIVE_BRIDGE, "utf8");
+  expect(bridge).toContain("addLocalMonitorForEventsMatchingMask:NSEventMaskKeyUp");
+  expect(bridge).toMatch(/event\.window != window[\s\S]+window\.firstResponder != inputView/u);
+  expect(bridge).toMatch(/\[inputView keyUp:event\];\s*return nil;/u);
+  expect(bridge).toContain("[NSEvent removeMonitor:commandKeyUpMonitor]");
+});
+
 test.skipIf(!existsSync(defaultNativeLibraryPath()))(
   "dylib exports only the public Live View ABI",
   () => {
