@@ -32,6 +32,17 @@ scaled with cadence, and a one-second keyframe interval.
 | 25 fps baseline | 25.2 fps | 131.4 / 132.9 ms | 142.4 / 141.8 ms |
 | 30 fps shared default | 30.2 fps | 121.8 / 121.5 ms | 129.5 / 125.2 ms |
 | 60 fps capable-backend profile | 60.0 fps | 84.1 / 82.6 ms | 89.4 / 93.1 ms |
+| 60 fps profile, merged `46ce43a` | 60.2 fps | 95.4 / 96.9 ms | 103.5 / 103.6 ms |
+
+The last row is the regression check after serialized input delivery, shortcut
+translation, and scroll normalization landed together: the same `artbird`
+target, ReleaseFast `zig-out` dylib, 60 measured trials per case, 60/60
+completed with zero rejected, timed-out, unobserved, or contaminated trials,
+input counters showing every key and move sent with nothing queued, coalesced,
+or dropped, and event-loop gaps at p95 0.7 ms. It is not a like-for-like of the
+row above: another Browser target was destroyed and recreated on the same
+backend during the run. The rendered summary is kept in the wiki as
+`agentbrowse-live-view-latency-at-46ce43a`.
 
 The 30 fps profile is the shared default because it improves every measured
 tail without assuming the backend can sustain 1080p60 encoding. The 60 fps
@@ -229,5 +240,6 @@ terminal: a nested PTY relay may consume or omit capability replies and make a
 supported Kitty medium appear unavailable. The design stays on OpenTUI's
 public `NativeImage` and `ImageRenderable` APIs while carrying only measured
 native renderer changes.
-`config/opentui-carry.json` records its exact source and package artifact so the
-pin can be removed cleanly when upstream contains the same behavior.
+`config/opentui-carry.json` records its exact source, both package artifacts,
+and the expected native library digest so the pin can be removed cleanly when
+upstream contains the same behavior.
