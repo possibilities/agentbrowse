@@ -10,6 +10,7 @@ const PUBLIC_HEADER = fileURLToPath(new URL("../include/agentbrowse_live_view.h"
 const EXPORT_LIST = fileURLToPath(new URL("../platform/macos/live_view.exports", import.meta.url));
 const NATIVE_BRIDGE = fileURLToPath(new URL("../platform/macos/native_bridge.mm", import.meta.url));
 const NATIVE_SESSION = fileURLToPath(new URL("../src/session/session.zig", import.meta.url));
+const PACKAGE_JSON = fileURLToPath(new URL("../package.json", import.meta.url));
 const NEGOTIATION_FIXTURE = fileURLToPath(
   new URL("./fixtures/native-negotiation.ts", import.meta.url),
 );
@@ -19,6 +20,12 @@ test("named build prefixes select preserved Live View comparison artifacts", () 
   expect(defaultNativeLibraryPath({ AGENTBROWSE_LIVE_VIEW_PREFIX: ` ${prefix} ` })).toBe(
     join(resolve(prefix), "lib", "libagentbrowse-live-view.dylib"),
   );
+});
+
+test("production native build commands use ReleaseFast", () => {
+  const scripts = JSON.parse(readFileSync(PACKAGE_JSON, "utf8")).scripts as Record<string, string>;
+  expect(scripts["native:build"]).toContain("-Doptimize=ReleaseFast");
+  expect(scripts["native:build:app"]).toContain("-Doptimize=ReleaseFast");
 });
 
 test("Darwin export list matches every function in the public ABI header", () => {

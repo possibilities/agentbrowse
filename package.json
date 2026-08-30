@@ -20,7 +20,8 @@
   },
   "scripts": {
     "agentbrowse": "bun run cli/main.ts",
-    "native:build": "tools/fetch-webrtc && zig build live-view-lib",
+    "native:build": "tools/fetch-webrtc && zig build live-view-lib -Doptimize=ReleaseFast",
+    "native:build:app": "tools/fetch-webrtc && zig build -Doptimize=ReleaseFast",
     "images:update-lock": "bun run tools/update-kernel-image-lock.ts",
     "opentui:example": "bun run examples/opentui-browser.ts",
     "format": "biome check --write cli client config src examples test tools",

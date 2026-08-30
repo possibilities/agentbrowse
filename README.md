@@ -188,6 +188,7 @@ The application receives one connection descriptor on standard input and
 connects immediately. It deliberately has no connection chooser:
 
 ```sh
+bun run native:build:app
 tools/live-view launch testing
 ```
 
@@ -198,7 +199,7 @@ to their `192.168.64.x` address without spawning SSH.
 For a descriptor supplied by another integration:
 
 ```sh
-zig build run -- --connection-stdin <path/to/connection.json
+zig build run -Doptimize=ReleaseFast -- --connection-stdin <path/to/connection.json
 ```
 
 Connection descriptors can contain credentials or signed URLs. Keep descriptor
@@ -225,14 +226,22 @@ bun run native:build
 bun run opentui:example
 ```
 
+Both `native:build` and `native:build:app` produce ReleaseFast artifacts. Use
+an explicit `-Doptimize=Debug` only for debugging or a named comparison build.
+
 For before/after evaluation, keep complete builds under distinct Zig prefixes.
 The same prefix selects the preserved AppKit bundle and OpenTUI dylib:
 
 ```sh
 zig build -Doptimize=Debug -p zig-out/comparisons/00-baseline-debug
+zig build -Doptimize=ReleaseFast -p zig-out/comparisons/01-release-fast
 AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/00-baseline-debug \
   tools/live-view launch testing
+AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/01-release-fast \
+  tools/live-view launch testing
 AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/00-baseline-debug \
+  bun run opentui:example
+AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/01-release-fast \
   bun run opentui:example
 ```
 

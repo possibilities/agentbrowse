@@ -77,7 +77,7 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   if (command === "launch") {
     if (!existsSync(appExecutable)) {
-      throw new Error(`app is not built under ${buildPrefix}`);
+      throw new Error(`app is not built under ${buildPrefix}; run 'bun run native:build:app'`);
     }
     return await withAccess(name, async (descriptor) => {
       const child = Bun.spawn([appExecutable, "--connection-stdin"], {
