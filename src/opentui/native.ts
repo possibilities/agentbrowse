@@ -1,11 +1,13 @@
 import { dlopen, FFIType, type Pointer, ptr } from "bun:ffi";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   encodeConnectionDescriptor,
   type LiveViewConnectionDescriptor,
 } from "../../client/connection.ts";
+import { liveViewBuildPrefix } from "../../client/live-view-build.ts";
 
 const ABI_VERSION = 2;
 const SNAPSHOT_SIZE = 32;
@@ -158,9 +160,14 @@ export interface NativeCursorSnapshot {
   positionGeneration: bigint;
 }
 
-export function defaultNativeLibraryPath(): string {
-  return fileURLToPath(
-    new URL("../../zig-out/lib/libagentbrowse-live-view.dylib", import.meta.url),
+export function defaultNativeLibraryPath(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  const defaultPrefix = fileURLToPath(new URL("../../zig-out", import.meta.url));
+  return join(
+    liveViewBuildPrefix(defaultPrefix, environment),
+    "lib",
+    "libagentbrowse-live-view.dylib",
   );
 }
 

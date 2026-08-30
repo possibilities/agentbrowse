@@ -225,6 +225,22 @@ bun run native:build
 bun run opentui:example
 ```
 
+For before/after evaluation, keep complete builds under distinct Zig prefixes.
+The same prefix selects the preserved AppKit bundle and OpenTUI dylib:
+
+```sh
+zig build -Doptimize=Debug -p zig-out/comparisons/00-baseline-debug
+AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/00-baseline-debug \
+  tools/live-view launch testing
+AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/00-baseline-debug \
+  bun run opentui:example
+```
+
+`AGENTBROWSE_LIVE_VIEW_PREFIX` resolves relative to the current directory. Keep
+each prefix intact: its dylib and applications load the sibling
+`Frameworks/LiveKitWebRTC.framework`. Sequential comparisons give more reliable
+latency and CPU results than running two WebRTC decoders and renderers at once.
+
 The app opens on a blank stage showing `no browser`. Press `ctrl+shift+b` to
 open its Browser-target picker. Running targets are selectable; stopped targets
 and slot conflicts remain visible with a disabled reason. Choosing a target

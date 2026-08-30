@@ -5,13 +5,13 @@ import { join } from "node:path";
 
 import { browserFarm } from "../cli/runtime.ts";
 import { connectionDescriptor } from "../client/connection.ts";
+import { liveViewBuildPrefix } from "../client/live-view-build.ts";
 import { LiveViewTunnel } from "../client/tunnel.ts";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
 
+const buildPrefix = liveViewBuildPrefix(join(import.meta.dir, "..", "zig-out"));
 const appExecutable = join(
-  import.meta.dir,
-  "..",
-  "zig-out",
+  buildPrefix,
   "Kernel Live View.app",
   "Contents",
   "MacOS",
@@ -77,7 +77,7 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   if (command === "launch") {
     if (!existsSync(appExecutable)) {
-      throw new Error("app is not built; run 'tools/fetch-webrtc && zig build'");
+      throw new Error(`app is not built under ${buildPrefix}`);
     }
     return await withAccess(name, async (descriptor) => {
       const child = Bun.spawn([appExecutable, "--connection-stdin"], {

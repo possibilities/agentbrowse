@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { connectionDescriptor } from "../client/connection.ts";
@@ -12,6 +13,13 @@ const NATIVE_SESSION = fileURLToPath(new URL("../src/session/session.zig", impor
 const NEGOTIATION_FIXTURE = fileURLToPath(
   new URL("./fixtures/native-negotiation.ts", import.meta.url),
 );
+
+test("named build prefixes select preserved Live View comparison artifacts", () => {
+  const prefix = "zig-out/comparisons/00-baseline-debug";
+  expect(defaultNativeLibraryPath({ AGENTBROWSE_LIVE_VIEW_PREFIX: ` ${prefix} ` })).toBe(
+    join(resolve(prefix), "lib", "libagentbrowse-live-view.dylib"),
+  );
+});
 
 test("Darwin export list matches every function in the public ABI header", () => {
   const headerSymbols = [
