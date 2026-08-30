@@ -28,18 +28,24 @@ pub fn shortcutTranslation(
     const command = (flags & command_flag) != 0;
     const option = (flags & option_flag) != 0;
     if (command and !option) {
-        const navigation: ?struct { keysym: u64, control: bool } = switch (key_code) {
-            123 => .{ .keysym = 0xff50, .control = false }, // Left -> Home
-            124 => .{ .keysym = 0xff57, .control = false }, // Right -> End
-            125 => .{ .keysym = 0xff57, .control = true }, // Down -> Control-End
-            126 => .{ .keysym = 0xff50, .control = true }, // Up -> Control-Home
+        // Navigation chords match the keycode rather than the reported
+        // character so they survive non-US layouts. The forced Option flag
+        // reaches the guest as X11 Alt through `modifiers`, which is Linux
+        // Chrome's history-navigation modifier.
+        const navigation: ?struct { keysym: u64, forced: u64 } = switch (key_code) {
+            123 => .{ .keysym = 0xff50, .forced = 0 }, // Left -> Home
+            124 => .{ .keysym = 0xff57, .forced = 0 }, // Right -> End
+            125 => .{ .keysym = 0xff57, .forced = control_flag }, // Down -> Control-End
+            126 => .{ .keysym = 0xff50, .forced = control_flag }, // Up -> Control-Home
+            33 => .{ .keysym = 0xff51, .forced = option_flag }, // [ -> Alt-Left (back)
+            30 => .{ .keysym = 0xff53, .forced = option_flag }, // ] -> Alt-Right (forward)
             else => null,
         };
         if (navigation) |target| return .{
             .physical_id = key_code,
             .keysym = target.keysym,
             .removed_modifiers = command_flag,
-            .forced_modifiers = (if (target.control) control_flag else 0) | (flags & shift_flag),
+            .forced_modifiers = target.forced | (flags & shift_flag),
         };
         const shifted = (flags & shift_flag) != 0;
         const target: u64 = switch (key_code) {
@@ -55,19 +61,35 @@ pub fn shortcutTranslation(
             .forced_modifiers = control_flag | (flags & shift_flag),
         };
     }
-    if (option and !command and (key_code == 123 or key_code == 124)) return .{
-        .physical_id = key_code,
-        .keysym = if (key_code == 123) 0xff51 else 0xff53,
-        .removed_modifiers = option_flag,
-        .forced_modifiers = control_flag | (flags & shift_flag),
-    };
+    if (option and !command) {
+        // macOS moves and deletes by word with Option; Linux Chrome uses Control.
+        const editing: ?u64 = switch (key_code) {
+            123 => 0xff51, // Left -> Control-Left
+            124 => 0xff53, // Right -> Control-Right
+            51 => 0xff08, // Backspace -> Control-BackSpace
+            117 => 0xffff, // Forward Delete -> Control-Delete
+            else => null,
+        };
+        if (editing) |target| return .{
+            .physical_id = key_code,
+            .keysym = target,
+            .removed_modifiers = option_flag,
+            .forced_modifiers = control_flag | (flags & shift_flag),
+        };
+    }
     return null;
 }
 
+/// Command chords that become the guest's Control chords. W, N, P, and D are
+/// deliberately absent: Control-W closes the guest tab, and on a single-tab
+/// Kernel Chromium that exits the browser and the session; Control-N opens a
+/// guest window, Control-P a modal print dialog, and Control-D a bookmark
+/// bubble. An untranslated Command chord still reaches the guest as a
+/// harmless Meta chord.
 fn commandShortcutKeysym(characters: []const u8, shifted: bool) ?u64 {
     if (characters.len != 1 or !std.ascii.isAscii(characters[0])) return null;
     return switch (std.ascii.toLower(characters[0])) {
-        'a', 'c', 'd', 'f', 'l', 'n', 'p', 'r', 't', 'w', 'x', 'z' => if (shifted)
+        'a', 'c', 'f', 'l', 'r', 't', 'x', 'z' => if (shifted)
             std.ascii.toUpper(characters[0])
         else
             std.ascii.toLower(characters[0]),
@@ -183,11 +205,18 @@ test "identifies AppKit modifier keys" {
 }
 
 test "translates AppKit browser shortcuts and preserves navigation semantics" {
-    for ("cxazltwrfnpd") |character| {
+    for ("cxazltrf") |character| {
         const characters = [_]u8{character};
         const translation = shortcutTranslation(8, command_flag, &characters).?;
         try std.testing.expectEqual(@as(u64, character), translation.keysym);
         try std.testing.expectEqual(control_flag, translation.forced_modifiers);
+    }
+    // Control-W/N/P/D would close the tab (and a single-tab session), open a
+    // window, print, or bookmark in the guest; they stay untranslated Meta.
+    for ("wnpdWNPD") |character| {
+        const characters = [_]u8{character};
+        try std.testing.expect(shortcutTranslation(8, command_flag, &characters) == null);
+        try std.testing.expect(shortcutTranslation(8, command_flag | shift_flag, &characters) == null);
     }
 
     const command_c = shortcutTranslation(8, command_flag | shift_flag, "C").?;
@@ -215,6 +244,27 @@ test "translates AppKit browser shortcuts and preserves navigation semantics" {
     const control_left = shortcutTranslation(123, option_flag, "").?;
     try std.testing.expectEqual(@as(u64, 0xff51), control_left.keysym);
     try std.testing.expectEqual(option_flag, control_left.removed_modifiers);
+
+    const back = shortcutTranslation(33, command_flag, "[").?;
+    try std.testing.expectEqual(@as(u64, 0xff51), back.keysym);
+    try std.testing.expectEqual(command_flag, back.removed_modifiers);
+    try std.testing.expectEqual(option_flag, back.forced_modifiers);
+    const forward = shortcutTranslation(30, command_flag | shift_flag, "}").?;
+    try std.testing.expectEqual(@as(u64, 0xff53), forward.keysym);
+    try std.testing.expectEqual(option_flag | shift_flag, forward.forced_modifiers);
+    try std.testing.expect(shortcutTranslation(33, command_flag | option_flag, "[") == null);
+    try std.testing.expect(shortcutTranslation(33, option_flag, "[") == null);
+
+    const word_backspace = shortcutTranslation(51, option_flag, "").?;
+    try std.testing.expectEqual(@as(u64, 0xff08), word_backspace.keysym);
+    try std.testing.expectEqual(option_flag, word_backspace.removed_modifiers);
+    try std.testing.expectEqual(control_flag, word_backspace.forced_modifiers);
+    const word_delete = shortcutTranslation(117, option_flag | shift_flag, "").?;
+    try std.testing.expectEqual(@as(u64, 0xffff), word_delete.keysym);
+    try std.testing.expectEqual(option_flag, word_delete.removed_modifiers);
+    try std.testing.expectEqual(control_flag | shift_flag, word_delete.forced_modifiers);
+    try std.testing.expect(shortcutTranslation(51, command_flag, "") == null);
+    try std.testing.expect(shortcutTranslation(117, command_flag | option_flag, "") == null);
     try std.testing.expect(shortcutTranslation(12, command_flag, "q") == null);
     try std.testing.expect(shortcutTranslation(9, command_flag, "v") == null);
 }

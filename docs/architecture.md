@@ -14,9 +14,15 @@ removed when the session closes, so releases arrive exactly once even when
 Command went up first.
 
 Both frontend adapters translate macOS browser conventions before admission:
-Command-C/X/A/Z/L/T/W/R/F/N/P/D/+/−/0 become Control chords, Command-Left/Right
-become Home/End, Command-Up/Down become Control-Home/End, and Option-Left/Right
-become Control-Left/Right. Shift and unrelated physical modifiers are retained.
+Command-C/X/A/Z/L/T/R/F/+/−/0 become Control chords, Command-Left/Right become
+Home/End, Command-Up/Down become Control-Home/End, Command-[/] become
+Alt-Left/Right, Option-Left/Right become Control-Left/Right, and
+Option-Backspace/Forward-Delete become Control-BackSpace/Delete. Command-W/N/P/D
+are deliberately not translated: Control-W closes the guest tab, and on a
+single-tab Kernel Chromium that exits the browser and the session; Control-N
+opens a guest window, Control-P a modal print dialog, and Control-D a bookmark
+bubble. An untranslated Command chord still reaches the guest as a harmless
+Meta chord. Shift and unrelated physical modifiers are retained.
 Each translated key uses only its own modifier transform, so a concurrently
 held shortcut cannot turn an unrelated key into a Control chord. The effective
 snapshot precedes the target key-down; an explicit key-up releases the target
@@ -37,7 +43,7 @@ terminal's own bindings win first: stock Ghostty consumes most macOS Command
 shortcuts (including copy/paste, select-all, undo, tabs/windows, search, zoom,
 and Command/Option-arrow editing) before OpenTUI can observe them. Unbind those
 Ghostty actions when full guest-shortcut parity is desired. With the defaults,
-unbound chords such as Command-L/R/X/P still reach the adapter; terminal-emitted
+unbound chords such as Command-L/R/X still reach the adapter; terminal-emitted
 replacement text is forwarded as text and cannot be reconstructed as the
 original physical chord.
 

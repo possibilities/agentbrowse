@@ -624,6 +624,7 @@ export class LiveViewRenderable extends ImageRenderable {
           target = {
             keysym,
             forceControl: false,
+            forceAlt: false,
             forceShift: openTuiKeyLevelRequiresShift(key),
             removeShift: openTuiKeyLevelRemovesShift(key),
             removeAlt: false,

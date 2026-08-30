@@ -361,6 +361,7 @@ test("OpenTUI translates macOS browser shortcuts by physical Kitty identity", ()
   expect(openTuiShortcutTranslation(commandC)).toEqual({
     keysym: 0x63n,
     forceControl: true,
+    forceAlt: false,
     forceShift: false,
     removeShift: false,
     removeAlt: false,
@@ -421,6 +422,7 @@ test("OpenTUI translates macOS browser shortcuts by physical Kitty identity", ()
   ).toEqual({
     keysym: 0xff51n,
     forceControl: true,
+    forceAlt: false,
     forceShift: false,
     removeShift: false,
     removeAlt: true,
@@ -437,6 +439,7 @@ test("OpenTUI translates macOS browser shortcuts by physical Kitty identity", ()
   ).toEqual({
     keysym: 0xff50n,
     forceControl: true,
+    forceAlt: false,
     forceShift: false,
     removeShift: false,
     removeAlt: false,
@@ -453,11 +456,99 @@ test("OpenTUI translates macOS browser shortcuts by physical Kitty identity", ()
   ).toEqual({
     keysym: 0xff50n,
     forceControl: false,
+    forceAlt: false,
     forceShift: false,
     removeShift: false,
     removeAlt: false,
     removeMeta: true,
   });
+  // Control-W/N/P/D would close the tab (and a single-tab session), open a
+  // window, print, or bookmark in the guest; they stay untranslated Meta.
+  for (const name of ["w", "n", "p", "d"]) {
+    expect(
+      openTuiShortcutTranslation({
+        name,
+        baseCode: name.codePointAt(0)!,
+        super: true,
+        option: false,
+        meta: false,
+        shift: false,
+      }),
+    ).toBeNull();
+  }
+  expect(
+    openTuiShortcutTranslation({
+      name: "[",
+      baseCode: "[".codePointAt(0)!,
+      super: true,
+      option: false,
+      meta: false,
+      shift: false,
+    }),
+  ).toEqual({
+    keysym: 0xff51n,
+    forceControl: false,
+    forceAlt: true,
+    forceShift: false,
+    removeShift: false,
+    removeAlt: false,
+    removeMeta: true,
+  });
+  expect(
+    openTuiShortcutTranslation({
+      name: "]",
+      baseCode: "]".codePointAt(0)!,
+      super: true,
+      option: false,
+      meta: false,
+      shift: true,
+    }),
+  ).toMatchObject({ keysym: 0xff53n, forceAlt: true, forceShift: true, removeMeta: true });
+  expect(
+    openTuiShortcutTranslation({
+      name: "[",
+      baseCode: "[".codePointAt(0)!,
+      super: true,
+      option: true,
+      meta: false,
+      shift: false,
+    }),
+  ).toBeNull();
+  expect(
+    openTuiShortcutTranslation({
+      name: "backspace",
+      super: false,
+      option: true,
+      meta: false,
+      shift: false,
+    }),
+  ).toEqual({
+    keysym: 0xff08n,
+    forceControl: true,
+    forceAlt: false,
+    forceShift: false,
+    removeShift: false,
+    removeAlt: true,
+    removeMeta: false,
+  });
+  expect(
+    openTuiShortcutTranslation({
+      name: "delete",
+      super: false,
+      option: false,
+      meta: true,
+      shift: true,
+    }),
+  ).toMatchObject({ keysym: 0xffffn, forceControl: true, forceShift: true, removeAlt: true });
+  expect(
+    openTuiShortcutTranslation({
+      name: "backspace",
+      super: true,
+      option: false,
+      meta: false,
+      shift: false,
+    }),
+  ).toBeNull();
   expect(isOpenTuiLocalShortcut({ name: "v", super: true })).toBe(true);
   expect(isOpenTuiLocalShortcut({ name: "q", super: true })).toBe(true);
 });
@@ -474,6 +565,7 @@ test("translated OpenTUI modifiers preserve Shift and replace only their trigger
     applyOpenTuiKeyTargetModifiers(physical, {
       keysym: 0x43n,
       forceControl: true,
+      forceAlt: false,
       forceShift: true,
       removeShift: false,
       removeAlt: false,
@@ -490,6 +582,7 @@ test("translated OpenTUI modifiers preserve Shift and replace only their trigger
     applyOpenTuiKeyTargetModifiers(physical, {
       keysym: 0xff51n,
       forceControl: true,
+      forceAlt: false,
       forceShift: false,
       removeShift: false,
       removeAlt: true,
@@ -508,6 +601,27 @@ test("translated OpenTUI modifiers preserve Shift and replace only their trigger
       {
         keysym: 0xff50n,
         forceControl: false,
+        forceAlt: false,
+        forceShift: false,
+        removeShift: false,
+        removeAlt: false,
+        removeMeta: true,
+      },
+    ),
+  ).toEqual({
+    shift: true,
+    control: false,
+    alt: true,
+    meta: false,
+    hyper: true,
+  });
+  expect(
+    applyOpenTuiKeyTargetModifiers(
+      { ...physical, alt: false },
+      {
+        keysym: 0xff51n,
+        forceControl: false,
+        forceAlt: true,
         forceShift: false,
         removeShift: false,
         removeAlt: false,
@@ -525,6 +639,7 @@ test("translated OpenTUI modifiers preserve Shift and replace only their trigger
     applyOpenTuiKeyTargetModifiers(physical, {
       keysym: 0x7an,
       forceControl: false,
+      forceAlt: false,
       forceShift: false,
       removeShift: true,
       removeAlt: false,

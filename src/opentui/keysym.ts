@@ -11,6 +11,7 @@ export interface OpenTuiModifierSnapshot {
 export interface OpenTuiKeyTarget {
   keysym: bigint;
   forceControl: boolean;
+  forceAlt: boolean;
   forceShift: boolean;
   removeShift: boolean;
   removeAlt: boolean;
@@ -133,23 +134,15 @@ const UNSHIFTED_ASCII: Readonly<Record<string, string>> = {
 
 const UNSHIFTED_LEVEL_ASCII = "`1234567890-=[]\\;',./";
 
-const COMMAND_CONTROL_SHORTCUTS = new Set([
-  "a",
-  "c",
-  "d",
-  "f",
-  "l",
-  "n",
-  "p",
-  "r",
-  "t",
-  "w",
-  "x",
-  "z",
-  "=",
-  "-",
-  "0",
-]);
+/**
+ * Command chords that become the guest's Control chords. W, N, P, and D are
+ * deliberately absent: Control-W closes the guest tab, and on a single-tab
+ * Kernel Chromium that exits the browser and the session; Control-N opens a
+ * guest window, Control-P a modal print dialog, and Control-D a bookmark
+ * bubble. An untranslated Command chord still reaches the guest as a harmless
+ * Meta chord.
+ */
+const COMMAND_CONTROL_SHORTCUTS = new Set(["a", "c", "f", "l", "r", "t", "x", "z", "=", "-", "0"]);
 
 export function isOpenTuiModifierKey(key: Pick<KeyEvent, "name">): boolean {
   return key.name.toLowerCase() in MODIFIER_NAMES;
@@ -216,6 +209,7 @@ export function openTuiShortcutTranslation(
       return {
         keysym: navigation,
         forceControl: name === "up" || name === "down",
+        forceAlt: false,
         forceShift: key.shift,
         removeShift: false,
         removeAlt: false,
@@ -223,6 +217,20 @@ export function openTuiShortcutTranslation(
       };
     }
     const shortcutName = shortcutLayoutName(key);
+    // Command-[ and Command-] are macOS Chrome's back and forward; Linux
+    // Chrome navigates history with Alt-Left and Alt-Right.
+    const history = shortcutName === "[" ? 0xff51n : shortcutName === "]" ? 0xff53n : null;
+    if (history !== null) {
+      return {
+        keysym: history,
+        forceControl: false,
+        forceAlt: true,
+        forceShift: key.shift,
+        removeShift: false,
+        removeAlt: false,
+        removeMeta: true,
+      };
+    }
     if (!COMMAND_CONTROL_SHORTCUTS.has(shortcutName)) return null;
     const keysym = shortcutTargetKeysym(shortcutName, key.shift);
     return keysym === null
@@ -230,6 +238,7 @@ export function openTuiShortcutTranslation(
       : {
           keysym,
           forceControl: true,
+          forceAlt: false,
           forceShift: key.shift,
           removeShift: false,
           removeAlt: false,
@@ -237,15 +246,29 @@ export function openTuiShortcutTranslation(
         };
   }
 
-  if (option && !command && (name === "left" || name === "right")) {
-    return {
-      keysym: name === "left" ? 0xff51n : 0xff53n,
-      forceControl: true,
-      forceShift: key.shift,
-      removeShift: false,
-      removeAlt: true,
-      removeMeta: false,
-    };
+  if (option && !command) {
+    // macOS moves and deletes by word with Option; Linux Chrome uses Control.
+    const editing =
+      name === "left"
+        ? 0xff51n
+        : name === "right"
+          ? 0xff53n
+          : name === "backspace"
+            ? 0xff08n
+            : name === "delete"
+              ? 0xffffn
+              : null;
+    if (editing !== null) {
+      return {
+        keysym: editing,
+        forceControl: true,
+        forceAlt: false,
+        forceShift: key.shift,
+        removeShift: false,
+        removeAlt: true,
+        removeMeta: false,
+      };
+    }
   }
   return null;
 }
@@ -267,6 +290,7 @@ export function applyOpenTuiKeyTargetModifiers(
   if (target?.removeShift) effective.shift = false;
   if (target?.forceShift) effective.shift = true;
   if (target?.removeAlt) effective.alt = false;
+  if (target?.forceAlt) effective.alt = true;
   if (target?.removeMeta) effective.meta = false;
   return effective;
 }

@@ -291,3 +291,45 @@ test "AppKit modifier sides reconcile and translations do not leak into unrelate
     try std.testing.expectEqual(@as(usize, 0), session.held_input.key_count);
     try std.testing.expect(!session.physical_keys.hasActive());
 }
+
+test "translated AppKit history navigation forces Alt and restores Command on release" {
+    var session: session_mod.Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{ .version = connection.current_version, .label = "appkit-history-navigation-test", .base_url = "http://127.0.0.1" },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    var recorder: KeyPacketRecorder = .{};
+    session.packet_sink_context = &recorder;
+    session.packet_sink = recordKeyPacket;
+    session.data_open.store(1, .release);
+    session.authorized.store(1, .release);
+    const empty = "";
+    const bracket = "[";
+
+    onKey(&session, 55, keymap.command_flag, true, false, empty.ptr, empty.len);
+    // Command-[ is Linux Chrome's Alt-Left. The forced Option flag reaches the
+    // guest as Alt_L while the physical Meta is withdrawn for the chord.
+    onKey(&session, 33, keymap.command_flag, true, false, bracket.ptr, bracket.len);
+    // Releasing [ while Command is still held restores the physical Meta
+    // snapshot; the later Command flagsChanged release then clears it.
+    onKey(&session, 33, keymap.command_flag, false, false, bracket.ptr, bracket.len);
+    onKey(&session, 55, 0, false, false, empty.ptr, empty.len);
+
+    const expected = [_][11]u8{
+        input_packets.key(.down, 0xffe7),
+        input_packets.key(.down, 0xffe9),
+        input_packets.key(.up, 0xffe7),
+        input_packets.key(.down, 0xff51),
+        input_packets.key(.up, 0xff51),
+        input_packets.key(.up, 0xffe9),
+        input_packets.key(.down, 0xffe7),
+        input_packets.key(.up, 0xffe7),
+    };
+    try std.testing.expectEqual(expected.len, recorder.count);
+    for (expected, 0..) |packet, index| {
+        try std.testing.expectEqualSlices(u8, &packet, &recorder.packets[index]);
+    }
+    try std.testing.expectEqual(@as(usize, 0), session.held_input.key_count);
+    try std.testing.expect(!session.physical_keys.hasActive());
+}
