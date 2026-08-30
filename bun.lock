@@ -17,7 +17,8 @@
     },
   },
   "overrides": {
-    "@opentui/core-darwin-arm64": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.1/opentui-core-darwin-arm64-0.5.8-agentbrowse.1.tgz",
+    "@opentui/core": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-0.5.8-agentbrowse.2.tgz",
+    "@opentui/core-darwin-arm64": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-darwin-arm64-0.5.8-agentbrowse.2.tgz",
   },
   "packages": {
     "@biomejs/biome": ["@biomejs/biome@2.5.3", "", { "optionalDependencies": { "@biomejs/cli-darwin-arm64": "2.5.3", "@biomejs/cli-darwin-x64": "2.5.3", "@biomejs/cli-linux-arm64": "2.5.3", "@biomejs/cli-linux-arm64-musl": "2.5.3", "@biomejs/cli-linux-x64": "2.5.3", "@biomejs/cli-linux-x64-musl": "2.5.3", "@biomejs/cli-win32-arm64": "2.5.3", "@biomejs/cli-win32-x64": "2.5.3" }, "bin": { "biome": "bin/biome" } }, "sha512-MrJswFdei9EfDwwUy2tQrPDpK0AO+RmMFvBoaaJ6ayBc3sUbHdCE+XG5N8vp+5So41ZupZJQm0roHFFhMGVD7A=="],
@@ -38,9 +39,9 @@
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.5.3", "", { "os": "win32", "cpu": "x64" }, "sha512-ExSaJWi4/u6+GXCszlSKpWSjKNbDseAYqqkCznsCsZ/4uidZ/BEqsCc5/3ctlq6dfIubdIIRSVLC/PG9xPl70Q=="],
 
-    "@opentui/core": ["@opentui/core@0.5.8", "", { "dependencies": { "bun-ffi-structs": "0.3.1", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.5.8", "@opentui/core-darwin-x64": "0.5.8", "@opentui/core-linux-arm64": "0.5.8", "@opentui/core-linux-arm64-musl": "0.5.8", "@opentui/core-linux-x64": "0.5.8", "@opentui/core-linux-x64-musl": "0.5.8", "@opentui/core-win32-arm64": "0.5.8", "@opentui/core-win32-x64": "0.5.8" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-GbZ+nSLYZqxj2Z5TU19Mx6IsAvVsn2+7WEXz+6OlMGoootvt3TxP3vWwfGI0jWk9qp1ftRlML1JPNEkzy+9I8g=="],
+    "@opentui/core": ["@opentui/core@https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-0.5.8-agentbrowse.2.tgz", { "dependencies": { "bun-ffi-structs": "0.3.1", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.5.8", "@opentui/core-darwin-x64": "0.5.8", "@opentui/core-linux-arm64": "0.5.8", "@opentui/core-linux-arm64-musl": "0.5.8", "@opentui/core-linux-x64": "0.5.8", "@opentui/core-linux-x64-musl": "0.5.8", "@opentui/core-win32-arm64": "0.5.8", "@opentui/core-win32-x64": "0.5.8" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-kKF/LdCAPr3ljIYMpD5S8+7/M5zbe4A4xtADckDeWg8zKeB7c+LDkuJPYBNe/ObeZuxkEE+1+rfH4gRQfouDvg=="],
 
-    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.1/opentui-core-darwin-arm64-0.5.8-agentbrowse.1.tgz", {}, "sha512-10LIH/Wog1hKJrPoFmrsmGvscArWQVq9C3ngM3uW2S8KU2aiG0cJSQLnVKY1n8Ema7QeGlmdQS51omDR/j0k3A=="],
+    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-darwin-arm64-0.5.8-agentbrowse.2.tgz", {}, "sha512-sXdQjbNUTOjzhtID7gougkUH9m4nXl2o3CE5GdN4hp/2EUP++JindUTaZ9Tg0F9i5tEGz/xEgBHR5rV4SLOJdQ=="],
 
     "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@0.5.8", "", { "os": "darwin", "cpu": "x64" }, "sha512-oZ/6Iz1KN+4volMFKmmvziYJhMgyyJ99LfK1S+uPRyIRqzT3CESoJ58D4h04M1g0dHeHE4PvkU1p3uQKrXiP3g=="],
 

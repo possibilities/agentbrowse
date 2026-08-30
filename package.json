@@ -45,6 +45,7 @@
     "typescript": "5.9.3"
   },
   "overrides": {
-    "@opentui/core-darwin-arm64": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.1/opentui-core-darwin-arm64-0.5.8-agentbrowse.1.tgz"
+    "@opentui/core": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-0.5.8-agentbrowse.2.tgz",
+    "@opentui/core-darwin-arm64": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-darwin-arm64-0.5.8-agentbrowse.2.tgz"
   }
 }

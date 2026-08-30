@@ -329,21 +329,31 @@ falls back there automatically. `bun run live-view:adapter NAME
 --conversion-mode synchronous` and the default async run record both native
 duration and main-thread round trip with exact build provenance.
 
-On macOS arm64, this checkout pins OpenTUI's native package to the
-`possibilities/opentui` `carry/kitty-image-replacement` build. OpenTUI 0.5.8
-otherwise deletes the visible Kitty image before transmitting every video-frame
-replacement, briefly exposing the terminal background. The carry build keeps a
-stable image identity and replaces its pixels without that destructive delete.
-Its repository, exact source commit, release asset, SHA-256, and Bun integrity
-are recorded in `config/opentui-carry.json` and checked against both
-`package.json` and `bun.lock` by the test suite.
+On macOS arm64, this checkout pins both OpenTUI packages to the
+`possibilities/opentui` `carry/pixel-mouse-shared-memory` build, stacked on the
+earlier `carry/kitty-image-replacement`. OpenTUI 0.5.8 otherwise deletes the
+visible Kitty image before transmitting every video-frame replacement, briefly
+exposing the terminal background; the carry keeps a stable image identity and
+replaces its pixels without that destructive delete. The carry also transmits
+frames through Kitty shared memory when the terminal proves support, and
+reports exact pixel mouse positions behind a DECRPM-fenced mode transition (see
+`docs/adr/0009-fence-pixel-mouse-units-in-the-parser.md`). The `@opentui/core`
+JavaScript package carries the parser and event changes; the
+`@opentui/core-darwin-arm64` package carries the native renderer. Their
+repository, exact source commit, release assets, SHA-256 digests, Bun integrity
+strings, and the expected `libopentui.dylib` digest are recorded in
+`config/opentui-carry.json`; the test suite checks them against `package.json`,
+`bun.lock`, and the installed native library, and `bun run live-view:adapter`
+refuses to measure a native library that is not the pinned carry unless
+`OTUI_ASSET_ROOT` names a comparison build.
 
 Bun overrides belong to the installation root and are not inherited from a
 dependency. An OpenTUI host that embeds `agentbrowse/opentui`, including fmx,
-must repeat the `@opentui/core-darwin-arm64` override from this repository and
-lock that resolution until an official OpenTUI release includes the fix. The
-adapter remains on public OpenTUI APIs; the carry is a narrow native-renderer
-package, not an agentbrowse-specific API fork.
+must repeat both the `@opentui/core` and `@opentui/core-darwin-arm64` overrides
+from this repository and lock those resolutions until official OpenTUI releases
+include the changes. Pinning only the native package leaves pixel input and
+shared-memory transmit dormant. The adapter remains on public OpenTUI APIs; the
+carry is a narrow downstream package set, not an agentbrowse-specific API fork.
 
 The reference app uses the mutually exclusive fxnk design language, not
 Signal Room. Its theme layer follows fx exactly: valid `FX_THEME`, one bounded

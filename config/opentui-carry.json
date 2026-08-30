@@ -1,24 +1,41 @@
 {
-  "schemaVersion": 1,
-  "package": {
-    "name": "@opentui/core-darwin-arm64",
-    "version": "0.5.8"
-  },
+  "schemaVersion": 2,
   "source": {
     "repository": "https://github.com/possibilities/opentui",
-    "branch": "carry/kitty-image-replacement",
-    "commit": "468989cfa4c975f1c1b0c1a7f64c6739c277824d",
+    "branch": "carry/pixel-mouse-shared-memory",
+    "commit": "245e2f91fe3bcaa6e1e95e16ada6a11d81152670",
+    "baseCarryCommit": "468989cfa4c975f1c1b0c1a7f64c6739c277824d",
     "upstreamVersion": "0.5.8",
     "upstreamCommit": "21b002174255ca2236ed3115e2bb2294642f2cf5"
   },
   "release": {
-    "tag": "agentbrowse-v0.5.8.1",
-    "url": "https://github.com/possibilities/opentui/releases/tag/agentbrowse-v0.5.8.1",
-    "asset": {
-      "name": "opentui-core-darwin-arm64-0.5.8-agentbrowse.1.tgz",
-      "url": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.1/opentui-core-darwin-arm64-0.5.8-agentbrowse.1.tgz",
-      "sha256": "35c92b964f2a5f6a2ae5da10b2e5cf77db08e59a2bb6d107aa7c7bd0c367b676",
-      "bunIntegrity": "sha512-10LIH/Wog1hKJrPoFmrsmGvscArWQVq9C3ngM3uW2S8KU2aiG0cJSQLnVKY1n8Ema7QeGlmdQS51omDR/j0k3A=="
+    "tag": "agentbrowse-v0.5.8.2",
+    "url": "https://github.com/possibilities/opentui/releases/tag/agentbrowse-v0.5.8.2"
+  },
+  "packages": [
+    {
+      "name": "@opentui/core",
+      "version": "0.5.8",
+      "asset": {
+        "name": "opentui-core-0.5.8-agentbrowse.2.tgz",
+        "url": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-0.5.8-agentbrowse.2.tgz",
+        "sha256": "f8336b370a01d3ae0e24a588d29b237c2c01869c31e00ed4dfc6eeda21cdaf24",
+        "bunIntegrity": "sha512-kKF/LdCAPr3ljIYMpD5S8+7/M5zbe4A4xtADckDeWg8zKeB7c+LDkuJPYBNe/ObeZuxkEE+1+rfH4gRQfouDvg=="
+      }
+    },
+    {
+      "name": "@opentui/core-darwin-arm64",
+      "version": "0.5.8",
+      "asset": {
+        "name": "opentui-core-darwin-arm64-0.5.8-agentbrowse.2.tgz",
+        "url": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-darwin-arm64-0.5.8-agentbrowse.2.tgz",
+        "sha256": "b8bf66d30a37eb814b5aff126211cbaac6dd81e82c23d3e8454216cf370b3fb4",
+        "bunIntegrity": "sha512-sXdQjbNUTOjzhtID7gougkUH9m4nXl2o3CE5GdN4hp/2EUP++JindUTaZ9Tg0F9i5tEGz/xEgBHR5rV4SLOJdQ=="
+      },
+      "nativeLibrary": {
+        "file": "libopentui.dylib",
+        "sha256": "ace9fe8b414abb92477a5115eb1171862dc4497aeb0c62b7d0fd844c4111a54e"
+      }
     }
-  }
+  ]
 }

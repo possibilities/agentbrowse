@@ -114,15 +114,20 @@ for continuously changing images. Its stock replacement path deletes the
 current Kitty image, transmits the next pixels, then places the image again.
 Ghostty can present the cleared cell background between those commands, which
 makes a healthy video stream strobe black. The pinned
-`possibilities/opentui` `carry/kitty-image-replacement` build preserves the
-placement and image ID, retransmits replacement pixels under that identity,
-and retains destructive deletes for actual removal or protocol changes. The
-source and release artifact are fixed in `config/opentui-carry.json`.
+`possibilities/opentui` `carry/pixel-mouse-shared-memory` build (stacked on
+`carry/kitty-image-replacement`) preserves the placement and image ID,
+retransmits replacement pixels under that identity, and retains destructive
+deletes for actual removal or protocol changes. The same build adds the Kitty
+shared-memory transmit ring and the DECRPM-fenced pixel mouse mode. The source
+commit and both release artifacts, `@opentui/core` and
+`@opentui/core-darwin-arm64`, are fixed in `config/opentui-carry.json` together
+with the expected native library digest.
 
 This pin is dependency-root policy. agentbrowse applies it for its own example
 and tests, but package-manager overrides do not propagate through a dependency.
-Every embedding OpenTUI application must apply the same native-package override
-at its root until upstream OpenTUI ships the correction. The adapter contract
+Every embedding OpenTUI application must apply both package overrides at its
+root until upstream OpenTUI ships the changes; pinning only the native package
+leaves pixel input and shared-memory transmit dormant. The adapter contract
 itself remains entirely on OpenTUI's public API, so removing the carry later is
 a dependency change rather than an integration rewrite.
 

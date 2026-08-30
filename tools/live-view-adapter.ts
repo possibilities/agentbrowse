@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { CliRenderer } from "@opentui/core";
 
 import { listBrowserTargets } from "../client/targets.ts";
+import { openTuiCarryNativeLibrary, readOpenTuiCarry } from "../config/opentui-carry.ts";
 import {
   LiveViewRenderable,
   type LiveViewSubmissionMetrics,
@@ -307,13 +308,29 @@ async function buildProvenance(): Promise<Record<string, unknown>> {
     ? openTuiAssetPath(assetRoot)
     : join(dirname(packagePath), openTuiLibraryFileName());
   const assetStat = await stat(assetPath);
+  const assetSha256 = await sha256File(assetPath);
+  const carryLibrary = openTuiCarryNativeLibrary(readOpenTuiCarry(join(import.meta.dir, "..")));
+  const carry =
+    carryLibrary && carryLibrary.packageName === packageName
+      ? { expectedSha256: carryLibrary.sha256, matches: carryLibrary.sha256 === assetSha256 }
+      : null;
+  if (carry && !carry.matches && assetRoot === null) {
+    // Measurements must describe the pinned carry, not whatever `bun install`
+    // happened to leave behind. Comparison builds opt out through the root.
+    throw new Error(
+      `installed OpenTUI native library ${assetPath} is not the pinned carry ` +
+        `(sha256 ${assetSha256}, expected ${carry.expectedSha256} from config/opentui-carry.json); ` +
+        "set OTUI_ASSET_ROOT to measure a comparison build",
+    );
+  }
   const openTuiAsset: Record<string, unknown> = {
     override: assetRoot !== null,
     root: assetRoot ? resolve(assetRoot) : dirname(packagePath),
     path: assetPath,
     bytes: assetStat.size,
-    sha256: await sha256File(assetPath),
+    sha256: assetSha256,
     packageVersion: packageMetadata.version ?? null,
+    carry,
   };
   let comparison: unknown = null;
   if (assetRoot) {
