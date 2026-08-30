@@ -321,6 +321,14 @@ boundaries. `@opentui/core` is a peer dependency. Hosts should obtain it through
 `loadOpenTuiCore()` so source-linked checkouts and installed packages both use
 the adapter's exact renderable and native-image runtime.
 
+Frame conversion defaults to one process-wide Bun Worker, leaving the host
+event loop available for input and rendering while native code converts four
+row partitions. `conversionMode: "synchronous"` retains the same-thread path for
+diagnosis and before/after measurement; worker startup or dylib-probe failure
+falls back there automatically. `bun run live-view:adapter NAME
+--conversion-mode synchronous` and the default async run record both native
+duration and main-thread round trip with exact build provenance.
+
 On macOS arm64, this checkout pins OpenTUI's native package to the
 `possibilities/opentui` `carry/kitty-image-replacement` build. OpenTUI 0.5.8
 otherwise deletes the visible Kitty image before transmitting every video-frame

@@ -97,9 +97,6 @@ fn i420ToRgbaWithMode(
         .exact_size = output_width == display_width and output_height == display_height,
     };
 
-    // The two caches consume about 192 KiB; callers on worker threads need a >=512 KiB stack.
-    var luma_columns_storage: [max_cached_columns]AxisSample = undefined;
-    var chroma_columns_storage: [max_cached_columns]AxisSample = undefined;
     const columns: ?ColumnSamples = if (!conversion.exact_size and output_width <= max_cached_columns) blk: {
         const width: usize = @intCast(output_width);
         fillAxisSamples(
@@ -325,6 +322,12 @@ const AxisSample = struct {
     upper: u32,
     fraction: u32,
 };
+
+// Conversion callers may be language-runtime worker threads whose stack size
+// is not configurable. Keep the two ~192 KiB column caches off every caller's
+// stack; row workers only borrow these slices until their mandatory join.
+threadlocal var luma_columns_storage: [max_cached_columns]AxisSample = undefined;
+threadlocal var chroma_columns_storage: [max_cached_columns]AxisSample = undefined;
 
 const AxisCursor = struct {
     position_q32: i128,

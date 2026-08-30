@@ -90,10 +90,10 @@ test("OpenTUI leaves cursor presentation exclusively to the terminal host", () =
   expect(source).not.toMatch(/\.cursor(?:Snapshot|Image)\s*\(/u);
 });
 
-test("OpenTUI reuses its caller-owned RGBA conversion buffer", () => {
+test("OpenTUI reuses its worker-owned RGBA buffer only after NativeImage copies it", () => {
   const source = readFileSync(LIVE_VIEW_RENDERABLE, "utf8");
   expect(source).toMatch(
-    /lease\.convertRgba\([\s\S]+this\.rgbaScratch[\s\S]+this\.rgbaScratch = rgba/u,
+    /this\.frameConverter\.convert\([\s\S]+this\.rgbaScratch[\s\S]+NativeImage\.fromRgba\([\s\S]+this\.rgbaScratch = result\.bytes/u,
   );
   expect(source).toContain("this.rgbaScratch = undefined");
 });

@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import {
   CliRenderEvents,
   ImageRenderable,
@@ -13,6 +14,12 @@ import type { BrowserTargetChoice } from "../../client/targets.ts";
 import { LiveViewTunnel, type TunnelOptions } from "../../client/tunnel.ts";
 import { loadAgentbrowseConfig } from "../../config/deployment.ts";
 import {
+  type AsyncFrameConverterClient,
+  AsyncFrameConverterUnavailableError,
+  createAsyncFrameConverterClient,
+  type FrameConversionResult,
+} from "./AsyncFrameConverter.ts";
+import {
   type CellPixelSize,
   type FittedFrameGeometry,
   fitFrameGeometry,
@@ -26,7 +33,9 @@ import {
   X11_MODIFIER_KEYSYMS,
 } from "./keysym.ts";
 import {
+  defaultNativeLibraryPath,
   type NativeFrameInfo,
+  type NativeFrameLease,
   type NativeLiveViewMetrics,
   NativeLiveViewSession,
   type NativeLiveViewSnapshot,
@@ -63,6 +72,12 @@ export interface LiveViewSubmissionMetrics {
   lastConversionMs: number;
   averageConversionMs: number;
   maxConversionMs: number;
+  lastConversionRoundTripMs: number;
+  averageConversionRoundTripMs: number;
+  maxConversionRoundTripMs: number;
+  busySkips: bigint;
+  staleConversions: bigint;
+  synchronousFallbacks: bigint;
   submissionAgeMs: number | null;
   outputWidth: number;
   outputHeight: number;
@@ -73,6 +88,7 @@ export interface LiveViewSubmissionMetrics {
 export interface LiveViewRenderableOptions extends Omit<ImageRenderableOptions, "source" | "fit"> {
   pollFps?: number;
   nativeLibraryPath?: string;
+  conversionMode?: "async" | "synchronous";
   tunnel?: TunnelOptions;
   connection?: ConnectionDescriptorOptions;
   onStateChange?: (state: LiveViewSurfaceState) => void;
@@ -85,7 +101,8 @@ export interface LiveViewRenderableOptions extends Omit<ImageRenderableOptions, 
  */
 export class LiveViewRenderable extends ImageRenderable {
   private readonly pollIntervalMs: number;
-  private readonly nativeLibraryPath: string | undefined;
+  private readonly nativeLibraryPath: string;
+  private readonly frameConverter: AsyncFrameConverterClient;
   private readonly tunnelOptions: TunnelOptions;
   private readonly connectionOptions: ConnectionDescriptorOptions;
   private readonly stateCallback: ((state: LiveViewSurfaceState) => void) | undefined;
@@ -119,14 +136,24 @@ export class LiveViewRenderable extends ImageRenderable {
   private conversionTotalMs = 0;
   private conversionLastMs = 0;
   private conversionMaxMs = 0;
+  private conversionRoundTripTotalMs = 0;
+  private conversionRoundTripLastMs = 0;
+  private conversionRoundTripMaxMs = 0;
+  private busySkips = 0n;
+  private staleConversions = 0n;
+  private synchronousFallbacks = 0n;
   private lastSubmittedAt: number | null = null;
   private latestFrameTimestampUs: bigint | null = null;
   private rgbaScratch: Uint8Array | undefined;
+  private activeConversion: Promise<void> | null = null;
+  private frameConverterClose: Promise<void> | null = null;
+  private presentationEpoch = 0;
 
   constructor(context: RenderContext, options: LiveViewRenderableOptions = {}) {
     const {
       pollFps = DEFAULT_POLL_FPS,
       nativeLibraryPath,
+      conversionMode = "async",
       tunnel = {},
       connection = {},
       onStateChange,
@@ -137,8 +164,14 @@ export class LiveViewRenderable extends ImageRenderable {
     if (!Number.isFinite(pollFps) || pollFps < MIN_POLL_FPS || pollFps > MAX_POLL_FPS) {
       throw new RangeError(`pollFps must be between ${MIN_POLL_FPS} and ${MAX_POLL_FPS}`);
     }
+    if (conversionMode !== "async" && conversionMode !== "synchronous") {
+      throw new RangeError("conversionMode must be async or synchronous");
+    }
     this.pollIntervalMs = 1000 / pollFps;
-    this.nativeLibraryPath = nativeLibraryPath;
+    this.nativeLibraryPath = resolve(nativeLibraryPath ?? defaultNativeLibraryPath());
+    this.frameConverter = createAsyncFrameConverterClient(this.nativeLibraryPath, {
+      asynchronous: conversionMode === "async",
+    });
     this.tunnelOptions = tunnel;
     this.connectionOptions = connection;
     this.stateCallback = onStateChange;
@@ -166,6 +199,13 @@ export class LiveViewRenderable extends ImageRenderable {
       averageConversionMs:
         this.conversionSamples > 0 ? this.conversionTotalMs / this.conversionSamples : 0,
       maxConversionMs: this.conversionMaxMs,
+      lastConversionRoundTripMs: this.conversionRoundTripLastMs,
+      averageConversionRoundTripMs:
+        this.conversionSamples > 0 ? this.conversionRoundTripTotalMs / this.conversionSamples : 0,
+      maxConversionRoundTripMs: this.conversionRoundTripMaxMs,
+      busySkips: this.busySkips,
+      staleConversions: this.staleConversions,
+      synchronousFallbacks: this.synchronousFallbacks,
       submissionAgeMs:
         this.lastSubmittedAt === null ? null : Math.max(0, now - this.lastSubmittedAt),
       outputWidth: this.lastOutputWidth,
@@ -312,7 +352,7 @@ export class LiveViewRenderable extends ImageRenderable {
     if (this.isDestroyed) return;
     this.ctx.off(CliRenderEvents.BLUR, this.rendererBlurHandler);
     this.removeKeyreleaseHandler();
-    void this.disconnect();
+    void this.destroyResources().catch(() => undefined);
     super.destroy();
   }
 
@@ -320,7 +360,7 @@ export class LiveViewRenderable extends ImageRenderable {
     if (this.isDestroyed) return;
     this.ctx.off(CliRenderEvents.BLUR, this.rendererBlurHandler);
     this.removeKeyreleaseHandler();
-    await this.disconnect();
+    await this.destroyResources();
     if (!this.isDestroyed) super.destroy();
   }
 
@@ -373,58 +413,31 @@ export class LiveViewRenderable extends ImageRenderable {
           this.lastOutputHeight,
         );
       }
+      if (this.activeConversion) {
+        this.busySkips += 1n;
+        return;
+      }
       const sizeChanged =
         expected !== null &&
         (expected.outputWidth !== this.lastOutputWidth ||
           expected.outputHeight !== this.lastOutputHeight);
       const lease = session.acquireFrame(sizeChanged ? 0n : this.latestGeneration);
       if (!lease) return;
+      let conversionStarted = false;
       try {
         const info = lease.info();
         const geometry = fitFrameGeometry(this.width, this.height, info, cellPixels);
         if (!geometry) return;
-        const previousGeneration = this.latestGeneration;
-        this.latestGeneration = info.generation;
-        this.latestFrameInfo = info;
-        if (previousGeneration > 0n && info.generation > previousGeneration + 1n) {
-          this.skippedFrames += info.generation - previousGeneration - 1n;
-        }
-
-        const conversionStartedAt = performance.now();
-        const rgba = lease.convertRgba(
-          geometry.outputWidth,
-          geometry.outputHeight,
-          this.rgbaScratch,
-        );
-        this.rgbaScratch = rgba;
-        const conversionMs = performance.now() - conversionStartedAt;
-        const image = NativeImage.fromRgba(rgba, geometry.outputWidth, geometry.outputHeight);
-        try {
-          this.source = image;
-        } finally {
-          image.dispose();
-        }
-
-        this.updateFittedGeometry(
-          geometry,
-          cellPixels,
+        this.startFrameConversion(
+          session,
+          lease,
+          info,
           geometry.outputWidth,
           geometry.outputHeight,
         );
-        this.lastOutputWidth = geometry.outputWidth;
-        this.lastOutputHeight = geometry.outputHeight;
-        this.submittedFrames += 1n;
-        this.rgbaBytes += BigInt(rgba.byteLength);
-        this.bandwidthStartedAt ??= performance.now();
-        this.conversionSamples += 1;
-        this.conversionTotalMs += conversionMs;
-        this.conversionLastMs = conversionMs;
-        this.conversionMaxMs = Math.max(this.conversionMaxMs, conversionMs);
-        this.lastSubmittedAt = performance.now();
-        this.latestFrameTimestampUs = info.timestampUs;
-        this.submissionCallback?.(this.submissionMetrics());
+        conversionStarted = true;
       } finally {
-        lease.close();
+        if (!conversionStarted) lease.close();
       }
     } catch (error) {
       this.stopPolling();
@@ -437,6 +450,124 @@ export class LiveViewRenderable extends ImageRenderable {
         error: message,
       });
     }
+  }
+
+  private startFrameConversion(
+    session: NativeLiveViewSession,
+    lease: NativeFrameLease,
+    info: NativeFrameInfo,
+    outputWidth: number,
+    outputHeight: number,
+  ): void {
+    const operation = this.operationGeneration;
+    const presentationEpoch = this.presentationEpoch;
+    let task!: Promise<void>;
+    task = this.convertAndSubmitFrame(
+      session,
+      lease,
+      info,
+      outputWidth,
+      outputHeight,
+      operation,
+      presentationEpoch,
+    )
+      .catch((error) => {
+        if (error instanceof AsyncFrameConverterUnavailableError) return;
+        if (
+          session !== this.session ||
+          operation !== this.operationGeneration ||
+          presentationEpoch !== this.presentationEpoch ||
+          this.isDestroyed
+        ) {
+          return;
+        }
+        this.stopPolling();
+        this.releaseHeldInput();
+        const message = errorMessage(error);
+        this.setSurfaceState({
+          phase: "failed",
+          target: this.target,
+          status: message,
+          error: message,
+        });
+      })
+      .finally(() => {
+        if (this.activeConversion === task) this.activeConversion = null;
+      });
+    this.activeConversion = task;
+  }
+
+  private async convertAndSubmitFrame(
+    session: NativeLiveViewSession,
+    lease: NativeFrameLease,
+    info: NativeFrameInfo,
+    outputWidth: number,
+    outputHeight: number,
+    operation: number,
+    presentationEpoch: number,
+  ): Promise<void> {
+    const result = await this.frameConverter.convert(
+      lease,
+      outputWidth,
+      outputHeight,
+      this.rgbaScratch,
+    );
+    this.recordConversion(result);
+
+    const cellPixels = terminalCellPixels(this.ctx);
+    const currentGeometry = fitFrameGeometry(this.width, this.height, info, cellPixels);
+    if (
+      session !== this.session ||
+      operation !== this.operationGeneration ||
+      presentationEpoch !== this.presentationEpoch ||
+      this.isDestroyed ||
+      !this.visible ||
+      !currentGeometry ||
+      currentGeometry.outputWidth !== outputWidth ||
+      currentGeometry.outputHeight !== outputHeight ||
+      result.bytes.byteLength !== outputWidth * outputHeight * 4
+    ) {
+      this.staleConversions += 1n;
+      return;
+    }
+
+    const image = NativeImage.fromRgba(result.bytes, outputWidth, outputHeight);
+    try {
+      this.source = image;
+    } finally {
+      image.dispose();
+    }
+    // NativeImage has synchronously copied the RGBA bytes; only now may the
+    // next conversion reuse and overwrite the shared backing buffer.
+    this.rgbaScratch = result.bytes;
+
+    const previousGeneration = this.latestGeneration;
+    this.latestGeneration = info.generation;
+    this.latestFrameInfo = info;
+    if (previousGeneration > 0n && info.generation > previousGeneration + 1n) {
+      this.skippedFrames += info.generation - previousGeneration - 1n;
+    }
+    this.updateFittedGeometry(currentGeometry, cellPixels, outputWidth, outputHeight);
+    this.lastOutputWidth = outputWidth;
+    this.lastOutputHeight = outputHeight;
+    this.submittedFrames += 1n;
+    this.rgbaBytes += BigInt(result.bytes.byteLength);
+    const submittedAt = performance.now();
+    this.bandwidthStartedAt ??= submittedAt;
+    this.lastSubmittedAt = submittedAt;
+    this.latestFrameTimestampUs = info.timestampUs;
+    this.submissionCallback?.(this.submissionMetrics());
+  }
+
+  private recordConversion(result: FrameConversionResult): void {
+    this.conversionSamples += 1;
+    this.conversionTotalMs += result.conversionMs;
+    this.conversionLastMs = result.conversionMs;
+    this.conversionMaxMs = Math.max(this.conversionMaxMs, result.conversionMs);
+    this.conversionRoundTripTotalMs += result.roundTripMs;
+    this.conversionRoundTripLastMs = result.roundTripMs;
+    this.conversionRoundTripMaxMs = Math.max(this.conversionRoundTripMaxMs, result.roundTripMs);
+    if (result.mode === "synchronous-fallback") this.synchronousFallbacks += 1n;
   }
 
   private forwardKey(key: KeyEvent): boolean {
@@ -537,9 +668,12 @@ export class LiveViewRenderable extends ImageRenderable {
     const tunnel = this.tunnel;
     this.session = null;
     this.tunnel = null;
+    this.presentationEpoch += 1;
     session?.releaseHeldInput();
     session?.close();
-    this.source = undefined;
+    const activeConversion = this.activeConversion;
+    if (activeConversion) await activeConversion;
+    if (!this.isDestroyed) this.source = undefined;
     this.rgbaScratch = undefined;
     this.fittedGeometry = null;
     this.latestFrameInfo = null;
@@ -559,8 +693,27 @@ export class LiveViewRenderable extends ImageRenderable {
     this.conversionTotalMs = 0;
     this.conversionLastMs = 0;
     this.conversionMaxMs = 0;
+    this.conversionRoundTripTotalMs = 0;
+    this.conversionRoundTripLastMs = 0;
+    this.conversionRoundTripMaxMs = 0;
+    this.busySkips = 0n;
+    this.staleConversions = 0n;
+    this.synchronousFallbacks = 0n;
     this.lastSubmittedAt = null;
     this.latestFrameTimestampUs = null;
+  }
+
+  private closeFrameConverter(): Promise<void> {
+    this.frameConverterClose ??= this.frameConverter.close();
+    return this.frameConverterClose;
+  }
+
+  private async destroyResources(): Promise<void> {
+    try {
+      await this.disconnect();
+    } finally {
+      await this.closeFrameConverter();
+    }
   }
 
   private removeKeyreleaseHandler(): void {

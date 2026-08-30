@@ -63,6 +63,12 @@ input APIs. AppKit and OpenTUI are frontend adapters; neither owns transport or
 control policy, and the OpenTUI adapter does not import AppKit types.
 _Avoid: viewer, skin._
 
+**Frame conversion Worker** — The one process-wide Bun Worker that serializes
+OpenTUI I420-to-RGBA jobs, owns each transferred Frame lease through release,
+and writes into a per-renderable shared buffer. It is an event-loop isolation
+boundary, not a second frame queue or native ABI.
+_Avoid: render thread, conversion queue._
+
 **Outbound input channel** — The client-created RTC data channel labeled
 `data` that carries binary pointer and keyboard packets to Neko. Neko also
 opens a same-labeled inbound channel; it must not replace this channel.

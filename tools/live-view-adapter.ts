@@ -15,7 +15,7 @@ import {
 } from "../src/opentui/LiveViewRenderable.ts";
 import { defaultNativeLibraryPath } from "../src/opentui/native.ts";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const EVENT_LOOP_INTERVAL_MS = 5;
 const READY_TIMEOUT_MS = 20_000;
 
@@ -25,6 +25,7 @@ export interface AdapterProbeOptions {
   warmupSeconds: number;
   pollFps: number;
   rendererFps: number;
+  conversionMode: "async" | "synchronous";
   scenario: string;
   jsonPath: string;
 }
@@ -45,6 +46,7 @@ class AdapterMonitor {
   readonly submissionIntervalsMs: number[] = [];
   readonly submissionAgesMs: number[] = [];
   readonly conversionMs: number[] = [];
+  readonly conversionRoundTripMs: number[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private previousTick = 0;
   private previousSubmission: number | null = null;
@@ -70,6 +72,7 @@ class AdapterMonitor {
     }
     this.previousSubmission = now;
     this.conversionMs.push(metrics.lastConversionMs);
+    this.conversionRoundTripMs.push(metrics.lastConversionRoundTripMs);
   }
 
   stop(): void {
@@ -113,6 +116,7 @@ export function parseAdapterProbeArgs(argv: readonly string[]): AdapterProbeOpti
     warmupSeconds: 3,
     pollFps: 30,
     rendererFps: 30,
+    conversionMode: "async",
     scenario: "current",
     jsonPath: resolve("zig-out/live-view-adapter.json"),
   };
@@ -137,6 +141,14 @@ export function parseAdapterProbeArgs(argv: readonly string[]): AdapterProbeOpti
       case "--renderer-fps":
         options.rendererFps = integer(next(), flag, 1, 60);
         break;
+      case "--conversion-mode": {
+        const mode = next();
+        if (mode !== "async" && mode !== "synchronous") {
+          throw new AdapterUsageError(`${flag} must be async or synchronous`);
+        }
+        options.conversionMode = mode;
+        break;
+      }
       case "--scenario":
         options.scenario = label(next(), flag);
         break;
@@ -189,6 +201,7 @@ async function run(options: AdapterProbeOptions): Promise<Record<string, unknown
     height: "100%",
     visible: true,
     pollFps: options.pollFps,
+    conversionMode: options.conversionMode,
     onSubmission: (metrics) => monitor.onSubmission(metrics),
   });
   renderer.root.add(surface);
@@ -226,6 +239,7 @@ async function run(options: AdapterProbeOptions): Promise<Record<string, unknown
         warmupSeconds: options.warmupSeconds,
         pollFps: options.pollFps,
         rendererFps: options.rendererFps,
+        conversionMode: options.conversionMode,
         eventLoopIntervalMs: EVENT_LOOP_INTERVAL_MS,
       },
       terminal: {
@@ -242,9 +256,14 @@ async function run(options: AdapterProbeOptions): Promise<Record<string, unknown
         rgbaBytesPerSecond:
           (Number(submissionEnd.rgbaBytes - submissionStart.rgbaBytes) * 1_000) / durationMs,
         generationDelta: submissionEnd.latestGeneration - submissionStart.latestGeneration,
+        busySkips: submissionEnd.busySkips - submissionStart.busySkips,
+        staleConversions: submissionEnd.staleConversions - submissionStart.staleConversions,
+        synchronousFallbacks:
+          submissionEnd.synchronousFallbacks - submissionStart.synchronousFallbacks,
         outputWidth: submissionEnd.outputWidth,
         outputHeight: submissionEnd.outputHeight,
         conversionMs: summarize(monitor.conversionMs),
+        conversionRoundTripMs: summarize(monitor.conversionRoundTripMs),
         intervalMs: summarize(monitor.submissionIntervalsMs),
         ageMs: summarize(monitor.submissionAgesMs),
       },
@@ -378,6 +397,7 @@ Options:
   --warmup-seconds N   Warmup after the first submitted frame (default 3)
   --poll-fps N         Live View polling rate, 1-30 (default 30)
   --renderer-fps N     OpenTUI renderer rate, 1-60 (default 30)
+  --conversion-mode M  Frame conversion: async or synchronous (default async)
   --scenario LABEL     Comparison label (default current)
   --json PATH          JSON report path (default zig-out/live-view-adapter.json)
 `;
@@ -411,14 +431,20 @@ async function main(): Promise<void> {
   const submission = report.submission as {
     submittedFrames: bigint;
     skippedFrames: bigint;
+    busySkips: bigint;
+    staleConversions: bigint;
+    synchronousFallbacks: bigint;
     conversionMs: Distribution | null;
+    conversionRoundTripMs: Distribution | null;
     ageMs: Distribution | null;
   };
   process.stdout.write(
     [
       `Adapter probe: ${options.target} (${options.scenario})`,
       `Frames: ${submission.submittedFrames} submitted, ${submission.skippedFrames} skipped`,
+      `Scheduler: ${submission.busySkips} busy ticks, ${submission.staleConversions} stale, ${submission.synchronousFallbacks} synchronous fallbacks`,
       `Conversion: ${formatDistribution(submission.conversionMs)}`,
+      `Conversion round trip: ${formatDistribution(submission.conversionRoundTripMs)}`,
       `Submission age: ${formatDistribution(submission.ageMs)}`,
       `Event-loop gaps: ${formatDistribution(report.eventLoopGapMs as Distribution | null)}`,
       `Report: ${options.jsonPath}`,

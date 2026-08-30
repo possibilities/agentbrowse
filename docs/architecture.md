@@ -24,7 +24,7 @@ BrowserTargetSource -> BrowserPickerController
                               |
                    connection descriptor bytes
                               |
-OpenTUI <- NativeImage <- RGBA <- frame lease <- polling C ABI
+OpenTUI <- NativeImage <- RGBA <- conversion Worker <- frame lease <- polling C ABI
    |                                                  |
    +---- keys / pointer / scroll / paste ------------>+
                                                       |
@@ -63,10 +63,24 @@ no private API or native plugin. For each new generation it:
 
 1. fits the rotated source aspect ratio to the available terminal cells using
    the terminal's measured pixel resolution when available;
-2. asks native code to rotate, scale, and convert I420 directly into a bounded
-   RGBA buffer;
-3. hands the buffer to `NativeImage`, which `ImageRenderable` retains; and
-4. releases the frame lease immediately.
+2. transfers the lease to one process-wide Bun Worker, which asks native code
+   to rotate, scale, and convert I420 directly into a bounded shared RGBA
+   buffer;
+3. receives the completed buffer and immediately hands it to `NativeImage`,
+   which synchronously copies and `ImageRenderable` retains; and
+4. lets the Worker release the frame lease on every completion path.
+
+The Worker serializes conversions across renderables because each native call
+already fans out over four Zig row workers. A renderable admits only one job at
+a time, so polling while busy neither acquires another lease nor advances its
+submitted generation. The main thread validates the session operation, fitted
+size, and output byte count before presentation; a reconnect or resize can
+therefore discard a completed buffer without touching a closed session. Worker
+startup and dylib loading are probed before lease transfer. If either fails,
+the same frame is converted synchronously; an unexpected failure after transfer
+uses a shared atomic ownership word to claim one main-thread backstop release,
+then future frames use synchronous fallback. This remains ABI version 2/3
+behavior: the Worker loads the same absolute dylib and needs no new native API.
 
 The OpenTUI 0.5.8 native Kitty renderer does require one downstream correction
 for continuously changing images. Its stock replacement path deletes the
@@ -150,6 +164,8 @@ million pixels total. Output never exceeds the decoded display dimensions:
 when a Retina terminal has more backing pixels than the stream, Ghostty's
 linear GPU texture sampler performs the final enlargement instead of receiving
 CPU-manufactured pixels.
+Its bounded horizontal sampling caches are thread-local rather than caller-stack
+storage, so Bun-controlled Worker stack sizing is not part of the ABI contract.
 
 ## Cursor observation ownership
 
@@ -194,13 +210,15 @@ callback carries no transport identity, so the bridge counts it as in flight
 under the native session monitor and invokes Zig after releasing that monitor;
 state and reconnect callbacks retain their monitor ordering.
 
-OpenTUI target switching uses a separate operation generation. An access or
-session that completes after a newer connect, disconnect, or destroy operation
-closes itself without publishing stale state. In-flight SSH startup is also
+OpenTUI target switching uses a separate operation generation. An access,
+session, or completed conversion that belongs to an older connect, disconnect,
+or destroy operation cannot publish stale state. In-flight SSH startup is also
 abortable, and `dispose()` waits for that cancellation to reap its child.
-Normal teardown order is polling timer, Live View session, displayed image,
-then Live View access. `destroy()` remains safe for ordinary OpenTUI ownership
-teardown.
+Normal teardown order is polling timer, Live View session, outstanding frame
+conversion, displayed image, then Live View access. A frame lease is independent
+of session lifetime, so the Worker can release it after the session closes;
+`dispose()` then gracefully closes the shared Worker client. `destroy()` remains
+safe for ordinary OpenTUI ownership teardown.
 
 ## Frontend adapters
 

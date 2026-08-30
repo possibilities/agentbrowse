@@ -90,15 +90,16 @@ the bounded horizontal luma/chroma samples once; every worker derives its first
 vertical sample directly from its starting row. If a worker cannot be created,
 completed workers are joined and the caller deterministically rewrites the
 whole output serially. Small conversions, including the latency probe's 3×3
-sample, remain serial. The bounded horizontal cache occupies about 192 KiB on
-the caller's stack at the ABI's 8192-pixel dimension limit; a future asynchronous
-conversion thread must reserve at least a 512 KiB stack.
+sample, remain serial. The two bounded horizontal caches occupy about 192 KiB
+of thread-local storage at the ABI's 8192-pixel dimension limit. They do not
+depend on Bun's caller or Worker stack size.
 
 ## Work and memory bounds
 
 - The native pending queue retains one I420 frame. Consumers can add only the
-  leases they explicitly hold; `LiveViewRenderable` holds one lease only for a
-  synchronous conversion.
+  leases they explicitly hold; each `LiveViewRenderable` owns at most one queued
+  or converting lease. One process-wide Worker serializes conversions across
+  renderables because each conversion already starts three native row workers.
 - Bun polls at 1–30 FPS, with 15 FPS as the default. A slow or paused event loop
   reads the newest generation when it resumes rather than draining a backlog.
 - RGBA output is fitted to terminal pixel capacity before conversion, never
@@ -109,9 +110,10 @@ conversion thread must reserve at least a 512 KiB stack.
   chroma in one native pass. It allocates no source-sized RGBA intermediate;
   parallel row ranges write directly into disjoint parts of the caller's
   output buffer.
-- `NativeImage.fromRgba` retains its own native image storage. The adapter keeps
-  one exact-size caller-owned RGBA scratch buffer while connected and reuses it
-  across conversions, replacing it only when fitted dimensions change.
+- `NativeImage.fromRgba` retains its own native image storage. The conversion
+  Worker writes into one exact-size `SharedArrayBuffer` per renderable. The next
+  job reuses it only after `fromRgba` has synchronously copied the completed
+  bytes, and a fitted-size change replaces it.
 - Each decoded WebRTC frame is still copied once into an immutable I420 frame,
   even when the OpenTUI poller will skip its generation. Producer-side
   throttling is a possible optimization only after measurements show that copy
@@ -124,8 +126,11 @@ conversion thread must reserve at least a 512 KiB stack.
 
 `LiveViewSubmissionMetrics` exposes frames submitted as `ImageRenderable`
 sources, skipped generations, RGBA bytes and byte rate, output dimensions,
-native conversion last/average/max duration, and time since the most recent
-submission. Terminals do not provide an acknowledgement that the pixels became
+native conversion last/average/max duration, main-thread dispatch-to-completion
+round-trip duration, busy poll skips, stale completion drops, synchronous
+fallback conversions, and time since the most recent submission. Conversion
+duration is measured inside the Worker; cross-thread timestamps are never
+subtracted. Terminals do not provide an acknowledgement that the pixels became
 visible. Native counters separately expose decode, queue, input-mapping, and
 data-channel results. ABI version 3 adds monotonic input counters for pointer
 move, pointer button, scroll, key, and paste. `attempted` counts semantic
@@ -197,9 +202,12 @@ Terminal-protocol throughput, sustained CPU/RSS for Kitty graphics versus
 block fallback, and presentation acknowledgement still need controlled adapter
 runs. `bun run live-view:adapter NAME --json PATH` performs that run in a real
 terminal. After one submitted frame and a configurable warmup, it reports
-OpenTUI submission cadence and age, conversion duration, skipped frame
-generations, Bun event-loop gaps, terminal dimensions, native counters, and
-exact build provenance. Run it through `script(1)` when raw PTY byte volume and
+OpenTUI submission cadence and age, native conversion and Worker round-trip
+duration, busy/stale/fallback counters, skipped frame generations, Bun
+event-loop gaps, terminal dimensions, native counters, and exact build
+provenance. Async mode removes conversion from the event-loop-gap samples;
+`--conversion-mode synchronous` preserves the main-thread path for a controlled
+same-build comparison. Run it through `script(1)` when raw PTY byte volume and
 Kitty command selection are part of the comparison; the probe itself never
 claims a terminal display acknowledgement. Run that capture directly under the
 terminal: a nested PTY relay may consume or omit capability replies and make a

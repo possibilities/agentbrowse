@@ -14,6 +14,7 @@ test("adapter probe options retain a bounded native-feel default", () => {
     warmupSeconds: 3,
     pollFps: 30,
     rendererFps: 30,
+    conversionMode: "async",
     scenario: "current",
     jsonPath: expect.stringContaining("zig-out/live-view-adapter.json"),
   });
@@ -28,6 +29,8 @@ test("adapter probe options retain a bounded native-feel default", () => {
       "15",
       "--renderer-fps",
       "60",
+      "--conversion-mode",
+      "synchronous",
       "--scenario",
       "shared-memory",
       "--json",
@@ -38,6 +41,7 @@ test("adapter probe options retain a bounded native-feel default", () => {
     warmupSeconds: 0,
     pollFps: 15,
     rendererFps: 60,
+    conversionMode: "synchronous",
     scenario: "shared-memory",
     jsonPath: expect.stringContaining("zig-out/custom.json"),
   });

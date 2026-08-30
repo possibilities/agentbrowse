@@ -209,6 +209,11 @@ export interface NativeFrameInfo {
   timestampUs: bigint;
 }
 
+export interface NativeWorkerRgbaOutput {
+  bytes: Uint8Array;
+  stride: number;
+}
+
 export interface NativeCursorSnapshot {
   imageAvailable: boolean;
   positionAvailable: boolean;
@@ -538,18 +543,7 @@ export class NativeFrameLease {
   }
 
   convertRgba(width: number, height: number, reusable?: Uint8Array): Uint8Array {
-    const outputWidth = positiveU32(width, "width");
-    const outputHeight = positiveU32(height, "height");
-    if (
-      outputWidth > MAX_OUTPUT_DIMENSION ||
-      outputHeight > MAX_OUTPUT_DIMENSION ||
-      outputWidth * outputHeight > MAX_OUTPUT_PIXELS
-    ) {
-      throw new RangeError("RGBA output exceeds the native conversion limit");
-    }
-    const stride = outputWidth * 4;
-    const byteLength = stride * outputHeight;
-    if (!Number.isSafeInteger(byteLength)) throw new RangeError("RGBA output is too large");
+    const { outputWidth, outputHeight, stride, byteLength } = rgbaOutputSpec(width, height);
     const output = reusable?.byteLength === byteLength ? reusable : Buffer.allocUnsafe(byteLength);
     checkResult(
       "frame conversion",
@@ -563,6 +557,25 @@ export class NativeFrameLease {
       ),
     );
     return output;
+  }
+
+  workerRgbaOutput(width: number, height: number, reusable?: Uint8Array): NativeWorkerRgbaOutput {
+    const { stride, byteLength } = rgbaOutputSpec(width, height);
+    const canReuse =
+      reusable?.byteLength === byteLength &&
+      reusable.byteOffset === 0 &&
+      reusable.buffer.byteLength === byteLength &&
+      reusable.buffer instanceof SharedArrayBuffer;
+    return {
+      bytes: canReuse ? reusable : new Uint8Array(new SharedArrayBuffer(byteLength)),
+      stride,
+    };
+  }
+
+  transfer(): NativeFrameLeaseTransfer {
+    const handle = this.requireHandle();
+    this.handle = null;
+    return new NativeFrameLeaseTransfer(this.native, handle);
   }
 
   close(): void {
@@ -579,6 +592,26 @@ export class NativeFrameLease {
   private requireHandle(): Pointer {
     if (!this.handle) throw new Error("frame lease is released");
     return this.handle;
+  }
+}
+
+/** A frame lease whose release ownership has moved away from JavaScript's caller. */
+export class NativeFrameLeaseTransfer {
+  private owned = true;
+
+  constructor(
+    private readonly native: NativeLibrary,
+    readonly handle: Pointer,
+  ) {}
+
+  release(): void {
+    if (!this.owned) return;
+    this.owned = false;
+    this.native.symbols.ab_live_view_frame_release(this.handle);
+  }
+
+  acknowledgeReleased(): void {
+    this.owned = false;
   }
 }
 
@@ -662,4 +695,28 @@ function positiveU32(value: number, name: string): number {
     throw new RangeError(`${name} must be a positive u32`);
   }
   return value;
+}
+
+function rgbaOutputSpec(
+  width: number,
+  height: number,
+): {
+  outputWidth: number;
+  outputHeight: number;
+  stride: number;
+  byteLength: number;
+} {
+  const outputWidth = positiveU32(width, "width");
+  const outputHeight = positiveU32(height, "height");
+  if (
+    outputWidth > MAX_OUTPUT_DIMENSION ||
+    outputHeight > MAX_OUTPUT_DIMENSION ||
+    outputWidth * outputHeight > MAX_OUTPUT_PIXELS
+  ) {
+    throw new RangeError("RGBA output exceeds the native conversion limit");
+  }
+  const stride = outputWidth * 4;
+  const byteLength = stride * outputHeight;
+  if (!Number.isSafeInteger(byteLength)) throw new RangeError("RGBA output is too large");
+  return { outputWidth, outputHeight, stride, byteLength };
 }
