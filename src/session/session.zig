@@ -11,6 +11,7 @@ const input_packets = @import("../protocol/input_packets.zig");
 const input_state = @import("input_state.zig");
 const pending_input = @import("pending_input.zig");
 const physical_key_state = @import("physical_key_state.zig");
+const scroll_accumulator = @import("scroll_accumulator.zig");
 const native = @import("../platform/macos/native.zig");
 const signaling = @import("../protocol/signaling.zig");
 const state_mod = @import("state.zig");
@@ -81,6 +82,7 @@ pub const Session = struct {
     paste_sink: ?*const fn (?*anyopaque, []const u8) bool = null,
     held_input: input_state.InputState = .{},
     physical_keys: physical_key_state.State = .{},
+    scroll_residuals: scroll_accumulator.State = .{},
     status_mutex: std.atomic.Mutex = .unlocked,
     status_bytes: [256]u8 = [_]u8{0} ** 256,
     status_len: u16 = 0,
@@ -342,6 +344,7 @@ pub const Session = struct {
     }
 
     pub fn scroll(self: *Session, delta_x: i16, delta_y: i16, control_key: bool) bool {
+        if (delta_x == 0 and delta_y == 0) return false;
         self.input_counters.note(.scroll, .attempted);
         self.admission_mutex.lock();
         const now_ns = monotonicNowNs();
@@ -351,6 +354,10 @@ pub const Session = struct {
             self.admission_mutex.unlock();
             return false;
         }
+        // Integer scroll input is a complete discrete gesture. Do not let a
+        // stale sub-unit trackpad fraction alter its direction or magnitude.
+        // Rejected input leaves residual state untouched.
+        self.scroll_residuals.clearMode(control_key);
         const sequence = self.nextInputSequenceLocked();
         const outcome = self.input_queue.pushScroll(
             self.allocator,
@@ -358,6 +365,54 @@ pub const Session = struct {
             self.input_epoch,
             delta_x,
             delta_y,
+            control_key,
+            admission.route == .wait,
+            now_ns,
+        );
+        const should_drain = self.recordPushOutcomeLocked(.scroll, outcome, admission.route, now_ns);
+        self.admission_mutex.unlock();
+        if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+        if (!outcome.accepted()) return false;
+        return if (should_drain) self.drainInputQueue(if (outcome.result == .queued) sequence else null) else true;
+    }
+
+    /// Admit fractional Neko scroll units without losing sub-unit trackpad
+    /// motion. This is internal to the AppKit adapter; the public ABI retains
+    /// its integer scroll contract.
+    pub fn scrollPrecise(self: *Session, delta_x: f64, delta_y: f64, control_key: bool) bool {
+        if (!std.math.isFinite(delta_x) or !std.math.isFinite(delta_y)) return false;
+        if (delta_x == 0 and delta_y == 0) return false;
+        self.input_counters.note(.scroll, .attempted);
+        self.admission_mutex.lock();
+        const now_ns = monotonicNowNs();
+        const admission = self.inputRouteLocked(now_ns);
+        if (admission.route == .reject) {
+            self.input_counters.note(.scroll, .control_dropped);
+            self.admission_mutex.unlock();
+            return false;
+        }
+        const quantized = self.scroll_residuals.add(
+            delta_x,
+            delta_y,
+            control_key,
+            now_ns,
+            pending_input.max_age_ns,
+        );
+        if (quantized.isEmpty()) {
+            self.input_counters.note(.scroll, .coalesced);
+            self.admission_mutex.unlock();
+            // A gentle first touch still needs to claim control even though it
+            // has not accumulated a complete protocol unit yet.
+            if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+            return true;
+        }
+        const sequence = self.nextInputSequenceLocked();
+        const outcome = self.input_queue.pushScroll(
+            self.allocator,
+            sequence,
+            self.input_epoch,
+            quantized.delta_x,
+            quantized.delta_y,
             control_key,
             admission.route == .wait,
             now_ns,
@@ -921,6 +976,7 @@ pub const Session = struct {
     fn cancelInputLocked(self: *Session, now_ns: i128) void {
         const cleared = self.input_queue.clear(self.allocator, now_ns);
         self.recordClearResultLocked(cleared);
+        self.scroll_residuals.clear();
         self.input_epoch +%= 1;
     }
 
@@ -1584,6 +1640,83 @@ fn expectRecordedKey(recorder: *const PacketRecorder, index: usize, action: inpu
     try std.testing.expectEqual(keysym_value, std.mem.readInt(u64, recorder.packets[index][3..11], .little));
 }
 
+test "precise scroll residuals emit whole units and discrete input clears them" {
+    var session: Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{ .version = connection.current_version, .label = "precise-scroll-test", .base_url = "http://127.0.0.1" },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    var recorder: PacketRecorder = .{ .session = &session };
+    session.packet_sink_context = &recorder;
+    session.packet_sink = recordPacket;
+    session.data_open.store(1, .release);
+    session.authorized.store(1, .release);
+
+    try std.testing.expect(session.scrollPrecise(0.5, -0.5, false));
+    try std.testing.expectEqual(@as(usize, 0), recorder.count);
+    try std.testing.expect(session.scrollPrecise(0.5, -0.5, false));
+    try std.testing.expectEqual(@as(usize, 1), recorder.count);
+    const precise_packet = input_packets.scroll(1, -1, false);
+    try std.testing.expectEqualSlices(u8, &precise_packet, recorder.packets[0][0..recorder.lengths[0]]);
+
+    try std.testing.expect(session.scrollPrecise(0.75, 0, true));
+    try std.testing.expect(session.scroll(120, 0, true));
+    try std.testing.expectEqual(@as(usize, 2), recorder.count);
+    const discrete_packet = input_packets.scroll(120, 0, true);
+    try std.testing.expectEqualSlices(u8, &discrete_packet, recorder.packets[1][0..recorder.lengths[1]]);
+    try std.testing.expect(session.scrollPrecise(0.25, 0, true));
+    try std.testing.expectEqual(@as(usize, 2), recorder.count);
+    try std.testing.expect(!session.scroll(0, 0, false));
+    try std.testing.expectEqual(@as(usize, 2), recorder.count);
+}
+
+test "rejected scroll preserves residuals and cancellation clears them" {
+    var session: Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{ .version = connection.current_version, .label = "precise-scroll-cancel-test", .base_url = "http://127.0.0.1" },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    var recorder: PacketRecorder = .{ .session = &session };
+    session.packet_sink_context = &recorder;
+    session.packet_sink = recordPacket;
+    session.data_open.store(1, .release);
+    session.authorized.store(1, .release);
+
+    try std.testing.expect(session.scrollPrecise(0.75, 0, false));
+    session.data_open.store(0, .release);
+    try std.testing.expect(!session.scroll(120, 0, false));
+    try std.testing.expect(!session.scrollPrecise(0.5, 0, false));
+    session.data_open.store(1, .release);
+    try std.testing.expect(session.scrollPrecise(0.25, 0, false));
+    try std.testing.expectEqual(@as(usize, 1), recorder.count);
+
+    try std.testing.expect(session.scrollPrecise(0.75, 0, false));
+    session.releaseHeldInput();
+    try std.testing.expect(session.scrollPrecise(0.25, 0, false));
+    try std.testing.expectEqual(@as(usize, 1), recorder.count);
+    try std.testing.expect(session.scrollPrecise(0.75, 0, false));
+    try std.testing.expectEqual(@as(usize, 2), recorder.count);
+}
+
+test "sub-unit waiting scroll requests control without queueing an empty packet" {
+    var session: Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{ .version = connection.current_version, .label = "precise-scroll-wait-test", .base_url = "http://127.0.0.1" },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    session.data_open.store(1, .release);
+
+    try std.testing.expect(session.scrollPrecise(0.5, 0, false));
+    try std.testing.expect(session.isControlRequested());
+    try std.testing.expectEqual(@as(usize, 0), session.input_queue.len());
+    const metrics = inputKindSnapshot(&session, .scroll);
+    try std.testing.expectEqual(@as(u64, 1), metrics.attempted);
+    try std.testing.expectEqual(@as(u64, 1), metrics.coalesced);
+}
+
 test "explicit authorization replays semantic input in FIFO order" {
     var session: Session = .{
         .allocator = std.testing.allocator,
@@ -1844,7 +1977,7 @@ test "explicit queue overflow attributes every abandoned event by kind" {
     session.data_open.store(1, .release);
 
     for (0..pending_input.max_waiting_events) |index| {
-        try std.testing.expect(session.scroll(@intCast(index), 0, index % 2 != 0));
+        try std.testing.expect(session.scroll(@intCast(index + 1), 0, index % 2 != 0));
     }
     try std.testing.expect(!session.setKey('z', true, false));
     try std.testing.expectEqual(@as(usize, 0), session.input_queue.len());

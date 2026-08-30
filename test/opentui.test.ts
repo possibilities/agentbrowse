@@ -38,6 +38,7 @@ import {
   parseOsc11Response,
   resolveFxnkTheme,
 } from "../src/opentui/palette.ts";
+import { openTuiScrollDelta } from "../src/opentui/scroll.ts";
 
 const LIVE_VIEW_RENDERABLE = fileURLToPath(
   new URL("../src/opentui/LiveViewRenderable.ts", import.meta.url),
@@ -272,6 +273,16 @@ test("OpenTUI keys map to X11 special, printable, and Unicode keysyms", () => {
     BigInt("Z".codePointAt(0)!),
   );
   expect(keysymForOpenTuiKey({ name: "λ", shift: false })).toBe(0x0100_03bbn);
+});
+
+test("OpenTUI wheel reports map to complete Neko notches without empty packets", () => {
+  expect(openTuiScrollDelta("up", 1)).toEqual({ deltaX: 0, deltaY: -120 });
+  expect(openTuiScrollDelta("down", 2)).toEqual({ deltaX: 0, deltaY: 240 });
+  expect(openTuiScrollDelta("left", 1)).toEqual({ deltaX: -120, deltaY: 0 });
+  expect(openTuiScrollDelta("right", 1)).toEqual({ deltaX: 120, deltaY: 0 });
+  expect(openTuiScrollDelta(undefined, 1)).toBeNull();
+  expect(openTuiScrollDelta("down", Number.NaN)).toBeNull();
+  expect(openTuiScrollDelta("down", 1_000)).toEqual({ deltaX: 0, deltaY: 0x7fff });
 });
 
 test("modifier-only events reconcile their own press and release state", () => {

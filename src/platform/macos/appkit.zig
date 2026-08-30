@@ -67,11 +67,19 @@ fn onPointer(context: ?*anyopaque, x: f64, y: f64, view_width: f64, view_height:
     _ = live_session.movePointer(mapped.x, mapped.y);
     if (kind == 3 or kind == 4) {
         const precise = kind == 3;
-        _ = live_session.scroll(
-            normalizeScrollDelta(delta_x, precise),
-            normalizeScrollDelta(delta_y, precise),
-            control_key,
-        );
+        if (precise) {
+            _ = live_session.scrollPrecise(
+                normalizePrecisionScrollDelta(delta_x),
+                normalizePrecisionScrollDelta(delta_y),
+                control_key,
+            );
+        } else {
+            _ = live_session.scroll(
+                normalizeDiscreteScrollDelta(delta_x),
+                normalizeDiscreteScrollDelta(delta_y),
+                control_key,
+            );
+        }
         return;
     }
     if ((kind != 1 and kind != 2) or button > 7) return;
@@ -170,15 +178,25 @@ fn clampDelta(value: f64) i16 {
     return @intFromFloat(clamped);
 }
 
-fn normalizeScrollDelta(value: f64, precise: bool) i16 {
-    const scale: f64 = if (precise) 4 else 19;
-    return clampDelta(-value * scale);
+fn normalizePrecisionScrollDelta(value: f64) f64 {
+    return -value * 4;
+}
+
+fn normalizeDiscreteScrollDelta(value: f64) i16 {
+    if (!std.math.isFinite(value) or value == 0) return 0;
+    const magnitude = @max(@abs(value), 1);
+    const tick = if (value < 0) -magnitude else magnitude;
+    return clampDelta(-tick * 120);
 }
 
 test "scroll deltas follow macOS direction and Neko units" {
-    try std.testing.expectEqual(@as(i16, -8), normalizeScrollDelta(2, true));
-    try std.testing.expectEqual(@as(i16, 12), normalizeScrollDelta(-3, true));
-    try std.testing.expectEqual(@as(i16, -19), normalizeScrollDelta(1, false));
+    try std.testing.expectEqual(@as(f64, -8), normalizePrecisionScrollDelta(2));
+    try std.testing.expectEqual(@as(f64, 12), normalizePrecisionScrollDelta(-3));
+    try std.testing.expectEqual(@as(i16, -120), normalizeDiscreteScrollDelta(0.1));
+    try std.testing.expectEqual(@as(i16, 120), normalizeDiscreteScrollDelta(-0.1));
+    try std.testing.expectEqual(@as(i16, -156), normalizeDiscreteScrollDelta(1.3));
+    try std.testing.expectEqual(@as(i16, 0), normalizeDiscreteScrollDelta(0));
+    try std.testing.expectEqual(@as(i16, 0), normalizeDiscreteScrollDelta(std.math.inf(f64)));
 }
 
 const KeyPacketRecorder = struct {

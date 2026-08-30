@@ -4,6 +4,7 @@ const input_event = @import("input_event.zig");
 pub const max_events = 256;
 pub const max_waiting_events = 32;
 pub const max_age_ns = 2 * std.time.ns_per_s;
+pub const max_waiting_scroll_units: i16 = 10 * 120;
 pub const max_paste_bytes = 1024 * 1024;
 
 pub const Event = input_event.Event;
@@ -129,8 +130,8 @@ pub const Queue = struct {
                 .scroll => |previous| {
                     if (previous.control_key == control_key) {
                         last.event = .{ .scroll = .{
-                            .delta_x = previous.delta_x +| delta_x,
-                            .delta_y = previous.delta_y +| delta_y,
+                            .delta_x = coalesceScrollAxis(previous.delta_x, delta_x, waiting),
+                            .delta_y = coalesceScrollAxis(previous.delta_y, delta_y, waiting),
                             .control_key = control_key,
                         } };
                         return .{ .result = .coalesced };
@@ -141,11 +142,17 @@ pub const Queue = struct {
         }
         if (self.reserve(allocator, waiting, now_ns)) |failure| return failure;
         self.append(.{ .sequence = sequence, .epoch = epoch, .event = .{ .scroll = .{
-            .delta_x = delta_x,
-            .delta_y = delta_y,
+            .delta_x = coalesceScrollAxis(0, delta_x, waiting),
+            .delta_y = coalesceScrollAxis(0, delta_y, waiting),
             .control_key = control_key,
         } } }, waiting, now_ns);
         return .{ .result = .queued };
+    }
+
+    fn coalesceScrollAxis(previous: i16, delta: i16, waiting: bool) i16 {
+        const limit: i32 = if (waiting) max_waiting_scroll_units else std.math.maxInt(i16);
+        const sum = @as(i32, previous) + @as(i32, delta);
+        return @intCast(@max(-limit, @min(limit, sum)));
     }
 
     pub fn pushKey(self: *Queue, allocator: std.mem.Allocator, sequence: u64, epoch: u64, keysym: u64, pressed: bool, waiting: bool, now_ns: i128) PushOutcome {
@@ -249,6 +256,29 @@ test "motion coalesces only within semantic ordering barriers" {
         .move => |position| {
             try std.testing.expectEqual(@as(u16, 3), position.x);
             try std.testing.expectEqual(@as(u16, 4), position.y);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "waiting scroll coalescing retains at most ten notches per axis" {
+    var queue: Queue = .{};
+    defer _ = queue.clear(std.testing.allocator, 100);
+
+    try std.testing.expectEqual(.queued, queue.pushScroll(std.testing.allocator, 1, 0, 3600, -3600, true, true, 10).result);
+    switch (queue.entry(0).event) {
+        .scroll => |scroll| {
+            try std.testing.expectEqual(max_waiting_scroll_units, scroll.delta_x);
+            try std.testing.expectEqual(-max_waiting_scroll_units, scroll.delta_y);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(.coalesced, queue.pushScroll(std.testing.allocator, 2, 0, 900, -900, true, true, 11).result);
+    const entry = queue.pop().?;
+    switch (entry.event) {
+        .scroll => |scroll| {
+            try std.testing.expectEqual(max_waiting_scroll_units, scroll.delta_x);
+            try std.testing.expectEqual(-max_waiting_scroll_units, scroll.delta_y);
         },
         else => return error.TestUnexpectedResult,
     }

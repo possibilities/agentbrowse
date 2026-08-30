@@ -41,6 +41,20 @@ disabled. A 300-frame keyframe interval was rejected: Neko does not act on
 receiver PLI/FIR, so loss can otherwise leave corruption until the next
 periodic keyframe.
 
+Neko's XI2 scroll driver defines 120 protocol units as one wheel notch.
+Ghostty accumulates smooth motion to a terminal row or column before emitting
+each OpenTUI wheel report, so the OpenTUI adapter sends 120 units per report.
+AppKit retains fractional units at 4 units per trackpad point instead. The two
+frontends therefore have intentionally different smooth-scroll speed: lowering
+the OpenTUI value would also make physical wheel clicks sluggish.
+
+Pinned-fork follow-up: if the Neko driver socket write fails, its XTest fallback
+currently synthesizes one button click per protocol unit. A 120-unit notch can
+therefore become 120 clicks during a socket failure, and a coalesced gesture can
+be worse. The server fallback should divide by the 120-unit increment with a
+remainder, or be removed; the normal image enables the XI2 driver path, so this
+does not block the client-side unit correction.
+
 ## OpenTUI smoke run
 
 The first end-to-end OpenTUI run used an 80×24 terminal and a 1920×1080 I420
@@ -135,7 +149,8 @@ visible. Native counters separately expose decode, queue, input-mapping, and
 data-channel results. ABI version 3 adds monotonic input counters for pointer
 move, pointer button, scroll, key, and paste. `attempted` counts semantic
 submissions; `queued` counts attempts retained while explicit control is
-pending; `coalesced` is the queued subset merged into an adjacent event; `sent`
+pending; `coalesced` counts queued attempts merged into an adjacent event and
+fractional precision-scroll attempts retained by the session accumulator; `sent`
 and `send_failed` report native send results; `duplicate_suppressed` reports
 state transitions intentionally omitted; and `control_dropped` reports
 admission rejection, resident cancellation, queue overflow, or an in-flight

@@ -48,11 +48,11 @@ import {
   NativeLiveViewSession,
   type NativeLiveViewSnapshot,
 } from "./native.ts";
+import { openTuiScrollDelta } from "./scroll.ts";
 
 const DEFAULT_POLL_FPS = 15;
 const MIN_POLL_FPS = 1;
 const MAX_POLL_FPS = 30;
-const SCROLL_STEP = 19;
 
 export type LiveViewSurfacePhase =
   | "empty"
@@ -727,11 +727,8 @@ export class LiveViewRenderable extends ImageRenderable {
         }
         break;
       case "scroll": {
-        const direction = event.scroll?.direction;
-        const amount = Math.max(1, event.scroll?.delta ?? 1) * SCROLL_STEP;
-        const deltaX = direction === "left" ? -amount : direction === "right" ? amount : 0;
-        const deltaY = direction === "up" ? -amount : direction === "down" ? amount : 0;
-        session.scroll(deltaX, deltaY, event.modifiers.ctrl);
+        const delta = openTuiScrollDelta(event.scroll?.direction, event.scroll?.delta);
+        if (delta) session.scroll(delta.deltaX, delta.deltaY, event.modifiers.ctrl);
         break;
       }
       default:
