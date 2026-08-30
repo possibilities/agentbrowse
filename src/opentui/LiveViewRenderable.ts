@@ -24,6 +24,7 @@ import {
   type FittedFrameGeometry,
   fitFrameGeometry,
   mapCellToRemote,
+  mapPixelToRemote,
   terminalCellPixels,
 } from "./geometry.ts";
 import {
@@ -597,7 +598,17 @@ export class LiveViewRenderable extends ImageRenderable {
     const session = this.session;
     const geometry = this.fittedGeometry;
     if (!session || !geometry) return;
-    const point = mapCellToRemote(event.x - this.screenX, event.y - this.screenY, geometry);
+    const pixelEvent = event as MouseEvent & { readonly pixelX?: number; readonly pixelY?: number };
+    const cellPixels = terminalCellPixels(this.ctx);
+    const point =
+      pixelEvent.pixelX !== undefined && pixelEvent.pixelY !== undefined
+        ? mapPixelToRemote(
+            pixelEvent.pixelX - this.screenX * cellPixels.width,
+            pixelEvent.pixelY - this.screenY * cellPixels.height,
+            geometry,
+            cellPixels,
+          )
+        : mapCellToRemote(event.x - this.screenX, event.y - this.screenY, geometry);
     if (!point) {
       // OpenTUI keeps sending a captured drag to its origin renderable. A
       // release over the letterbox must still end the guest-side drag.

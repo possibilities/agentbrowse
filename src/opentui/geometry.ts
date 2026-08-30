@@ -140,7 +140,62 @@ export function mapCellToRemote(
   const displayX = clamp(Math.floor(normalizedX * displayWidth), 0, displayWidth - 1);
   const displayY = clamp(Math.floor(normalizedY * displayHeight), 0, displayHeight - 1);
 
+  return mapDisplayToRemote(displayX, displayY, geometry);
+}
+
+/** Map an exact OpenTUI device-pixel coordinate through the fitted frame. */
+export function mapPixelToRemote(
+  localPixelX: number,
+  localPixelY: number,
+  geometry: FittedFrameGeometry,
+  cellPixels: CellPixelSize,
+): RemotePoint | null {
+  if (
+    !Number.isFinite(localPixelX) ||
+    !Number.isFinite(localPixelY) ||
+    !Number.isFinite(cellPixels.width) ||
+    !Number.isFinite(cellPixels.height) ||
+    cellPixels.width <= 0 ||
+    cellPixels.height <= 0
+  ) {
+    return null;
+  }
+  const pixelX = geometry.cellX * cellPixels.width;
+  const pixelY = geometry.cellY * cellPixels.height;
+  const pixelWidth = geometry.cellWidth * cellPixels.width;
+  const pixelHeight = geometry.cellHeight * cellPixels.height;
+  if (
+    localPixelX < pixelX ||
+    localPixelY < pixelY ||
+    localPixelX >= pixelX + pixelWidth ||
+    localPixelY >= pixelY + pixelHeight
+  ) {
+    return null;
+  }
+
+  const normalizedX = (localPixelX - pixelX) / pixelWidth;
+  const normalizedY = (localPixelY - pixelY) / pixelHeight;
+  const displayWidth =
+    geometry.rotationDegrees === 90 || geometry.rotationDegrees === 270
+      ? geometry.sourceHeight
+      : geometry.sourceWidth;
+  const displayHeight =
+    geometry.rotationDegrees === 90 || geometry.rotationDegrees === 270
+      ? geometry.sourceWidth
+      : geometry.sourceHeight;
+  const displayX = clamp(Math.floor(normalizedX * displayWidth), 0, displayWidth - 1);
+  const displayY = clamp(Math.floor(normalizedY * displayHeight), 0, displayHeight - 1);
+
+  return mapDisplayToRemote(displayX, displayY, geometry);
+}
+
+function mapDisplayToRemote(
+  displayX: number,
+  displayY: number,
+  geometry: FittedFrameGeometry,
+): RemotePoint {
   const point = inverseRotation(displayX, displayY, geometry);
+
   return {
     x: clamp(point.x, 0, Math.min(0xffff, geometry.sourceWidth - 1)),
     y: clamp(point.y, 0, Math.min(0xffff, geometry.sourceHeight - 1)),

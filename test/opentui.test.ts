@@ -15,6 +15,7 @@ import {
   type FittedFrameGeometry,
   fitFrameGeometry,
   mapCellToRemote,
+  mapPixelToRemote,
   terminalCellPixels,
 } from "../src/opentui/geometry.ts";
 import {
@@ -188,6 +189,49 @@ test("mouse mapping inverts WebRTC frame rotation", () => {
   };
   expect(mapCellToRemote(0, 0, geometry)).toEqual({ x: 0, y: 0 });
   expect(mapCellToRemote(0, 1, geometry)).toEqual({ x: 1, y: 0 });
+});
+
+test("pixel mouse mapping preserves exact DPR-2 device coordinates", () => {
+  const cellPixels = terminalCellPixels({
+    resolution: { width: 1600, height: 960 },
+    terminalWidth: 80,
+    terminalHeight: 24,
+  });
+  expect(cellPixels).toEqual({ width: 20, height: 40 });
+  const geometry: FittedFrameGeometry = {
+    cellX: 0,
+    cellY: 0,
+    cellWidth: 40,
+    cellHeight: 15,
+    outputWidth: 800,
+    outputHeight: 600,
+    sourceWidth: 800,
+    sourceHeight: 600,
+    rotationDegrees: 0,
+  };
+
+  expect(mapPixelToRemote(400, 200, geometry, cellPixels)).toEqual({ x: 400, y: 200 });
+  expect(mapPixelToRemote(-1, 200, geometry, cellPixels)).toBeNull();
+  expect(mapPixelToRemote(800, 200, geometry, cellPixels)).toBeNull();
+});
+
+test("pixel mouse mapping respects letterboxing and frame rotation", () => {
+  const geometry: FittedFrameGeometry = {
+    cellX: 1,
+    cellY: 2,
+    cellWidth: 2,
+    cellHeight: 4,
+    outputWidth: 20,
+    outputHeight: 80,
+    sourceWidth: 4,
+    sourceHeight: 2,
+    rotationDegrees: 90,
+  };
+  const cellPixels = { width: 10, height: 20 };
+
+  expect(mapPixelToRemote(9, 80, geometry, cellPixels)).toBeNull();
+  expect(mapPixelToRemote(10, 40, geometry, cellPixels)).toEqual({ x: 0, y: 1 });
+  expect(mapPixelToRemote(29, 119, geometry, cellPixels)).toEqual({ x: 3, y: 0 });
 });
 
 test("OpenTUI keys map to X11 special, printable, and Unicode keysyms", () => {
