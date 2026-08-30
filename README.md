@@ -235,10 +235,12 @@ The same prefix selects the preserved AppKit bundle and OpenTUI dylib:
 ```sh
 zig build -Doptimize=Debug -p zig-out/comparisons/00-baseline-debug
 zig build -Doptimize=ReleaseFast -p zig-out/comparisons/01-release-fast
+bun run agentbrowse list
+LIVE_VIEW_TARGET=replace-with-a-running-target
 AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/00-baseline-debug \
-  tools/live-view launch testing
+  tools/live-view launch "$LIVE_VIEW_TARGET"
 AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/01-release-fast \
-  tools/live-view launch testing
+  tools/live-view launch "$LIVE_VIEW_TARGET"
 AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/00-baseline-debug \
   bun run opentui:example
 AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/01-release-fast \
@@ -249,6 +251,8 @@ AGENTBROWSE_LIVE_VIEW_PREFIX=zig-out/comparisons/01-release-fast \
 each prefix intact: its dylib and applications load the sibling
 `Frameworks/LiveKitWebRTC.framework`. Sequential comparisons give more reliable
 latency and CPU results than running two WebRTC decoders and renderers at once.
+Use the exact name printed by `agentbrowse list`; `testing` is not a reserved or
+automatically created Browser target.
 
 The app opens on a blank stage showing `no browser`. Press `ctrl+shift+b` to
 open its Browser-target picker. Running targets are selectable; stopped targets

@@ -8,6 +8,7 @@ pub const frame = @import("session/frame.zig");
 pub const frame_conversion = @import("session/frame_conversion.zig");
 pub const frame_queue = @import("session/frame_queue.zig");
 pub const input_state = @import("session/input_state.zig");
+pub const pending_input = @import("session/pending_input.zig");
 pub const cursor_state = @import("session/cursor_state.zig");
 pub const keymap = @import("platform/macos/keymap.zig");
 pub const appkit = @import("platform/macos/appkit.zig");
@@ -25,6 +26,7 @@ test {
     _ = frame_conversion;
     _ = frame_queue;
     _ = input_state;
+    _ = pending_input;
     _ = cursor_state;
     _ = keymap;
     _ = appkit;

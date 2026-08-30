@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const connection = @import("../app/connection.zig");
 const cursor_packets = @import("../protocol/cursor_packets.zig");
 const cursor_state = @import("cursor_state.zig");
@@ -6,6 +7,7 @@ const frame_mod = @import("frame.zig");
 const frame_queue = @import("frame_queue.zig");
 const input_packets = @import("../protocol/input_packets.zig");
 const input_state = @import("input_state.zig");
+const pending_input = @import("pending_input.zig");
 const native = @import("../platform/macos/native.zig");
 const signaling = @import("../protocol/signaling.zig");
 const state_mod = @import("state.zig");
@@ -34,6 +36,7 @@ pub const Session = struct {
     remote_controller: std.atomic.Value(u8) = .init(0),
     implicit_hosting: std.atomic.Value(u8) = .init(0),
     control_requested: std.atomic.Value(u8) = .init(0),
+    control_request_started_ns: ?i128 = null,
     closed: std.atomic.Value(u8) = .init(0),
     reconnect_scheduled: std.atomic.Value(u8) = .init(0),
     reconnect_attempts: std.atomic.Value(u8) = .init(0),
@@ -50,6 +53,12 @@ pub const Session = struct {
     headless_samples: std.atomic.Value(u64) = .init(0),
     id_mutex: std.atomic.Mutex = .unlocked,
     self_id: ?[]u8 = null,
+    admission_mutex: std.atomic.Mutex = .unlocked,
+    pending_inputs: pending_input.Queue = .{},
+    input_replaying: bool = false,
+    input_epoch: u64 = 0,
+    packet_sink_context: ?*anyopaque = null,
+    packet_sink: ?*const fn (?*anyopaque, []const u8) bool = null,
     input_mutex: std.atomic.Mutex = .unlocked,
     held_input: input_state.InputState = .{},
     status_mutex: std.atomic.Mutex = .unlocked,
@@ -200,64 +209,154 @@ pub const Session = struct {
     }
 
     pub fn requestControl(self: *Session) bool {
-        if (self.descriptor.read_only or self.data_open.load(.acquire) == 0) return false;
-        if (self.authorized.load(.acquire) != 0) return true;
-        if (self.control_requested.swap(1, .acq_rel) != 0) return false;
-        if (!self.sendEventEmpty("control/request")) {
-            self.control_requested.store(0, .release);
+        const now_ns = monotonicNowNs();
+        lock(&self.admission_mutex);
+        if (self.descriptor.read_only or self.data_open.load(.acquire) == 0) {
+            self.admission_mutex.unlock();
             return false;
         }
-        self.setStatus("Connected · requesting control");
-        return true;
+        if (self.authorized.load(.acquire) != 0) {
+            self.admission_mutex.unlock();
+            return true;
+        }
+        const claimed = self.claimControlRequestLocked(now_ns);
+        self.admission_mutex.unlock();
+        return claimed and self.sendClaimedControlRequest(now_ns);
     }
 
     pub fn releaseControl(self: *Session) bool {
         if (self.descriptor.read_only) return false;
-        self.releaseHeldInput();
+        lock(&self.admission_mutex);
+        self.pending_inputs.clear(self.allocator);
+        self.cancelInputReplayLocked();
+        const held = self.takeHeldInputLocked();
         self.authorized.store(0, .release);
         self.remote_controller.store(0, .release);
-        self.implicit_hosting.store(0, .release);
-        self.control_requested.store(0, .release);
+        self.clearControlRequestLocked();
+        self.admission_mutex.unlock();
+        self.sendHeldInputReleases(held);
         return self.sendEventEmpty("control/release");
     }
 
     pub fn movePointer(self: *Session, x: u16, y: u16) bool {
-        if (!self.ensureInput()) return false;
+        lock(&self.admission_mutex);
+        const now_ns = monotonicNowNs();
+        const admission = self.inputRouteLocked(now_ns);
+        if (admission.route == .reject) {
+            self.admission_mutex.unlock();
+            return false;
+        }
+        if (admission.route == .queue) {
+            const accepted = self.pending_inputs.pushMove(self.allocator, x, y, now_ns).accepted();
+            self.admission_mutex.unlock();
+            if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+            return accepted;
+        }
         const packet = input_packets.move(x, y);
+        self.admission_mutex.unlock();
+        if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
         return self.sendPacket(&packet);
     }
 
     pub fn setPointerButton(self: *Session, button: u3, pressed: bool) bool {
-        if (!self.ensureInput()) return false;
+        lock(&self.admission_mutex);
+        const now_ns = monotonicNowNs();
+        const admission = self.inputRouteLocked(now_ns);
+        if (admission.route == .reject) {
+            self.admission_mutex.unlock();
+            return false;
+        }
+        if (admission.route == .queue) {
+            const accepted = self.pending_inputs.pushButton(self.allocator, button, pressed, now_ns).accepted();
+            self.admission_mutex.unlock();
+            if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+            return accepted;
+        }
         lock(&self.input_mutex);
         if (pressed) self.held_input.pressButton(button) else self.held_input.releaseButton(button);
         self.input_mutex.unlock();
         const packet = input_packets.mouseButton(if (pressed) .down else .up, button);
+        self.admission_mutex.unlock();
+        if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
         return self.sendPacket(&packet);
     }
 
     pub fn scroll(self: *Session, delta_x: i16, delta_y: i16, control_key: bool) bool {
-        if (!self.ensureInput()) return false;
+        lock(&self.admission_mutex);
+        const now_ns = monotonicNowNs();
+        const admission = self.inputRouteLocked(now_ns);
+        if (admission.route == .reject) {
+            self.admission_mutex.unlock();
+            return false;
+        }
+        if (admission.route == .queue) {
+            const accepted = self.pending_inputs.pushScroll(
+                self.allocator,
+                delta_x,
+                delta_y,
+                control_key,
+                now_ns,
+            ).accepted();
+            self.admission_mutex.unlock();
+            if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+            return accepted;
+        }
         const packet = input_packets.scroll(delta_x, delta_y, control_key);
+        self.admission_mutex.unlock();
+        if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
         return self.sendPacket(&packet);
     }
 
     pub fn setKey(self: *Session, keysym_value: u64, pressed: bool, repeat: bool) bool {
-        if (!self.ensureInput()) return false;
+        lock(&self.admission_mutex);
+        const now_ns = monotonicNowNs();
+        const admission = self.inputRouteLocked(now_ns);
+        if (admission.route == .reject) {
+            self.admission_mutex.unlock();
+            return false;
+        }
+        if (admission.route == .queue) {
+            const accepted = self.pending_inputs.pushKey(
+                self.allocator,
+                keysym_value,
+                pressed,
+                repeat,
+                now_ns,
+            ).accepted();
+            self.admission_mutex.unlock();
+            if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+            return accepted;
+        }
         lock(&self.input_mutex);
         const should_send = if (pressed)
             (self.held_input.pressKey(keysym_value) catch false) or repeat
         else
             self.held_input.releaseKey(keysym_value);
         self.input_mutex.unlock();
-        return should_send and self.sendKey(if (pressed) .down else .up, keysym_value);
+        const packet = input_packets.key(if (pressed) .down else .up, keysym_value);
+        self.admission_mutex.unlock();
+        if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+        return should_send and self.sendPacket(&packet);
     }
 
     pub fn paste(self: *Session, text: []const u8) bool {
-        if (text.len > 1024 * 1024 or !self.ensureInput()) return false;
-        if (!self.sendEvent("clipboard/set", .{ .text = text })) return false;
-        native.kl_native_schedule_paste(self.native_handle, 80);
-        return true;
+        if (text.len > pending_input.max_paste_bytes) return false;
+        lock(&self.admission_mutex);
+        const now_ns = monotonicNowNs();
+        const admission = self.inputRouteLocked(now_ns);
+        if (admission.route == .reject) {
+            self.admission_mutex.unlock();
+            return false;
+        }
+        if (admission.route == .queue) {
+            const accepted = self.pending_inputs.pushPaste(self.allocator, text, now_ns).accepted();
+            self.admission_mutex.unlock();
+            if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+            return accepted;
+        }
+        self.admission_mutex.unlock();
+        if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+        return self.sendPaste(text);
     }
 
     pub fn copyStatus(self: *Session, output: []u8) usize {
@@ -269,27 +368,82 @@ pub const Session = struct {
     }
 
     pub fn syncModifiers(self: *Session, flags: u64, modifiers: anytype) void {
-        if (!self.ensureInput()) return;
+        var packets: [16][11]u8 = undefined;
+        var packet_count: usize = 0;
+        lock(&self.admission_mutex);
+        const now_ns = monotonicNowNs();
+        const admission = self.inputRouteLocked(now_ns);
+        if (admission.route == .reject) {
+            self.admission_mutex.unlock();
+            return;
+        }
         for (modifiers) |modifier| {
             var release_left = false;
             var release_right = false;
             var press_left = false;
-            lock(&self.input_mutex);
-            const left_held = self.held_input.isKeyHeld(modifier.left_keysym);
-            const right_held = self.held_input.isKeyHeld(modifier.right_keysym);
+            if (admission.route == .send_now) lock(&self.input_mutex);
+            const left_held = if (admission.route == .send_now)
+                self.held_input.isKeyHeld(modifier.left_keysym)
+            else
+                self.pending_inputs.isKeyHeld(modifier.left_keysym);
+            const right_held = if (admission.route == .send_now)
+                self.held_input.isKeyHeld(modifier.right_keysym)
+            else
+                self.pending_inputs.isKeyHeld(modifier.right_keysym);
             if ((flags & modifier.flag) != 0) {
                 if (!left_held and !right_held) {
-                    press_left = self.held_input.pressKey(modifier.left_keysym) catch false;
+                    if (admission.route == .send_now) {
+                        press_left = self.held_input.pressKey(modifier.left_keysym) catch false;
+                    } else {
+                        _ = self.pending_inputs.pushKey(
+                            self.allocator,
+                            modifier.left_keysym,
+                            true,
+                            false,
+                            now_ns,
+                        );
+                    }
                 }
             } else {
-                if (left_held) release_left = self.held_input.releaseKey(modifier.left_keysym);
-                if (right_held) release_right = self.held_input.releaseKey(modifier.right_keysym);
+                if (admission.route == .send_now) {
+                    if (left_held) release_left = self.held_input.releaseKey(modifier.left_keysym);
+                    if (right_held) release_right = self.held_input.releaseKey(modifier.right_keysym);
+                } else {
+                    if (left_held) _ = self.pending_inputs.pushKey(
+                        self.allocator,
+                        modifier.left_keysym,
+                        false,
+                        false,
+                        now_ns,
+                    );
+                    if (right_held) _ = self.pending_inputs.pushKey(
+                        self.allocator,
+                        modifier.right_keysym,
+                        false,
+                        false,
+                        now_ns,
+                    );
+                }
             }
-            self.input_mutex.unlock();
-            if (release_left) _ = self.sendKey(.up, modifier.left_keysym);
-            if (release_right) _ = self.sendKey(.up, modifier.right_keysym);
-            if (press_left) _ = self.sendKey(.down, modifier.left_keysym);
+            if (admission.route == .send_now) {
+                self.input_mutex.unlock();
+                if (release_left) {
+                    packets[packet_count] = input_packets.key(.up, modifier.left_keysym);
+                    packet_count += 1;
+                }
+                if (release_right) {
+                    packets[packet_count] = input_packets.key(.up, modifier.right_keysym);
+                    packet_count += 1;
+                }
+                if (press_left) {
+                    packets[packet_count] = input_packets.key(.down, modifier.left_keysym);
+                    packet_count += 1;
+                }
+            }
         }
+        self.admission_mutex.unlock();
+        if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+        for (packets[0..packet_count]) |*packet| _ = self.sendPacket(packet);
     }
 
     pub fn notePointerEvent(self: *Session, mapped: bool) void {
@@ -427,6 +581,7 @@ pub const Session = struct {
                     );
                 }
             },
+            .system_error => self.applyLegacyControlError(),
             .control_host => {
                 const Payload = struct {
                     event: []const u8,
@@ -440,12 +595,7 @@ pub const Session = struct {
                 self.applyControlHost(parsed.value.payload.has_host, parsed.value.payload.host_id);
             },
             .control_release => {
-                self.authorized.store(0, .release);
-                self.remote_controller.store(0, .release);
-                self.control_requested.store(0, .release);
-                self.releaseHeldInput();
-                self.cursor.clearPosition();
-                self.setStatus(if (self.descriptor.read_only) "Connected · read-only" else "Connected · control released");
+                self.applyControlRelease();
             },
             .system_disconnect, .signal_close => {
                 self.invalidateTransportState();
@@ -457,22 +607,72 @@ pub const Session = struct {
     }
 
     fn applyControlHost(self: *Session, has_host: bool, host_id: []const u8) void {
-        self.control_requested.store(0, .release);
+        var held: HeldInput = .{};
+        var release_held = false;
+        var replay_epoch: ?u64 = null;
+        lock(&self.admission_mutex);
+        self.clearControlRequestLocked();
         self.cursor.clearPosition();
         const host_is_self = has_host and self.isSelf(host_id);
         self.remote_controller.store(@intFromBool(has_host and !host_is_self), .release);
         if (self.descriptor.read_only) {
             self.authorized.store(0, .release);
-            self.releaseHeldInput();
+            self.pending_inputs.clear(self.allocator);
+            self.cancelInputReplayLocked();
+            held = self.takeHeldInputLocked();
+            release_held = true;
             self.setStatus("Connected · read-only");
         } else if (host_is_self) {
             self.authorized.store(1, .release);
             self.setStatus("Connected · controlling");
+            if (!self.input_replaying) {
+                _ = self.pending_inputs.expire(self.allocator, monotonicNowNs());
+                if (self.pending_inputs.len() > 0) {
+                    self.input_replaying = true;
+                    replay_epoch = self.input_epoch;
+                } else {
+                    self.pending_inputs.finishReplay();
+                }
+            }
         } else {
             self.authorized.store(0, .release);
-            self.releaseHeldInput();
+            self.pending_inputs.clear(self.allocator);
+            self.cancelInputReplayLocked();
+            held = self.takeHeldInputLocked();
+            release_held = true;
             self.setStatus(if (has_host) "Connected · waiting for control" else "Connected · control released");
         }
+        self.admission_mutex.unlock();
+        if (release_held) self.sendHeldInputReleases(held);
+        if (replay_epoch) |epoch| self.replayPendingInput(epoch);
+    }
+
+    fn applyControlRelease(self: *Session) void {
+        lock(&self.admission_mutex);
+        self.authorized.store(0, .release);
+        self.remote_controller.store(0, .release);
+        self.clearControlRequestLocked();
+        self.pending_inputs.clear(self.allocator);
+        self.cancelInputReplayLocked();
+        const held = self.takeHeldInputLocked();
+        self.cursor.clearPosition();
+        self.setStatus(if (self.descriptor.read_only) "Connected · read-only" else "Connected · control released");
+        self.admission_mutex.unlock();
+        self.sendHeldInputReleases(held);
+    }
+
+    fn applyLegacyControlError(self: *Session) void {
+        // The deployed v3 WebSocket silently refuses control, but Neko's
+        // legacy proxy can report a generic backend failure as system/error.
+        lock(&self.admission_mutex);
+        if (self.control_requested.load(.acquire) == 0 or self.authorized.load(.acquire) != 0) {
+            self.admission_mutex.unlock();
+            return;
+        }
+        self.clearControlRequestLocked();
+        self.pending_inputs.clear(self.allocator);
+        self.setStatus(if (self.descriptor.read_only) "Connected · read-only" else "Connected · control unavailable");
+        self.admission_mutex.unlock();
     }
 
     fn replaceSelfId(self: *Session, value: []const u8) !void {
@@ -490,31 +690,172 @@ pub const Session = struct {
         return if (self.self_id) |id| std.mem.eql(u8, id, value) else false;
     }
 
-    fn ensureInput(self: *Session) bool {
-        if (self.descriptor.read_only or self.data_open.load(.acquire) == 0) return false;
-        if (self.authorized.load(.acquire) != 0) return true;
-        _ = self.requestControl();
-        return false;
+    fn inputRouteLocked(self: *Session, now_ns: i128) InputAdmission {
+        const route = classifyInputRoute(
+            self.descriptor.read_only,
+            self.data_open.load(.acquire) != 0,
+            self.authorized.load(.acquire) != 0,
+            self.implicit_hosting.load(.acquire) != 0,
+            self.input_replaying,
+        );
+        if (route == .reject or self.authorized.load(.acquire) != 0) {
+            return .{ .route = route };
+        }
+        _ = self.expireControlRequestLocked(now_ns);
+        // A pending semantic batch has the same two-second lifetime even if
+        // its request latch was reset after a failed send.
+        if (route == .queue and self.pending_inputs.expire(self.allocator, now_ns)) {
+            self.clearControlRequestLocked();
+        }
+        const request_control = self.claimControlRequestLocked(now_ns);
+        return .{ .route = route, .request_control = request_control };
+    }
+
+    fn claimControlRequestLocked(self: *Session, now_ns: i128) bool {
+        if (self.control_requested.swap(1, .acq_rel) != 0) return false;
+        self.control_request_started_ns = now_ns;
+        return true;
+    }
+
+    fn sendClaimedControlRequest(self: *Session, started_ns: i128) bool {
+        if (builtin.is_test) return true;
+        if (!self.sendEventEmpty("control/request")) {
+            lock(&self.admission_mutex);
+            if (self.control_request_started_ns == started_ns) self.clearControlRequestLocked();
+            self.admission_mutex.unlock();
+            return false;
+        }
+        lock(&self.admission_mutex);
+        if (self.control_request_started_ns == started_ns and self.authorized.load(.acquire) == 0) {
+            self.setStatus("Connected · requesting control");
+        }
+        self.admission_mutex.unlock();
+        return true;
+    }
+
+    fn expireControlRequestLocked(self: *Session, now_ns: i128) bool {
+        const started = self.control_request_started_ns orelse return false;
+        if (now_ns < started or now_ns - started < pending_input.max_age_ns) return false;
+        self.clearControlRequestLocked();
+        return true;
+    }
+
+    fn clearControlRequestLocked(self: *Session) void {
+        self.control_requested.store(0, .release);
+        self.control_request_started_ns = null;
+    }
+
+    fn cancelInputReplayLocked(self: *Session) void {
+        self.input_epoch +%= 1;
+        self.input_replaying = false;
     }
 
     fn invalidateTransportState(self: *Session) void {
         // Revoke the gate first so no concurrent callback can enqueue new
         // input while failure teardown is clearing locally held state.
+        lock(&self.admission_mutex);
         self.revokeTransportState();
-        self.releaseHeldInput();
+        _ = self.takeHeldInputLocked();
+        self.admission_mutex.unlock();
     }
 
     fn revokeTransportState(self: *Session) void {
         self.authorized.store(0, .release);
         self.remote_controller.store(0, .release);
-        self.control_requested.store(0, .release);
+        self.clearControlRequestLocked();
         self.implicit_hosting.store(0, .release);
         self.data_open.store(0, .release);
+        self.pending_inputs.clear(self.allocator);
+        self.cancelInputReplayLocked();
         self.cursor.reset(self.allocator);
     }
 
+    fn sendPaste(self: *Session, text: []const u8) bool {
+        if (builtin.is_test) return true;
+        if (!self.sendEvent("clipboard/set", .{ .text = text })) return false;
+        native.kl_native_schedule_paste(self.native_handle, 80);
+        return true;
+    }
+
+    fn replayPendingInput(self: *Session, epoch: u64) void {
+        var queued: [pending_input.max_events]pending_input.Event = undefined;
+        var actions: [pending_input.max_events]ReplayAction = undefined;
+        while (true) {
+            lock(&self.admission_mutex);
+            if (!self.input_replaying or self.input_epoch != epoch or
+                self.authorized.load(.acquire) == 0 or self.data_open.load(.acquire) == 0)
+            {
+                self.admission_mutex.unlock();
+                return;
+            }
+            const count = self.pending_inputs.takeBatch(&queued);
+            if (count == 0) {
+                self.input_replaying = false;
+                self.pending_inputs.finishReplay();
+                self.admission_mutex.unlock();
+                return;
+            }
+            for (queued[0..count], 0..) |event, index| {
+                actions[index] = self.prepareReplayActionLocked(event);
+            }
+            self.admission_mutex.unlock();
+
+            for (actions[0..count]) |*action| {
+                switch (action.*) {
+                    .packet => |packet| _ = self.sendPacket(packet.bytes[0..packet.len]),
+                    .paste => |text| {
+                        _ = self.sendPaste(text);
+                        self.allocator.free(text);
+                    },
+                }
+            }
+        }
+    }
+
+    fn prepareReplayActionLocked(self: *Session, event: pending_input.Event) ReplayAction {
+        return switch (event) {
+            .move => |position| packetAction(&input_packets.move(position.x, position.y)),
+            .button => |button| action: {
+                lock(&self.input_mutex);
+                if (button.pressed) self.held_input.pressButton(button.button) else self.held_input.releaseButton(button.button);
+                self.input_mutex.unlock();
+                break :action packetAction(&input_packets.mouseButton(
+                    if (button.pressed) .down else .up,
+                    button.button,
+                ));
+            },
+            .scroll => |scroll_event| packetAction(&input_packets.scroll(
+                scroll_event.delta_x,
+                scroll_event.delta_y,
+                scroll_event.control_key,
+            )),
+            .key => |key| action: {
+                lock(&self.input_mutex);
+                if (key.pressed) {
+                    if (!self.held_input.isKeyHeld(key.keysym)) {
+                        _ = self.held_input.pressKey(key.keysym) catch {};
+                    }
+                } else {
+                    _ = self.held_input.releaseKey(key.keysym);
+                }
+                self.input_mutex.unlock();
+                break :action packetAction(&input_packets.key(
+                    if (key.pressed) .down else .up,
+                    key.keysym,
+                ));
+            },
+            .paste => |text| .{ .paste = text },
+        };
+    }
+
     fn sendPacket(self: *Session, bytes: []const u8) bool {
-        if (native.kl_native_send_data(self.native_handle, bytes.ptr, bytes.len)) {
+        const sent = if (self.packet_sink) |sink|
+            sink(self.packet_sink_context, bytes)
+        else if (builtin.is_test)
+            false
+        else
+            native.kl_native_send_data(self.native_handle, bytes.ptr, bytes.len);
+        if (sent) {
             _ = self.data_packets_sent.fetchAdd(1, .monotonic);
             return true;
         }
@@ -528,22 +869,104 @@ pub const Session = struct {
     }
 
     pub fn releaseHeldInput(self: *Session) void {
-        var keys: [input_state.max_held_keys]u64 = undefined;
-        var key_count: usize = 0;
-        var buttons: u8 = 0;
+        lock(&self.admission_mutex);
+        self.pending_inputs.clear(self.allocator);
+        self.cancelInputReplayLocked();
+        const held = self.takeHeldInputLocked();
+        self.admission_mutex.unlock();
+        self.sendHeldInputReleases(held);
+    }
+
+    fn takeHeldInputLocked(self: *Session) HeldInput {
+        var held: HeldInput = .{};
         lock(&self.input_mutex);
-        key_count = self.held_input.key_count;
-        @memcpy(keys[0..key_count], self.held_input.keys[0..key_count]);
-        buttons = self.held_input.buttons;
+        held.key_count = self.held_input.key_count;
+        @memcpy(held.keys[0..held.key_count], self.held_input.keys[0..held.key_count]);
+        held.buttons = self.held_input.buttons;
         self.held_input.clear();
         self.input_mutex.unlock();
+        return held;
+    }
+
+    fn sendHeldInputReleases(self: *Session, held: HeldInput) void {
         if (self.data_open.load(.acquire) == 0) return;
-        for (keys[0..key_count]) |keysym_value| _ = self.sendKey(.up, keysym_value);
+        for (held.keys[0..held.key_count]) |keysym_value| _ = self.sendKey(.up, keysym_value);
         for (0..8) |button| {
-            if ((buttons & (@as(u8, 1) << @intCast(button))) == 0) continue;
+            if ((held.buttons & (@as(u8, 1) << @intCast(button))) == 0) continue;
             const packet = input_packets.mouseButton(.up, @intCast(button));
             _ = self.sendPacket(&packet);
         }
+    }
+
+    fn sendPasteShortcut(self: *Session) void {
+        var packets: [4][11]u8 = undefined;
+        var packet_count: usize = 0;
+        lock(&self.admission_mutex);
+        const now_ns = monotonicNowNs();
+        const admission = self.inputRouteLocked(now_ns);
+        if (admission.route == .reject) {
+            self.admission_mutex.unlock();
+            return;
+        }
+        const control_l: u64 = 0xffe3;
+        const v: u64 = 'v';
+        if (admission.route == .queue) {
+            const control_was_held = self.pending_inputs.isKeyHeld(control_l);
+            const v_was_held = self.pending_inputs.isKeyHeld(v);
+            if (!control_was_held) _ = self.pending_inputs.pushKey(
+                self.allocator,
+                control_l,
+                true,
+                false,
+                now_ns,
+            );
+            if (!v_was_held) _ = self.pending_inputs.pushKey(
+                self.allocator,
+                v,
+                true,
+                false,
+                now_ns,
+            );
+            if (!v_was_held) _ = self.pending_inputs.pushKey(
+                self.allocator,
+                v,
+                false,
+                false,
+                now_ns,
+            );
+            if (!control_was_held) _ = self.pending_inputs.pushKey(
+                self.allocator,
+                control_l,
+                false,
+                false,
+                now_ns,
+            );
+            self.admission_mutex.unlock();
+            if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+            return;
+        }
+
+        lock(&self.input_mutex);
+        const control_was_held = self.held_input.isKeyHeld(control_l);
+        const v_was_held = self.held_input.isKeyHeld(v);
+        self.input_mutex.unlock();
+        if (!control_was_held) {
+            packets[packet_count] = input_packets.key(.down, control_l);
+            packet_count += 1;
+        }
+        if (!v_was_held) {
+            packets[packet_count] = input_packets.key(.down, v);
+            packet_count += 1;
+            packets[packet_count] = input_packets.key(.up, v);
+            packet_count += 1;
+        }
+        if (!control_was_held) {
+            packets[packet_count] = input_packets.key(.up, control_l);
+            packet_count += 1;
+        }
+        self.admission_mutex.unlock();
+        if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+        for (packets[0..packet_count]) |*packet| _ = self.sendPacket(packet);
     }
 };
 
@@ -664,18 +1087,50 @@ fn noteFrameSample(self: *Session) void {
 }
 
 fn onPasteReady(context: ?*anyopaque) callconv(.c) void {
-    const self = fromContext(context);
-    if (!self.ensureInput()) return;
-    const control_l: u64 = 0xffe3;
-    const v: u64 = 'v';
-    lock(&self.input_mutex);
-    const control_was_held = self.held_input.isKeyHeld(control_l);
-    const v_was_held = self.held_input.isKeyHeld(v);
-    self.input_mutex.unlock();
-    if (!control_was_held) _ = self.sendKey(.down, control_l);
-    if (!v_was_held) _ = self.sendKey(.down, v);
-    if (!v_was_held) _ = self.sendKey(.up, v);
-    if (!control_was_held) _ = self.sendKey(.up, control_l);
+    fromContext(context).sendPasteShortcut();
+}
+
+const InputRoute = enum { reject, send_now, queue };
+
+const InputAdmission = struct {
+    route: InputRoute,
+    request_control: bool = false,
+};
+
+const ReplayPacket = struct {
+    bytes: [11]u8,
+    len: u8,
+};
+
+const ReplayAction = union(enum) {
+    packet: ReplayPacket,
+    paste: []u8,
+};
+
+const HeldInput = struct {
+    keys: [input_state.max_held_keys]u64 = [_]u64{0} ** input_state.max_held_keys,
+    key_count: usize = 0,
+    buttons: u8 = 0,
+};
+
+fn packetAction(bytes: []const u8) ReplayAction {
+    std.debug.assert(bytes.len <= 11);
+    var packet: ReplayPacket = .{ .bytes = undefined, .len = @intCast(bytes.len) };
+    @memcpy(packet.bytes[0..bytes.len], bytes);
+    return .{ .packet = packet };
+}
+
+fn classifyInputRoute(read_only: bool, data_open: bool, authorized: bool, implicit_hosting: bool, replaying: bool) InputRoute {
+    if (read_only or !data_open) return .reject;
+    if (authorized) return if (replaying) .queue else .send_now;
+    if (implicit_hosting) return .send_now;
+    return .queue;
+}
+
+fn monotonicNowNs() i128 {
+    var timestamp: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC_RAW, &timestamp) != 0) return 0;
+    return @as(i128, timestamp.sec) * std.time.ns_per_s + @as(i128, timestamp.nsec);
 }
 
 fn lock(mutex: *std.atomic.Mutex) void {
@@ -699,6 +1154,13 @@ test "transport state revocation closes every input gate" {
     session.control_requested.store(1, .release);
     session.implicit_hosting.store(1, .release);
     session.cursor.updatePosition(.{ .x = 10, .y = 20 });
+    try std.testing.expect(session.pending_inputs.pushKey(
+        std.testing.allocator,
+        'q',
+        true,
+        false,
+        10,
+    ).accepted());
 
     session.revokeTransportState();
 
@@ -706,5 +1168,181 @@ test "transport state revocation closes every input gate" {
     try std.testing.expect(!session.isAuthorized());
     try std.testing.expect(!session.hasRemoteController());
     try std.testing.expect(!session.isControlRequested());
+    try std.testing.expectEqual(@as(usize, 0), session.pending_inputs.len());
     try std.testing.expect(!session.cursorSnapshot().position_available);
+}
+
+test "implicit hosting admits the triggering input while explicit hosting queues it" {
+    try std.testing.expectEqual(.reject, classifyInputRoute(true, true, false, true, false));
+    try std.testing.expectEqual(.reject, classifyInputRoute(false, false, false, true, false));
+    try std.testing.expectEqual(.send_now, classifyInputRoute(false, true, true, false, false));
+    try std.testing.expectEqual(.queue, classifyInputRoute(false, true, true, false, true));
+    try std.testing.expectEqual(.send_now, classifyInputRoute(false, true, false, true, false));
+    try std.testing.expectEqual(.queue, classifyInputRoute(false, true, false, false, false));
+}
+
+test "legacy system error clears the request latch and pending input" {
+    var session: Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{
+            .version = connection.current_version,
+            .label = "legacy-error-test",
+            .base_url = "http://127.0.0.1",
+        },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    defer session.pending_inputs.clear(std.testing.allocator);
+    session.control_requested.store(1, .release);
+    session.control_request_started_ns = 10;
+    try std.testing.expect(session.pending_inputs.pushPaste(
+        std.testing.allocator,
+        "clipboard",
+        10,
+    ).accepted());
+    try std.testing.expect(session.pending_inputs.pushKey(
+        std.testing.allocator,
+        'x',
+        true,
+        false,
+        11,
+    ).accepted());
+
+    session.applyLegacyControlError();
+
+    try std.testing.expect(!session.isControlRequested());
+    try std.testing.expectEqual(@as(?i128, null), session.control_request_started_ns);
+    try std.testing.expectEqual(@as(usize, 0), session.pending_inputs.len());
+    try std.testing.expect(!session.pending_inputs.isKeyHeld('x'));
+    var status: [256]u8 = undefined;
+    const status_len = session.copyStatus(&status);
+    try std.testing.expectEqualStrings("Connected · control unavailable", status[0..status_len]);
+}
+
+const PacketRecorder = struct {
+    session: *Session,
+    packets: [8][11]u8 = undefined,
+    lengths: [8]usize = [_]usize{0} ** 8,
+    count: usize = 0,
+    inject_after_first: ?u64 = null,
+    injected: bool = false,
+};
+
+fn recordPacket(context: ?*anyopaque, bytes: []const u8) bool {
+    const recorder: *PacketRecorder = @ptrCast(@alignCast(context.?));
+    const index = recorder.count;
+    std.debug.assert(index < recorder.packets.len);
+    @memcpy(recorder.packets[index][0..bytes.len], bytes);
+    recorder.lengths[index] = bytes.len;
+    recorder.count += 1;
+    if (!recorder.injected) {
+        if (recorder.inject_after_first) |keysym_value| {
+            recorder.injected = true;
+            _ = recorder.session.setKey(keysym_value, true, false);
+        }
+    }
+    return true;
+}
+
+fn expectRecordedKey(recorder: *const PacketRecorder, index: usize, action: input_packets.KeyAction, keysym_value: u64) !void {
+    try std.testing.expectEqual(@as(usize, 11), recorder.lengths[index]);
+    try std.testing.expectEqual(
+        @intFromEnum(if (action == .down) input_packets.Opcode.key_down else input_packets.Opcode.key_up),
+        recorder.packets[index][0],
+    );
+    try std.testing.expectEqual(keysym_value, std.mem.readInt(u64, recorder.packets[index][3..11], .little));
+}
+
+test "explicit authorization replays semantic input in FIFO order" {
+    var session: Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{
+            .version = connection.current_version,
+            .label = "replay-test",
+            .base_url = "http://127.0.0.1",
+        },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    session.self_id = try std.testing.allocator.dupe(u8, "self");
+    defer std.testing.allocator.free(session.self_id.?);
+    var recorder: PacketRecorder = .{ .session = &session };
+    session.packet_sink_context = &recorder;
+    session.packet_sink = recordPacket;
+    session.data_open.store(1, .release);
+    try std.testing.expect(session.setKey('a', true, false));
+    try std.testing.expect(session.movePointer(20, 30));
+    try std.testing.expect(session.setKey('a', false, false));
+    try std.testing.expect(session.isControlRequested());
+    try std.testing.expectEqual(@as(usize, 3), session.pending_inputs.len());
+    try std.testing.expectEqual(@as(usize, 0), recorder.count);
+
+    session.applyControlHost(true, "self");
+
+    try std.testing.expectEqual(@as(usize, 3), recorder.count);
+    try expectRecordedKey(&recorder, 0, .down, 'a');
+    try std.testing.expectEqual(@intFromEnum(input_packets.Opcode.move), recorder.packets[1][0]);
+    try expectRecordedKey(&recorder, 2, .up, 'a');
+    try std.testing.expect(session.isAuthorized());
+    try std.testing.expect(!session.isControlRequested());
+    try std.testing.expect(!session.input_replaying);
+    try std.testing.expectEqual(@as(usize, 0), session.pending_inputs.len());
+}
+
+test "implicit hosting sends the triggering input while requesting ownership" {
+    var session: Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{
+            .version = connection.current_version,
+            .label = "implicit-admission-test",
+            .base_url = "http://127.0.0.1",
+        },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    var recorder: PacketRecorder = .{ .session = &session };
+    session.packet_sink_context = &recorder;
+    session.packet_sink = recordPacket;
+    session.data_open.store(1, .release);
+    session.implicit_hosting.store(1, .release);
+
+    try std.testing.expect(session.setKey('i', true, false));
+
+    try std.testing.expectEqual(@as(usize, 1), recorder.count);
+    try expectRecordedKey(&recorder, 0, .down, 'i');
+    try std.testing.expect(session.isControlRequested());
+    try std.testing.expectEqual(@as(usize, 0), session.pending_inputs.len());
+}
+
+test "input arriving during replay remains behind the extracted batch" {
+    var session: Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{
+            .version = connection.current_version,
+            .label = "late-replay-test",
+            .base_url = "http://127.0.0.1",
+        },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    var recorder: PacketRecorder = .{
+        .session = &session,
+        .inject_after_first = 'b',
+    };
+    session.packet_sink_context = &recorder;
+    session.packet_sink = recordPacket;
+    session.data_open.store(1, .release);
+    session.authorized.store(1, .release);
+    session.input_replaying = true;
+    try std.testing.expect(session.pending_inputs.pushKey(std.testing.allocator, 'a', true, false, 10).accepted());
+    try std.testing.expect(session.pending_inputs.pushKey(std.testing.allocator, 'a', false, false, 11).accepted());
+
+    session.replayPendingInput(session.input_epoch);
+
+    try std.testing.expectEqual(@as(usize, 3), recorder.count);
+    try expectRecordedKey(&recorder, 0, .down, 'a');
+    try expectRecordedKey(&recorder, 1, .up, 'a');
+    try expectRecordedKey(&recorder, 2, .down, 'b');
+    try std.testing.expect(recorder.injected);
+    try std.testing.expect(!session.input_replaying);
 }

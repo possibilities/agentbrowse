@@ -97,9 +97,14 @@ shown in the OpenTUI frontend adapter.
 The example host releases every held key and pointer button before its picker
 opens. The adapter does the same when the renderable blurs, the terminal loses
 focus, the target changes, transport disconnects, or teardown begins. Control
-ownership remains a Live View session policy: the first attempted input
-requests control when needed, and later input is gated until Neko authorizes
-this client.
+ownership remains a Live View session policy. When Neko announces implicit
+hosting, the core sends the triggering input immediately and requests ownership
+alongside it. With explicit hosting, the core retains at most 32 semantic events
+for two seconds and replays them only after Neko identifies this session as the
+host. Adjacent motion and compatible scroll events may coalesce; keys, buttons,
+paste, and incompatible scroll remain ordering barriers. Pending input is
+cleared on refusal expiry, another host, release, transport loss, focus cleanup,
+or queue overflow.
 
 ## Native frame ownership
 
