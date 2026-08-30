@@ -501,9 +501,38 @@ test("OpenTUI translates macOS browser shortcuts by physical Kitty identity", ()
       super: true,
       option: false,
       meta: false,
+      shift: false,
+    }),
+  ).toMatchObject({ keysym: 0xff53n, forceControl: false, forceAlt: true, removeMeta: true });
+  // Shifted brackets switch tabs. Linux Chrome uses Control-Page_Up/Down and
+  // Control-Shift-Page_Up/Down would move the tab, so physical Shift is withheld.
+  expect(
+    openTuiShortcutTranslation({
+      name: "]",
+      baseCode: "]".codePointAt(0)!,
+      super: true,
+      option: false,
+      meta: false,
       shift: true,
     }),
-  ).toMatchObject({ keysym: 0xff53n, forceAlt: true, forceShift: true, removeMeta: true });
+  ).toEqual({
+    keysym: 0xff56n,
+    forceControl: true,
+    forceAlt: false,
+    forceShift: false,
+    removeShift: true,
+    removeAlt: false,
+    removeMeta: true,
+  });
+  expect(
+    openTuiShortcutTranslation({
+      name: "{",
+      super: true,
+      option: false,
+      meta: false,
+      shift: false,
+    }),
+  ).toMatchObject({ keysym: 0xff55n, forceControl: true, forceAlt: false, removeShift: true });
   expect(
     openTuiShortcutTranslation({
       name: "[",
@@ -631,6 +660,23 @@ test("translated OpenTUI modifiers preserve Shift and replace only their trigger
   ).toEqual({
     shift: true,
     control: false,
+    alt: true,
+    meta: false,
+    hyper: true,
+  });
+  expect(
+    applyOpenTuiKeyTargetModifiers(physical, {
+      keysym: 0xff55n,
+      forceControl: true,
+      forceAlt: false,
+      forceShift: false,
+      removeShift: true,
+      removeAlt: false,
+      removeMeta: true,
+    }),
+  ).toEqual({
+    shift: false,
+    control: true,
     alt: true,
     meta: false,
     hyper: true,

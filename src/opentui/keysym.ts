@@ -217,15 +217,30 @@ export function openTuiShortcutTranslation(
       };
     }
     const shortcutName = shortcutLayoutName(key);
-    // Command-[ and Command-] are macOS Chrome's back and forward; Linux
-    // Chrome navigates history with Alt-Left and Alt-Right.
-    const history = shortcutName === "[" ? 0xff51n : shortcutName === "]" ? 0xff53n : null;
-    if (history !== null) {
+    if (shortcutName === "[" || shortcutName === "]") {
+      const previous = shortcutName === "[";
+      // Shift-[ and Shift-] switch tabs in macOS Chrome; Linux Chrome uses
+      // Control-Page_Up/Page_Down. Physical Shift is withheld because
+      // Control-Shift-Page_Up/Page_Down would move the tab instead. A
+      // terminal may report the shifted symbol itself rather than Shift.
+      if (key.shift || name === "{" || name === "}") {
+        return {
+          keysym: previous ? 0xff55n : 0xff56n,
+          forceControl: true,
+          forceAlt: false,
+          forceShift: false,
+          removeShift: true,
+          removeAlt: false,
+          removeMeta: true,
+        };
+      }
+      // Command-[ and Command-] are macOS Chrome's back and forward; Linux
+      // Chrome navigates history with Alt-Left and Alt-Right.
       return {
-        keysym: history,
+        keysym: previous ? 0xff51n : 0xff53n,
         forceControl: false,
         forceAlt: true,
-        forceShift: key.shift,
+        forceShift: false,
         removeShift: false,
         removeAlt: false,
         removeMeta: true,

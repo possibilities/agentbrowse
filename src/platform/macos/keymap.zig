@@ -28,6 +28,16 @@ pub fn shortcutTranslation(
     const command = (flags & command_flag) != 0;
     const option = (flags & option_flag) != 0;
     if (command and !option) {
+        const shifted = (flags & shift_flag) != 0;
+        // Shift-[ and Shift-] switch tabs in macOS Chrome; Linux Chrome uses
+        // Control-Page_Up/Page_Down. Physical Shift is withheld because
+        // Control-Shift-Page_Up/Page_Down would move the tab instead.
+        if (shifted and (key_code == 33 or key_code == 30)) return .{
+            .physical_id = key_code,
+            .keysym = if (key_code == 33) 0xff55 else 0xff56,
+            .removed_modifiers = command_flag | shift_flag,
+            .forced_modifiers = control_flag,
+        };
         // Navigation chords match the keycode rather than the reported
         // character so they survive non-US layouts. The forced Option flag
         // reaches the guest as X11 Alt through `modifiers`, which is Linux
@@ -47,7 +57,6 @@ pub fn shortcutTranslation(
             .removed_modifiers = command_flag,
             .forced_modifiers = target.forced | (flags & shift_flag),
         };
-        const shifted = (flags & shift_flag) != 0;
         const target: u64 = switch (key_code) {
             24 => if (shifted) '+' else '=',
             27 => if (shifted) '_' else '-',
@@ -249,10 +258,21 @@ test "translates AppKit browser shortcuts and preserves navigation semantics" {
     try std.testing.expectEqual(@as(u64, 0xff51), back.keysym);
     try std.testing.expectEqual(command_flag, back.removed_modifiers);
     try std.testing.expectEqual(option_flag, back.forced_modifiers);
-    const forward = shortcutTranslation(30, command_flag | shift_flag, "}").?;
+    const forward = shortcutTranslation(30, command_flag, "]").?;
     try std.testing.expectEqual(@as(u64, 0xff53), forward.keysym);
-    try std.testing.expectEqual(option_flag | shift_flag, forward.forced_modifiers);
+    try std.testing.expectEqual(option_flag, forward.forced_modifiers);
+    // Shifted brackets switch tabs. Linux Chrome uses Control-Page_Up/Down and
+    // Control-Shift-Page_Up/Down would move the tab, so Shift is withheld.
+    const previous_tab = shortcutTranslation(33, command_flag | shift_flag, "{").?;
+    try std.testing.expectEqual(@as(u64, 0xff55), previous_tab.keysym);
+    try std.testing.expectEqual(command_flag | shift_flag, previous_tab.removed_modifiers);
+    try std.testing.expectEqual(control_flag, previous_tab.forced_modifiers);
+    const next_tab = shortcutTranslation(30, command_flag | shift_flag, "}").?;
+    try std.testing.expectEqual(@as(u64, 0xff56), next_tab.keysym);
+    try std.testing.expectEqual(command_flag | shift_flag, next_tab.removed_modifiers);
+    try std.testing.expectEqual(control_flag, next_tab.forced_modifiers);
     try std.testing.expect(shortcutTranslation(33, command_flag | option_flag, "[") == null);
+    try std.testing.expect(shortcutTranslation(30, command_flag | option_flag | shift_flag, "}") == null);
     try std.testing.expect(shortcutTranslation(33, option_flag, "[") == null);
 
     const word_backspace = shortcutTranslation(51, option_flag, "").?;

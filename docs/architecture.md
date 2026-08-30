@@ -16,13 +16,15 @@ Command went up first.
 Both frontend adapters translate macOS browser conventions before admission:
 Command-C/X/A/Z/L/T/R/F/+/−/0 become Control chords, Command-Left/Right become
 Home/End, Command-Up/Down become Control-Home/End, Command-[/] become
-Alt-Left/Right, Option-Left/Right become Control-Left/Right, and
-Option-Backspace/Forward-Delete become Control-BackSpace/Delete. Command-W/N/P/D
-are deliberately not translated: Control-W closes the guest tab, and on a
-single-tab Kernel Chromium that exits the browser and the session; Control-N
-opens a guest window, Control-P a modal print dialog, and Control-D a bookmark
-bubble. An untranslated Command chord still reaches the guest as a harmless
-Meta chord. Shift and unrelated physical modifiers are retained.
+Alt-Left/Right, Command-Shift-[/] become Control-Page_Up/Page_Down,
+Option-Left/Right become Control-Left/Right, and Option-Backspace/Forward-Delete
+become Control-BackSpace/Delete. Command-W/N/P/D are deliberately not
+translated: Control-W closes the guest tab, and on a single-tab Kernel Chromium
+that exits the browser and the session; Control-N opens a guest window,
+Control-P a modal print dialog, and Control-D a bookmark bubble. An untranslated
+Command chord still reaches the guest as a harmless Meta chord. Shift and
+unrelated physical modifiers are retained, except that tab switching withholds
+Shift because Control-Shift-Page_Up/Page_Down would move the tab instead.
 Each translated key uses only its own modifier transform, so a concurrently
 held shortcut cannot turn an unrelated key into a Control chord. The effective
 snapshot precedes the target key-down; an explicit key-up releases the target

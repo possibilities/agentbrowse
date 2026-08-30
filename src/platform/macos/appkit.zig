@@ -333,3 +333,51 @@ test "translated AppKit history navigation forces Alt and restores Command on re
     try std.testing.expectEqual(@as(usize, 0), session.held_input.key_count);
     try std.testing.expect(!session.physical_keys.hasActive());
 }
+
+test "translated AppKit tab switching withholds Shift and restores it on release" {
+    var session: session_mod.Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{ .version = connection.current_version, .label = "appkit-tab-switch-test", .base_url = "http://127.0.0.1" },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    var recorder: KeyPacketRecorder = .{};
+    session.packet_sink_context = &recorder;
+    session.packet_sink = recordKeyPacket;
+    session.data_open.store(1, .release);
+    session.authorized.store(1, .release);
+    const empty = "";
+    const brace = "}";
+
+    onKey(&session, 56, keymap.shift_flag, true, false, empty.ptr, empty.len);
+    onKey(&session, 55, keymap.shift_flag | keymap.command_flag, true, false, empty.ptr, empty.len);
+    // Command-Shift-] is Linux Chrome's Control-Page_Down. The physical Shift
+    // is withheld for the chord because Control-Shift-Page_Down moves the tab.
+    onKey(&session, 30, keymap.shift_flag | keymap.command_flag, true, false, brace.ptr, brace.len);
+    // Releasing ] while both modifiers are still held restores the physical
+    // Shift and Meta snapshot before their own flagsChanged releases arrive.
+    onKey(&session, 30, keymap.shift_flag | keymap.command_flag, false, false, brace.ptr, brace.len);
+    onKey(&session, 55, keymap.shift_flag, false, false, empty.ptr, empty.len);
+    onKey(&session, 56, 0, false, false, empty.ptr, empty.len);
+
+    const expected = [_][11]u8{
+        input_packets.key(.down, 0xffe1),
+        input_packets.key(.down, 0xffe7),
+        input_packets.key(.up, 0xffe1),
+        input_packets.key(.down, 0xffe3),
+        input_packets.key(.up, 0xffe7),
+        input_packets.key(.down, 0xff56),
+        input_packets.key(.up, 0xff56),
+        input_packets.key(.down, 0xffe1),
+        input_packets.key(.up, 0xffe3),
+        input_packets.key(.down, 0xffe7),
+        input_packets.key(.up, 0xffe7),
+        input_packets.key(.up, 0xffe1),
+    };
+    try std.testing.expectEqual(expected.len, recorder.count);
+    for (expected, 0..) |packet, index| {
+        try std.testing.expectEqualSlices(u8, &packet, &recorder.packets[index]);
+    }
+    try std.testing.expectEqual(@as(usize, 0), session.held_input.key_count);
+    try std.testing.expect(!session.physical_keys.hasActive());
+}

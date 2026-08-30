@@ -231,6 +231,44 @@ test("a Kitty Command-[ press forwards Alt before Left and its release restores 
   }
 });
 
+test("a Kitty Command-Shift-] press withholds Shift and forwards Control-Page_Down", async () => {
+  const harness = await renderableHarness();
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+
+    expect(
+      harness.internals.forwardKey(keyEvent({ name: "]", baseCode: 93, super: true, shift: true })),
+    ).toBe(true);
+    expect(session.keyCalls).toEqual([
+      { keysym: 0xffe1n, pressed: false, repeat: false },
+      { keysym: 0xffe3n, pressed: true, repeat: false },
+      { keysym: 0xffe9n, pressed: false, repeat: false },
+      { keysym: 0xffe7n, pressed: false, repeat: false },
+      { keysym: 0xffedn, pressed: false, repeat: false },
+      { keysym: 0xff56n, pressed: true, repeat: false },
+    ]);
+
+    session.keyCalls.length = 0;
+    expect(
+      harness.internals.forwardKey(
+        keyEvent({ name: "]", baseCode: 93, super: true, shift: true, eventType: "release" }),
+      ),
+    ).toBe(true);
+    expect(session.keyCalls).toEqual([
+      { keysym: 0xff56n, pressed: false, repeat: false },
+      { keysym: 0xffe1n, pressed: true, repeat: false },
+      { keysym: 0xffe3n, pressed: false, repeat: false },
+      { keysym: 0xffe9n, pressed: false, repeat: false },
+      { keysym: 0xffe7n, pressed: true, repeat: false },
+      { keysym: 0xffedn, pressed: false, repeat: false },
+    ]);
+    expect(harness.internals.activeKeys.size).toBe(0);
+  } finally {
+    await harness.dispose();
+  }
+});
+
 test("raw Option navigation remains a tap and clears translated modifiers", async () => {
   const harness = await renderableHarness();
   try {
