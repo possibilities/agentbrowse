@@ -195,7 +195,16 @@ their polling ABI owns conversion and presentation.
 
 Terminal-protocol throughput, sustained CPU/RSS for Kitty graphics versus
 block fallback, and presentation acknowledgement still need controlled adapter
-runs. The design stays on OpenTUI's public `NativeImage` and
-`ImageRenderable` APIs while carrying only measured native renderer changes.
+runs. `bun run live-view:adapter NAME --json PATH` performs that run in a real
+terminal. After one submitted frame and a configurable warmup, it reports
+OpenTUI submission cadence and age, conversion duration, skipped frame
+generations, Bun event-loop gaps, terminal dimensions, native counters, and
+exact build provenance. Run it through `script(1)` when raw PTY byte volume and
+Kitty command selection are part of the comparison; the probe itself never
+claims a terminal display acknowledgement. Run that capture directly under the
+terminal: a nested PTY relay may consume or omit capability replies and make a
+supported Kitty medium appear unavailable. The design stays on OpenTUI's
+public `NativeImage` and `ImageRenderable` APIs while carrying only measured
+native renderer changes.
 `config/opentui-carry.json` records its exact source and package artifact so the
 pin can be removed cleanly when upstream contains the same behavior.
