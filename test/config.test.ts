@@ -28,7 +28,18 @@ test("deployment defaults retain shared policy but require installed backends", 
     path,
     backends: [],
     images: { defaultImage: null },
-    browser: { nekoLogLevel: "info", timezone: null },
+    browser: {
+      nekoLogLevel: "info",
+      timezone: null,
+      video: {
+        screenRefreshRate: 60,
+        fps: 30,
+        cpuUsed: 4,
+        threads: 4,
+        targetBitrateBps: 2_396_160,
+        keyframeMaxDistance: 30,
+      },
+    },
     provider: {
       name: "agentbrowse",
       description: "Manage ordered Kernel browser backends",
@@ -73,6 +84,12 @@ test("version 2 preserves backend order and applies safe Apple defaults", () => 
     AGENTBROWSE_CONFIG: path,
     AGENTBROWSE_IMAGE: "override@test",
     AGENTBROWSE_DISCOVERY_COMMAND_TIMEOUT_MS: "1200",
+    AGENTBROWSE_BROWSER_VIDEO_FPS: "30",
+    AGENTBROWSE_BROWSER_VIDEO_SCREEN_REFRESH_RATE: "60",
+    AGENTBROWSE_BROWSER_VIDEO_CPU_USED: "8",
+    AGENTBROWSE_BROWSER_VIDEO_THREADS: "2",
+    AGENTBROWSE_BROWSER_VIDEO_TARGET_BITRATE_BPS: "2396160",
+    AGENTBROWSE_BROWSER_VIDEO_KEYFRAME_MAX_DISTANCE: "120",
   });
 
   expect(config.backends.map((backend) => [backend.id, backend.type])).toEqual([
@@ -87,6 +104,69 @@ test("version 2 preserves backend order and applies safe Apple defaults", () => 
   });
   expect(config.images.defaultImage).toBe("override@test");
   expect(config.discovery.commandTimeoutMs).toBe(1_200);
+  expect(config.browser.video).toEqual({
+    screenRefreshRate: 60,
+    fps: 30,
+    cpuUsed: 8,
+    threads: 2,
+    targetBitrateBps: 2_396_160,
+    keyframeMaxDistance: 120,
+  });
+});
+
+test("backend video policy merges over shared defaults and under environment overrides", () => {
+  const path = configPath();
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 2,
+      backends: [
+        {
+          id: "remote-docker",
+          type: "docker",
+          context: "remote-browser",
+          remoteHost: "browser-host",
+          networkAddress: "192.0.2.10",
+          video: { fps: 60, targetBitrateBps: 4_792_320, keyframeMaxDistance: 60 },
+        },
+        { id: "apple-container-local", type: "apple-container" },
+      ],
+    }),
+  );
+
+  const config = loadAgentbrowseConfig({
+    AGENTBROWSE_CONFIG: path,
+    AGENTBROWSE_BROWSER_VIDEO_THREADS: "2",
+  });
+  expect(config.backends[0]?.video).toEqual({
+    screenRefreshRate: 60,
+    fps: 60,
+    cpuUsed: 4,
+    threads: 2,
+    targetBitrateBps: 4_792_320,
+    keyframeMaxDistance: 60,
+  });
+  expect(config.backends[1]?.video).toBeUndefined();
+  expect(config.browser.video).toMatchObject({ fps: 30, threads: 2 });
+});
+
+test("video policy rejects duplicated capture frames and non-realtime encoder effort", () => {
+  const path = configPath();
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 2,
+      browser: { video: { screenRefreshRate: 30, fps: 60 } },
+    }),
+  );
+  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow(
+    "fps must not exceed screenRefreshRate",
+  );
+
+  writeFileSync(path, JSON.stringify({ version: 2, browser: { video: { cpuUsed: 0 } } }));
+  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow(
+    "cpuUsed must be an integer from 1 to 16",
+  );
 });
 
 test("invalid versions, duplicate ids, and unsafe Apple capacity fail locally", () => {

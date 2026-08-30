@@ -1,7 +1,15 @@
 import { expect, test } from "bun:test";
 
-import { type BackendCommand, type CommandResult, DockerFarmBackend } from "../cli/backend.ts";
-import { profileFor, targetFor } from "../cli/model.ts";
+import {
+  type BackendCommand,
+  browserVideoVariables,
+  type CommandResult,
+  type ContainerState,
+  canonicalJson,
+  DockerFarmBackend,
+  verifyBrowserVideoEnvironment,
+} from "../cli/backend.ts";
+import { CHROMIUM_FLAGS, profileFor, targetFor } from "../cli/model.ts";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
 
 const ok = (stdout = ""): CommandResult => ({ exitCode: 0, stdout, stderr: "" });
@@ -25,6 +33,75 @@ function backend(command: BackendCommand, commandTimeoutMs = 2_000): DockerFarmB
     { command },
   );
 }
+
+test("video environment retains complete Neko VP8 pipelines and rejects compatibility overrides", () => {
+  const video = loadAgentbrowseConfig({
+    AGENTBROWSE_CONFIG: "/tmp/agentbrowse-backend-test-does-not-exist.json",
+  }).browser.video;
+  const variables = browserVideoVariables(video);
+  expect(variables.slice(0, 2)).toEqual([
+    "NEKO_DESKTOP_SCREEN=1920x1080@60",
+    "NEKO_CAPTURE_VIDEO_IDS=main",
+  ]);
+  const pipelineVariable = variables[2]!;
+  const pipelines = JSON.parse(pipelineVariable.slice(pipelineVariable.indexOf("=") + 1));
+  const gstParams = {
+    "buffer-initial-size": "(3072 * 2)",
+    "buffer-optimal-size": "(3072 * 3)",
+    "buffer-size": "(3072 * 4)",
+    "cpu-used": "4",
+    deadline: "1",
+    "end-usage": "cbr",
+    "keyframe-max-dist": "30",
+    "max-quantizer": "20",
+    "min-quantizer": "4",
+    "target-bitrate": "round(2396160)",
+    threads: "4",
+    undershoot: "95",
+  };
+  expect(pipelines).toEqual({
+    legacy: { fps: "30", gst_encoder: "vp8enc", gst_params: gstParams, show_pointer: true },
+    main: { fps: "30", gst_encoder: "vp8enc", gst_params: gstParams, show_pointer: false },
+  });
+
+  const state: ContainerState = {
+    image: "browser@test",
+    labels: {},
+    environment: variables,
+    command: [],
+    running: true,
+    addresses: [],
+    bindings: {},
+    mounts: [],
+  };
+  expect(() => verifyBrowserVideoEnvironment(state, video, "testing")).not.toThrow();
+  expect(() =>
+    verifyBrowserVideoEnvironment(
+      { ...state, environment: variables.slice(0, 2) },
+      video,
+      "testing",
+    ),
+  ).toThrow("uses different Live View capture settings");
+  expect(() =>
+    verifyBrowserVideoEnvironment(
+      { ...state, environment: [variables[0]!.replace("@60", "@30"), ...variables.slice(1)] },
+      video,
+      "testing",
+    ),
+  ).toThrow("uses different Live View capture settings");
+  for (const compatibilityOverride of ["NEKO_SCREEN=1920x1080@25", "NEKO_LEGACY=false"]) {
+    expect(() =>
+      verifyBrowserVideoEnvironment(
+        { ...state, environment: [...variables, compatibilityOverride] },
+        video,
+        "testing",
+      ),
+    ).toThrow("overrides Live View capture compatibility settings");
+  }
+  expect(canonicalJson({ z: 1, a: { z: 2, a: 3 }, m: [{ b: 1, a: 2 }] })).toBe(
+    '{"a":{"a":3,"z":2},"m":[{"a":2,"b":1}],"z":1}',
+  );
+});
 
 test("remote discovery has a shorter host deadline when the caller supplies cancellation", async () => {
   const seenSignals: Array<AbortSignal | undefined> = [];
@@ -159,6 +236,89 @@ test("browser launch mounts the exact durable profile volume writable", async ()
   expect(seen[1]?.[mountIndex + 1]).toBe(
     "type=volume,src=agentbrowse-profile-testing,dst=/home/kernel/user-data",
   );
+  expect(seen[1]).toContain("NEKO_DESKTOP_SCREEN=1920x1080@60");
+  expect(seen[1]).toContain("NEKO_CAPTURE_VIDEO_IDS=main");
+  expect(seen[1]?.some((value) => value.includes('"keyframe-max-dist":"30"'))).toBe(true);
+});
+
+test("Docker launch and verification use the backend video override", async () => {
+  const config = loadAgentbrowseConfig({
+    AGENTBROWSE_CONFIG: `${import.meta.dir}/../config.example.json`,
+  });
+  const backendConfig = config.backends[0];
+  if (backendConfig?.type !== "docker" || backendConfig.video === undefined) {
+    throw new Error("config.example.json must define a Docker video override");
+  }
+
+  const seen: string[][] = [];
+  const docker = new DockerFarmBackend(backendConfig, config, {
+    command: async (args) => {
+      seen.push([...args]);
+      return ok("container-id");
+    },
+  });
+  const target = targetFor("testing-deadbeef", 3, {
+    profile: "testing",
+    backend: backendConfig.id,
+  });
+  const image = "agentbrowse/kernel-headful:test";
+
+  await docker.runBrowser({ target, image, nekoLogLevel: "info" });
+
+  expect(seen).toHaveLength(1);
+  expect(seen[0]?.some((value) => value.includes('"fps":"60"'))).toBe(true);
+
+  const stateWithVideo = (environment: readonly string[]): ContainerState => ({
+    image,
+    labels: {
+      "dev.agentbrowse.managed": "true",
+      "dev.agentbrowse.role": "kernel-browser",
+      "dev.agentbrowse.backend": backendConfig.id,
+      "dev.agentbrowse.target": target.name,
+      "dev.agentbrowse.profile": target.profile,
+      "dev.agentbrowse.slot": String(target.slot),
+    },
+    environment: [
+      "ENABLE_WEBRTC=true",
+      `CHROMIUM_FLAGS=${CHROMIUM_FLAGS}`,
+      `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`,
+      `NEKO_WEBRTC_NAT1TO1=${backendConfig.networkAddress}`,
+      ...environment,
+    ],
+    command: [],
+    running: true,
+    addresses: [],
+    bindings: {
+      "8080/tcp": [{ hostIp: "127.0.0.1", hostPort: String(target.httpPort) }],
+      [`${target.webrtcPort}/udp`]: [
+        { hostIp: backendConfig.networkAddress!, hostPort: String(target.webrtcPort) },
+      ],
+      "9222/tcp": [{ hostIp: backendConfig.networkAddress!, hostPort: String(target.cdpPort) }],
+    },
+    mounts: [
+      {
+        type: "volume",
+        name: profileFor(target.profile).volume,
+        destination: "/home/kernel/user-data",
+        writable: true,
+      },
+    ],
+  });
+
+  await expect(
+    docker.verifyContainer(
+      stateWithVideo(browserVideoVariables(backendConfig.video)),
+      target,
+      image,
+    ),
+  ).resolves.toBeUndefined();
+  await expect(
+    docker.verifyContainer(
+      stateWithVideo(browserVideoVariables(config.browser.video)),
+      target,
+      image,
+    ),
+  ).rejects.toMatchObject({ code: "browser_drift" });
 });
 
 test("missing profile inspection accepts a remote Docker lowercase response", async () => {

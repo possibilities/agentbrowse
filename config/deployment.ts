@@ -15,6 +15,7 @@ export interface DockerBackendConfig {
   readonly remoteHost: string;
   readonly networkAddress: string | null;
   readonly networkAddressCommand: string | null;
+  readonly video?: BrowserVideoConfig;
 }
 
 export interface AppleContainerBackendConfig {
@@ -25,16 +26,30 @@ export interface AppleContainerBackendConfig {
   readonly maxTargets: 1;
   readonly cpus: 2;
   readonly memory: "6G";
+  readonly video?: BrowserVideoConfig;
 }
 
 export type BackendConfig = DockerBackendConfig | AppleContainerBackendConfig;
+
+export interface BrowserVideoConfig {
+  readonly screenRefreshRate: number;
+  readonly fps: number;
+  readonly cpuUsed: number;
+  readonly threads: number;
+  readonly targetBitrateBps: number;
+  readonly keyframeMaxDistance: number;
+}
 
 export interface AgentbrowseConfig {
   readonly version: 2;
   readonly path: string;
   readonly backends: readonly BackendConfig[];
   readonly images: { readonly defaultImage: string | null };
-  readonly browser: { readonly nekoLogLevel: string; readonly timezone: string | null };
+  readonly browser: {
+    readonly nekoLogLevel: string;
+    readonly timezone: string | null;
+    readonly video: BrowserVideoConfig;
+  };
   readonly provider: { readonly name: string; readonly description: string };
   readonly liveView: {
     readonly labelPrefix: string;
@@ -51,6 +66,14 @@ const DEFAULT_DISCOVERY_COMMAND_TIMEOUT_MS = 2_000;
 const MIN_DISCOVERY_COMMAND_TIMEOUT_MS = 100;
 const MAX_DISCOVERY_COMMAND_TIMEOUT_MS = 4_000;
 const BACKEND_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+const DEFAULT_BROWSER_VIDEO: BrowserVideoConfig = {
+  screenRefreshRate: 60,
+  fps: 30,
+  cpuUsed: 4,
+  threads: 4,
+  targetBitrateBps: 2_396_160,
+  keyframeMaxDistance: 30,
+};
 
 export function agentbrowseConfigPath(env: AgentbrowseEnvironment = process.env): string {
   const explicit = env.AGENTBROWSE_CONFIG;
@@ -74,6 +97,7 @@ export function loadAgentbrowseConfig(
   const root = readConfigFile(path);
   const images = objectValue(root, "images", path);
   const browser = objectValue(root, "browser", path);
+  const browserVideo = objectValue(browser, "video", `${path}: browser`);
   const provider = objectValue(root, "provider", path);
   const liveView = objectValue(root, "liveView", path);
   const discovery = objectValue(root, "discovery", path);
@@ -85,10 +109,17 @@ export function loadAgentbrowseConfig(
     throw invalidConfiguration(`${path} has unsupported version ${String(root.version)}`);
   }
 
+  const sharedVideo = configuredBrowserVideo(
+    env,
+    browserVideo,
+    `${path}: browser.video`,
+    DEFAULT_BROWSER_VIDEO,
+  );
+
   return {
     version: 2,
     path,
-    backends: parseBackends(root.backends, path),
+    backends: parseBackends(root.backends, path, env, sharedVideo),
     images: {
       defaultImage: configuredString(env, "AGENTBROWSE_IMAGE", images, "defaultImage", path),
     },
@@ -97,6 +128,7 @@ export function loadAgentbrowseConfig(
         configuredString(env, "AGENTBROWSE_NEKO_LOG_LEVEL", browser, "nekoLogLevel", path) ??
         "info",
       timezone: configuredString(env, "AGENTBROWSE_BROWSER_TIMEZONE", browser, "timezone", path),
+      video: sharedVideo,
     },
     provider: {
       name:
@@ -144,7 +176,101 @@ export function loadAgentbrowseConfig(
   };
 }
 
-function parseBackends(value: unknown, path: string): readonly BackendConfig[] {
+function configuredBrowserVideo(
+  env: AgentbrowseEnvironment,
+  object: JsonObject,
+  path: string,
+  fallback: BrowserVideoConfig,
+): BrowserVideoConfig {
+  const video = {
+    screenRefreshRate: configuredScreenRefreshRate(env, object, path, fallback.screenRefreshRate),
+    fps: configuredInteger(
+      env,
+      "AGENTBROWSE_BROWSER_VIDEO_FPS",
+      object,
+      "fps",
+      fallback.fps,
+      1,
+      60,
+      path,
+    ),
+    cpuUsed: configuredInteger(
+      env,
+      "AGENTBROWSE_BROWSER_VIDEO_CPU_USED",
+      object,
+      "cpuUsed",
+      fallback.cpuUsed,
+      1,
+      16,
+      path,
+    ),
+    threads: configuredInteger(
+      env,
+      "AGENTBROWSE_BROWSER_VIDEO_THREADS",
+      object,
+      "threads",
+      fallback.threads,
+      1,
+      16,
+      path,
+    ),
+    targetBitrateBps: configuredInteger(
+      env,
+      "AGENTBROWSE_BROWSER_VIDEO_TARGET_BITRATE_BPS",
+      object,
+      "targetBitrateBps",
+      fallback.targetBitrateBps,
+      250_000,
+      20_000_000,
+      path,
+    ),
+    keyframeMaxDistance: configuredInteger(
+      env,
+      "AGENTBROWSE_BROWSER_VIDEO_KEYFRAME_MAX_DISTANCE",
+      object,
+      "keyframeMaxDistance",
+      fallback.keyframeMaxDistance,
+      1,
+      120,
+      path,
+    ),
+  };
+  if (video.fps > video.screenRefreshRate) {
+    throw invalidConfiguration(`${path}: fps must not exceed screenRefreshRate`);
+  }
+  return video;
+}
+
+function configuredScreenRefreshRate(
+  env: AgentbrowseEnvironment,
+  object: JsonObject,
+  path: string,
+  fallback: number,
+): number {
+  const value = configuredInteger(
+    env,
+    "AGENTBROWSE_BROWSER_VIDEO_SCREEN_REFRESH_RATE",
+    object,
+    "screenRefreshRate",
+    fallback,
+    10,
+    60,
+    path,
+  );
+  if (value !== 10 && value !== 25 && value !== 30 && value !== 60) {
+    throw invalidConfiguration(
+      `AGENTBROWSE_BROWSER_VIDEO_SCREEN_REFRESH_RATE or ${path}: screenRefreshRate must be 10, 25, 30, or 60`,
+    );
+  }
+  return value;
+}
+
+function parseBackends(
+  value: unknown,
+  path: string,
+  env: AgentbrowseEnvironment,
+  sharedVideo: BrowserVideoConfig,
+): readonly BackendConfig[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length === 0) {
     throw invalidConfiguration(`${path}: backends must be a non-empty array`);
@@ -161,8 +287,19 @@ function parseBackends(value: unknown, path: string): readonly BackendConfig[] {
     if (ids.has(id)) throw invalidConfiguration(`${path}: duplicate backend id: ${id}`);
     ids.add(id);
 
-    if (entry.type === "docker") return parseDockerBackend(entry, id, path, index);
-    if (entry.type === "apple-container") return parseAppleBackend(entry, id, path, index);
+    const location = `${path}: backends[${index}]`;
+    const video =
+      entry.video === undefined
+        ? undefined
+        : configuredBrowserVideo(
+            env,
+            objectValue(entry, "video", location),
+            `${location}.video`,
+            sharedVideo,
+          );
+
+    if (entry.type === "docker") return parseDockerBackend(entry, id, path, index, video);
+    if (entry.type === "apple-container") return parseAppleBackend(entry, id, path, index, video);
     throw invalidConfiguration(`${path}: backends[${index}].type is unsupported`);
   });
 }
@@ -172,6 +309,7 @@ function parseDockerBackend(
   id: string,
   path: string,
   index: number,
+  video: BrowserVideoConfig | undefined,
 ): DockerBackendConfig {
   const location = `${path}: backends[${index}]`;
   const networkAddress = optionalString(entry, "networkAddress", location);
@@ -190,6 +328,7 @@ function parseDockerBackend(
     remoteHost: requiredString(entry, "remoteHost", location),
     networkAddress,
     networkAddressCommand,
+    ...(video === undefined ? {} : { video }),
   };
 }
 
@@ -198,6 +337,7 @@ function parseAppleBackend(
   id: string,
   path: string,
   index: number,
+  video: BrowserVideoConfig | undefined,
 ): AppleContainerBackendConfig {
   const location = `${path}: backends[${index}]`;
   const command = optionalString(entry, "command", location) ?? "/usr/local/bin/container";
@@ -222,6 +362,7 @@ function parseAppleBackend(
     maxTargets: 1,
     cpus: 2,
     memory,
+    ...(video === undefined ? {} : { video }),
   };
 }
 

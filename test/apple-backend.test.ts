@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import { APPLE_NAT_WRAPPER, AppleContainerFarmBackend } from "../cli/apple-backend.ts";
 import type { BackendCommand, CommandResult } from "../cli/backend.ts";
+import { browserVideoVariables } from "../cli/backend.ts";
 import { PROFILE_MOUNT_PATH, profileFor, targetFor } from "../cli/model.ts";
 import type { AgentbrowseConfig, AppleContainerBackendConfig } from "../config/deployment.ts";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
@@ -58,7 +59,11 @@ function inspectDocument(
         initProcess: {
           executable: "/bin/sh",
           arguments: ["-c", APPLE_NAT_WRAPPER],
-          environment: ["ENABLE_WEBRTC=true", `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`],
+          environment: [
+            "ENABLE_WEBRTC=true",
+            `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`,
+            ...browserVideoVariables(config().browser.video),
+          ],
         },
         mounts: [
           {
@@ -150,6 +155,8 @@ test("Apple launch is bounded to 2 CPUs, 6G, exact labels, and no publish or pri
   expect(call).toContain(
     "type=volume,source=agentbrowse-profile-testing,target=/home/kernel/user-data",
   );
+  expect(call).toContain("NEKO_DESKTOP_SCREEN=1920x1080@60");
+  expect(call).toContain("NEKO_CAPTURE_VIDEO_IDS=main");
   expect(call).toContain(APPLE_NAT_WRAPPER);
 });
 

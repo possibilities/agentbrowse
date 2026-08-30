@@ -18,6 +18,7 @@ import {
   type ProfileState,
   type RunBrowserInput,
   validateReadyTimeout,
+  verifyBrowserVideoEnvironment,
   verifyCommonOwnership,
 } from "./backend.ts";
 import { CliError } from "./errors.ts";
@@ -350,6 +351,11 @@ export class AppleContainerFarmBackend implements FarmBackend {
     if (!state.environment.includes(`NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`)) {
       drift(`${target.container} uses a different WebRTC mux port`);
     }
+    verifyBrowserVideoEnvironment(
+      state,
+      this.backendConfig.video ?? this.config.browser.video,
+      target.container,
+    );
     if (!state.command.includes(APPLE_NAT_WRAPPER)) {
       drift(`${target.container} does not discover its Direct address for Neko`);
     }
@@ -403,7 +409,13 @@ export class AppleContainerFarmBackend implements FarmBackend {
       "/dev/shm",
       "--mount",
       `type=volume,source=${profile.volume},target=${PROFILE_MOUNT_PATH}`,
-      ...browserEnvironment(target, null, nekoLogLevel, this.config.browser.timezone),
+      ...browserEnvironment(
+        target,
+        null,
+        nekoLogLevel,
+        this.config.browser.timezone,
+        this.backendConfig.video ?? this.config.browser.video,
+      ),
       "--entrypoint",
       "/bin/sh",
       image,

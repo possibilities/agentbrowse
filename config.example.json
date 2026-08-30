@@ -8,7 +8,12 @@
       "expectedEndpoint": "ssh://browser-host",
       "expectedEngine": "browser-host",
       "remoteHost": "browser-host",
-      "networkAddress": "192.0.2.10"
+      "networkAddress": "192.0.2.10",
+      "video": {
+        "fps": 60,
+        "targetBitrateBps": 4792320,
+        "keyframeMaxDistance": 60
+      }
     },
     {
       "id": "apple-container-local",
@@ -24,7 +29,15 @@
   },
   "browser": {
     "nekoLogLevel": "info",
-    "timezone": "UTC"
+    "timezone": "UTC",
+    "video": {
+      "screenRefreshRate": 60,
+      "fps": 30,
+      "cpuUsed": 4,
+      "threads": 4,
+      "targetBitrateBps": 2396160,
+      "keyframeMaxDistance": 30
+    }
   },
   "provider": {
     "name": "agentbrowse",

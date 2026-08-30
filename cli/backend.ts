@@ -1,4 +1,8 @@
-import type { AgentbrowseConfig, DockerBackendConfig } from "../config/deployment.ts";
+import type {
+  AgentbrowseConfig,
+  BrowserVideoConfig,
+  DockerBackendConfig,
+} from "../config/deployment.ts";
 import { KERNEL_HEADFUL_IMAGE_LOCK } from "../config/kernel-headful-image.ts";
 import { CliError } from "./errors.ts";
 import {
@@ -652,6 +656,11 @@ export class DockerFarmBackend implements FarmBackend {
     if (!state.environment.includes(`NEKO_WEBRTC_NAT1TO1=${networkAddress}`)) {
       drift(`${target.container} uses a different WebRTC NAT address`);
     }
+    verifyBrowserVideoEnvironment(
+      state,
+      this.backendConfig.video ?? this.config.browser.video,
+      target.container,
+    );
     if (!hasBinding(state, "8080/tcp", "127.0.0.1", target.httpPort)) {
       drift(`${target.container} uses a different Live View HTTP bind`);
     }
@@ -715,7 +724,13 @@ export class DockerFarmBackend implements FarmBackend {
       `${networkAddress}:${target.webrtcPort}:${target.webrtcPort}/udp`,
       "--publish",
       `${networkAddress}:${target.cdpPort}:9222`,
-      ...browserEnvironment(target, networkAddress, nekoLogLevel, this.config.browser.timezone),
+      ...browserEnvironment(
+        target,
+        networkAddress,
+        nekoLogLevel,
+        this.config.browser.timezone,
+        this.backendConfig.video ?? this.config.browser.video,
+      ),
       image,
     ];
     const result = await this.runCommand(args);
@@ -806,6 +821,7 @@ export function browserEnvironment(
   networkAddress: string | null,
   nekoLogLevel: string,
   timezone: string | null,
+  video: BrowserVideoConfig,
 ): string[] {
   return [
     "--env",
@@ -820,6 +836,7 @@ export function browserEnvironment(
     `CHROMIUM_FLAGS=${CHROMIUM_FLAGS}`,
     "--env",
     "ENABLE_WEBRTC=true",
+    ...browserVideoVariables(video).flatMap((variable) => ["--env", variable]),
     "--env",
     `NEKO_WEBRTC_UDPMUX=${target.webrtcPort}`,
     ...(networkAddress === null ? [] : ["--env", `NEKO_WEBRTC_NAT1TO1=${networkAddress}`]),
@@ -827,6 +844,65 @@ export function browserEnvironment(
     `NEKO_LOG_LEVEL=${nekoLogLevel}`,
     ...(timezone === null ? [] : ["--env", `TZ=${timezone}`]),
   ];
+}
+
+export function browserVideoVariables(video: BrowserVideoConfig): string[] {
+  const pipeline = (showPointer: boolean) => ({
+    fps: String(video.fps),
+    gst_encoder: "vp8enc",
+    gst_params: {
+      "target-bitrate": `round(${video.targetBitrateBps})`,
+      "cpu-used": String(video.cpuUsed),
+      "end-usage": "cbr",
+      threads: String(video.threads),
+      deadline: "1",
+      undershoot: "95",
+      "buffer-size": "(3072 * 4)",
+      "buffer-initial-size": "(3072 * 2)",
+      "buffer-optimal-size": "(3072 * 3)",
+      "keyframe-max-dist": String(video.keyframeMaxDistance),
+      "min-quantizer": "4",
+      "max-quantizer": "20",
+    },
+    show_pointer: showPointer,
+  });
+  const pipelines = canonicalJson({ legacy: pipeline(true), main: pipeline(false) });
+  return [
+    `NEKO_DESKTOP_SCREEN=1920x1080@${video.screenRefreshRate}`,
+    "NEKO_CAPTURE_VIDEO_IDS=main",
+    `NEKO_CAPTURE_VIDEO_PIPELINES=${pipelines}`,
+  ];
+}
+
+export function verifyBrowserVideoEnvironment(
+  state: ContainerState,
+  video: BrowserVideoConfig,
+  container: string,
+): void {
+  if (!browserVideoVariables(video).every((variable) => state.environment.includes(variable))) {
+    drift(`${container} uses different Live View capture settings`);
+  }
+  if (
+    state.environment.some(
+      (variable) => variable.startsWith("NEKO_SCREEN=") || variable.startsWith("NEKO_LEGACY="),
+    )
+  ) {
+    drift(`${container} overrides Live View capture compatibility settings`);
+  }
+}
+
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortJson(value));
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJson);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, entry]) => [key, sortJson(entry)]),
+  );
 }
 
 export function targetFromLabels(

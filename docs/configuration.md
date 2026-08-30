@@ -10,8 +10,8 @@ The two backend shapes are deliberately separate:
 
 | Type | Required fields | Optional fields |
 |---|---|---|
-| `docker` | `id`, `context`, `remoteHost`, and exactly one of `networkAddress` or `networkAddressCommand` | `expectedEndpoint`, `expectedEngine` |
-| `apple-container` | `id` | `command` (`/usr/local/bin/container`), `applicationRoot` (the conventional agentbrowse-infra runtime root), `maxTargets` (1), `cpus` (2), `memory` (`6G`) |
+| `docker` | `id`, `context`, `remoteHost`, and exactly one of `networkAddress` or `networkAddressCommand` | `expectedEndpoint`, `expectedEngine`, partial `video` override |
+| `apple-container` | `id` | `command` (`/usr/local/bin/container`), `applicationRoot` (the conventional agentbrowse-infra runtime root), `maxTargets` (1), `cpus` (2), `memory` (`6G`), partial `video` override |
 
 Apple's safe local shape is fixed to one 2-CPU, 6-GiB target. The application
 root and command, when overridden, must be absolute paths. Duplicate or invalid
@@ -52,6 +52,12 @@ Shared policy fields remain under `browser`, `provider`, `liveView`, and
 | `images.defaultImage` | `AGENTBROWSE_IMAGE` |
 | `browser.nekoLogLevel` | `AGENTBROWSE_NEKO_LOG_LEVEL` |
 | `browser.timezone` | `AGENTBROWSE_BROWSER_TIMEZONE` |
+| `browser.video.screenRefreshRate` | `AGENTBROWSE_BROWSER_VIDEO_SCREEN_REFRESH_RATE` |
+| `browser.video.fps` | `AGENTBROWSE_BROWSER_VIDEO_FPS` |
+| `browser.video.cpuUsed` | `AGENTBROWSE_BROWSER_VIDEO_CPU_USED` |
+| `browser.video.threads` | `AGENTBROWSE_BROWSER_VIDEO_THREADS` |
+| `browser.video.targetBitrateBps` | `AGENTBROWSE_BROWSER_VIDEO_TARGET_BITRATE_BPS` |
+| `browser.video.keyframeMaxDistance` | `AGENTBROWSE_BROWSER_VIDEO_KEYFRAME_MAX_DISTANCE` |
 | `provider.name` | `AGENTBROWSE_PROVIDER_NAME` |
 | `provider.description` | `AGENTBROWSE_PROVIDER_DESCRIPTION` |
 | `liveView.labelPrefix` | `AGENTBROWSE_CONNECTION_LABEL_PREFIX` |
@@ -59,6 +65,25 @@ Shared policy fields remain under `browser`, `provider`, `liveView`, and
 | `liveView.password` | `AGENTBROWSE_LIVE_VIEW_PASSWORD` |
 | `liveView.readOnly` | `AGENTBROWSE_LIVE_VIEW_READ_ONLY` |
 | `discovery.commandTimeoutMs` | `AGENTBROWSE_DISCOVERY_COMMAND_TIMEOUT_MS` |
+
+The shared video default keeps Chromium's virtual display at 60 Hz while
+capturing 30 VP8 frames per second with `cpu-used=4`, four encoder threads,
+2,396,160 bits/s, and a 30-frame keyframe interval. Keeping display refresh and
+capture cadence separate avoids constraining Chromium paint to the capture
+clock. Each backend may merge a partial `video` object over that shared policy;
+the example gives the measured Docker backend 60 fps, 4,792,320 bits/s, and a
+60-frame keyframe interval while Apple remains at the conservative default.
+Environment overrides have highest precedence and apply process-wide, so use
+them for controlled tests rather than heterogeneous fleet policy. Capture fps
+must not exceed screen refresh, `cpuUsed` is at least 1, and keyframe distance is
+capped at 120 because the pinned Neko server ignores PLI/FIR.
+
+Capture settings are part of target ownership verification. After upgrading to
+this version, destroy and recreate every existing Browser target once; Browser
+profiles, cookies, and authentication are preserved. Later policy changes use
+the same explicit destroy/recreate migration. `list`, `resolve`, and `view` do
+not mutate or re-verify the container, but provider launch or `create` rejects a
+drifted existing target instead of silently running different capture settings.
 
 `AGENTBROWSE_STATE_DIR` selects an alternate directory for durable profile
 bindings. It defaults to `$XDG_STATE_HOME/agentbrowse` or

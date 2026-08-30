@@ -19,6 +19,28 @@ then restored it. The same window re-established signaling, WebRTC, the
 client-created outbound input channel, and changing decoded frames through
 bounded exponential backoff.
 
+## Capture cadence matrix
+
+The Input-to-decoded probe compared complete 1920×1080 VP8 capture profiles on
+the `artbird` Docker backend. The 25 and 60 fps rows use 60 measured trials per
+case; the conservative 30 fps confirmation uses 20. All profiles use
+`cpu-used=4`, four threads, a 60 Hz virtual display for the 30/60 rows, bitrate
+scaled with cadence, and a one-second keyframe interval.
+
+| Capture | Decoded cadence | Cell key / pointer p95 | Viewport key / pointer p95 |
+| --- | ---: | ---: | ---: |
+| 25 fps baseline | 25.2 fps | 131.4 / 132.9 ms | 142.4 / 141.8 ms |
+| 30 fps shared default | 30.2 fps | 121.8 / 121.5 ms | 129.5 / 125.2 ms |
+| 60 fps capable-backend profile | 60.0 fps | 84.1 / 82.6 ms | 89.4 / 93.1 ms |
+
+The 30 fps profile is the shared default because it improves every measured
+tail without assuming the backend can sustain 1080p60 encoding. The 60 fps
+profile remains the measured choice for `artbird`; the local Apple backend's
+two-CPU profile could not be validated while its manually managed service was
+disabled. A 300-frame keyframe interval was rejected: Neko does not act on
+receiver PLI/FIR, so loss can otherwise leave corruption until the next
+periodic keyframe.
+
 ## OpenTUI smoke run
 
 The first end-to-end OpenTUI run used an 80×24 terminal and a 1920×1080 I420
@@ -159,10 +181,11 @@ trial parameters, native counters, and Bun event-loop gaps.
 This is Input-to-decoded latency, not display acknowledgement. It bounds the
 shared capture/encode/network/jitter/decode path and headless poll, but excludes
 AppKit Metal presentation and OpenTUI conversion, terminal transport, and
-display refresh. The expected physical floor is 0–16.7 ms for Chromium paint,
-plus 0–40 ms at 25 fps for capture, then encode, LAN transport, jitter buffer,
-decode, and at most the declared poll interval. Neko exposes no per-frame
-server telemetry, so the probe cannot apportion those internal stages.
+display refresh. The shared default's expected physical floor is 0–16.7 ms for
+Chromium paint plus 0–33.3 ms for 30 fps capture, then encode, LAN transport,
+jitter buffer, decode, and at most the declared poll interval. The capable
+60 fps profile halves that capture window. Neko exposes no per-frame server
+telemetry, so the probe cannot apportion those internal stages.
 
 AppKit presents the decoded WebRTC buffer directly through LiveKitWebRTC's
 Metal renderer. Its parallel observer is metadata-only, retaining decoded size
