@@ -13,7 +13,9 @@ the same rules over the public key event API.
 Targets are level-correct rather than base-key plus flags: Neko resolves a
 keysym against the guest's current modifier state and allocates a spare
 keycode on every miss, so a lowercase keysym under Shift, or Caps-Lock
-uppercase without it, would consume the keymap and eventually kill the server.
+uppercase without it, would consume the guest keymap's spare keycodes until
+those keys silently stop working (Neko logs the resulting X error rather than
+exiting).
 The adapter therefore sends the keysym at the guest's US-XKB level, forces or
 removes Shift to match it, derives shortcut case strictly from physical Shift,
 reconciles modifier keys side-neutrally, applies only the current key's
