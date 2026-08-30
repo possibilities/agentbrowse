@@ -4,7 +4,7 @@ const klv = @import("kernel_live_view");
 const abi_version: u32 = 3;
 const allocator = std.heap.page_allocator;
 const max_descriptor_bytes: u32 = 64 * 1024;
-const max_output_dimension: u32 = 8192;
+const max_output_dimension = klv.frame_conversion.max_output_dimension;
 const max_output_pixels: u64 = 32 * 1024 * 1024;
 
 const AbiSession = struct {

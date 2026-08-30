@@ -1,6 +1,13 @@
 const std = @import("std");
 const frame_mod = @import("frame.zig");
 
+pub const Frame = frame_mod.Frame;
+pub const max_output_dimension: u32 = 8192;
+
+const parallel_worker_count = 4;
+const parallel_min_pixels: u64 = 256 * 1024;
+const max_cached_columns = max_output_dimension;
+
 pub const ConversionError = error{
     InvalidFrame,
     InvalidRotation,
@@ -19,6 +26,19 @@ pub fn i420ToRgba(
     output_height: u32,
     output: []u8,
     output_stride: u32,
+) ConversionError!void {
+    return i420ToRgbaWithMode(frame, output_width, output_height, output, output_stride, .automatic);
+}
+
+const ConversionMode = enum { automatic, serial, serial_uncached, parallel };
+
+fn i420ToRgbaWithMode(
+    frame: *const frame_mod.Frame,
+    output_width: u32,
+    output_height: u32,
+    output: []u8,
+    output_stride: u32,
+    mode: ConversionMode,
 ) ConversionError!void {
     if (frame.format != .i420 or frame.width == 0 or frame.height == 0) return error.InvalidFrame;
     if (frame.rotation != 0 and frame.rotation != 90 and frame.rotation != 180 and frame.rotation != 270) {
@@ -65,33 +85,232 @@ pub fn i420ToRgba(
         .width = chroma_width,
         .height = chroma_height,
     };
-    const exact_size = output_width == display_width and output_height == display_height;
-    var y_luma = AxisCursor.init(output_height, orientedHeight(y_plane, frame.rotation));
-    var y_chroma = AxisCursor.init(output_height, orientedHeight(u_plane, frame.rotation));
-    for (0..output_height) |output_y_usize| {
+    const conversion = Conversion{
+        .frame = frame,
+        .y_plane = y_plane,
+        .u_plane = u_plane,
+        .v_plane = v_plane,
+        .output_width = output_width,
+        .output_height = output_height,
+        .output = output,
+        .output_stride = output_stride,
+        .exact_size = output_width == display_width and output_height == display_height,
+    };
+
+    // The two caches consume about 192 KiB; callers on worker threads need a >=512 KiB stack.
+    var luma_columns_storage: [max_cached_columns]AxisSample = undefined;
+    var chroma_columns_storage: [max_cached_columns]AxisSample = undefined;
+    const columns: ?ColumnSamples = if (!conversion.exact_size and output_width <= max_cached_columns) blk: {
+        const width: usize = @intCast(output_width);
+        fillAxisSamples(
+            luma_columns_storage[0..width],
+            output_width,
+            orientedWidth(y_plane, frame.rotation),
+        );
+        fillAxisSamples(
+            chroma_columns_storage[0..width],
+            output_width,
+            orientedWidth(u_plane, frame.rotation),
+        );
+        break :blk .{
+            .luma = luma_columns_storage[0..width],
+            .chroma = chroma_columns_storage[0..width],
+        };
+    } else null;
+
+    const pixels = @as(u64, output_width) * output_height;
+    const selected_columns = if (mode == .serial_uncached) null else columns;
+    const use_parallel = switch (mode) {
+        .automatic => pixels >= parallel_min_pixels and output_height >= parallel_worker_count,
+        .serial, .serial_uncached => false,
+        .parallel => output_height >= parallel_worker_count,
+    };
+    if (use_parallel and convertRowsParallel(conversion, selected_columns)) return;
+    convertRows(conversion, selected_columns, 0, output_height);
+}
+
+const Conversion = struct {
+    frame: *const frame_mod.Frame,
+    y_plane: Plane,
+    u_plane: Plane,
+    v_plane: Plane,
+    output_width: u32,
+    output_height: u32,
+    output: []u8,
+    output_stride: u32,
+    exact_size: bool,
+};
+
+const ColumnSamples = struct {
+    luma: []const AxisSample,
+    chroma: []const AxisSample,
+};
+
+const RowWork = struct {
+    conversion: Conversion,
+    columns: ?ColumnSamples,
+    start_row: u32,
+    end_row: u32,
+};
+
+fn convertRowsParallel(conversion: Conversion, columns: ?ColumnSamples) bool {
+    const rows_per_worker = conversion.output_height / parallel_worker_count;
+    var work: [parallel_worker_count - 1]RowWork = undefined;
+    var threads: [parallel_worker_count - 1]std.Thread = undefined;
+    var spawned: usize = 0;
+
+    for (0..parallel_worker_count - 1) |worker_index| {
+        const start_row: u32 = @intCast(worker_index * rows_per_worker);
+        work[worker_index] = .{
+            .conversion = conversion,
+            .columns = columns,
+            .start_row = start_row,
+            .end_row = start_row + rows_per_worker,
+        };
+        threads[worker_index] = std.Thread.spawn(
+            .{ .stack_size = 128 * 1024 },
+            convertRowWork,
+            .{&work[worker_index]},
+        ) catch {
+            for (threads[0..spawned]) |thread| thread.join();
+            return false;
+        };
+        spawned += 1;
+    }
+
+    convertRows(
+        conversion,
+        columns,
+        rows_per_worker * (parallel_worker_count - 1),
+        conversion.output_height,
+    );
+    for (threads[0..spawned]) |thread| thread.join();
+    return true;
+}
+
+fn convertRowWork(work: *const RowWork) void {
+    convertRows(work.conversion, work.columns, work.start_row, work.end_row);
+}
+
+fn convertRows(
+    conversion: Conversion,
+    columns: ?ColumnSamples,
+    start_row: u32,
+    end_row: u32,
+) void {
+    if (conversion.exact_size) {
+        convertExactRows(conversion, start_row, end_row);
+    } else if (columns) |cached| {
+        convertFilteredRows(conversion, cached, start_row, end_row);
+    } else {
+        convertFilteredRowsWithoutColumnCache(conversion, start_row, end_row);
+    }
+}
+
+fn convertExactRows(conversion: Conversion, start_row: u32, end_row: u32) void {
+    for (start_row..end_row) |output_y_usize| {
         const output_y: u32 = @intCast(output_y_usize);
-        const row_offset = @as(usize, output_stride) * output_y_usize;
-        const luma_y = if (exact_size) undefined else y_luma.next();
-        const chroma_y = if (exact_size) undefined else y_chroma.next();
-        var x_luma = AxisCursor.init(output_width, orientedWidth(y_plane, frame.rotation));
-        var x_chroma = AxisCursor.init(output_width, orientedWidth(u_plane, frame.rotation));
-        for (0..output_width) |output_x_usize| {
+        const row_offset = @as(usize, conversion.output_stride) * output_y_usize;
+        for (0..conversion.output_width) |output_x_usize| {
             const output_x: u32 = @intCast(output_x_usize);
-            const rgba = if (exact_size) blk: {
-                const source = sourcePoint(frame, output_x, output_y);
-                const y_index = @as(usize, source.y) * frame.strides[0] + source.x;
-                const u_index = @as(usize, source.y / 2) * frame.strides[1] + source.x / 2;
-                const v_index = @as(usize, source.y / 2) * frame.strides[2] + source.x / 2;
-                break :blk yuvToRgba(y_plane.bytes[y_index], u_plane.bytes[u_index], v_plane.bytes[v_index]);
-            } else yuvToRgba(
-                sampleBilinear(y_plane, frame.rotation, x_luma.next(), luma_y),
-                sampleBilinear(u_plane, frame.rotation, x_chroma.next(), chroma_y),
-                sampleBilinear(v_plane, frame.rotation, x_chroma.current(), chroma_y),
+            const source = sourcePoint(conversion.frame, output_x, output_y);
+            const y_index = @as(usize, source.y) * conversion.frame.strides[0] + source.x;
+            const u_index = @as(usize, source.y / 2) * conversion.frame.strides[1] + source.x / 2;
+            const v_index = @as(usize, source.y / 2) * conversion.frame.strides[2] + source.x / 2;
+            const rgba = yuvToRgba(
+                conversion.y_plane.bytes[y_index],
+                conversion.u_plane.bytes[u_index],
+                conversion.v_plane.bytes[v_index],
             );
             const pixel_offset = row_offset + output_x_usize * 4;
-            @memcpy(output[pixel_offset..][0..4], &rgba);
+            @memcpy(conversion.output[pixel_offset..][0..4], &rgba);
         }
     }
+}
+
+fn convertFilteredRows(
+    conversion: Conversion,
+    columns: ColumnSamples,
+    start_row: u32,
+    end_row: u32,
+) void {
+    var y_luma = AxisCursor.initAt(
+        conversion.output_height,
+        orientedHeight(conversion.y_plane, conversion.frame.rotation),
+        start_row,
+    );
+    var y_chroma = AxisCursor.initAt(
+        conversion.output_height,
+        orientedHeight(conversion.u_plane, conversion.frame.rotation),
+        start_row,
+    );
+    for (start_row..end_row) |output_y_usize| {
+        const row_offset = @as(usize, conversion.output_stride) * output_y_usize;
+        const luma_y = y_luma.next();
+        const chroma_y = y_chroma.next();
+        for (0..conversion.output_width) |output_x_usize| {
+            const rgba = yuvToRgba(
+                sampleBilinear(
+                    conversion.y_plane,
+                    conversion.frame.rotation,
+                    columns.luma[output_x_usize],
+                    luma_y,
+                ),
+                sampleBilinear(
+                    conversion.u_plane,
+                    conversion.frame.rotation,
+                    columns.chroma[output_x_usize],
+                    chroma_y,
+                ),
+                sampleBilinear(
+                    conversion.v_plane,
+                    conversion.frame.rotation,
+                    columns.chroma[output_x_usize],
+                    chroma_y,
+                ),
+            );
+            const pixel_offset = row_offset + output_x_usize * 4;
+            @memcpy(conversion.output[pixel_offset..][0..4], &rgba);
+        }
+    }
+}
+
+fn convertFilteredRowsWithoutColumnCache(
+    conversion: Conversion,
+    start_row: u32,
+    end_row: u32,
+) void {
+    var y_luma = AxisCursor.initAt(
+        conversion.output_height,
+        orientedHeight(conversion.y_plane, conversion.frame.rotation),
+        start_row,
+    );
+    var y_chroma = AxisCursor.initAt(
+        conversion.output_height,
+        orientedHeight(conversion.u_plane, conversion.frame.rotation),
+        start_row,
+    );
+    for (start_row..end_row) |output_y_usize| {
+        const row_offset = @as(usize, conversion.output_stride) * output_y_usize;
+        const luma_y = y_luma.next();
+        const chroma_y = y_chroma.next();
+        var x_luma = AxisCursor.init(conversion.output_width, orientedWidth(conversion.y_plane, conversion.frame.rotation));
+        var x_chroma = AxisCursor.init(conversion.output_width, orientedWidth(conversion.u_plane, conversion.frame.rotation));
+        for (0..conversion.output_width) |output_x_usize| {
+            const rgba = yuvToRgba(
+                sampleBilinear(conversion.y_plane, conversion.frame.rotation, x_luma.next(), luma_y),
+                sampleBilinear(conversion.u_plane, conversion.frame.rotation, x_chroma.next(), chroma_y),
+                sampleBilinear(conversion.v_plane, conversion.frame.rotation, x_chroma.current(), chroma_y),
+            );
+            const pixel_offset = row_offset + output_x_usize * 4;
+            @memcpy(conversion.output[pixel_offset..][0..4], &rgba);
+        }
+    }
+}
+
+fn fillAxisSamples(samples: []AxisSample, output_size: u32, input_size: u32) void {
+    var cursor = AxisCursor.init(output_size, input_size);
+    for (samples) |*sample| sample.* = cursor.next();
 }
 
 const Plane = struct {
@@ -121,6 +340,12 @@ const AxisCursor = struct {
             .step_q32 = step_q32,
             .maximum_q32 = @as(i128, input_size - 1) << 32,
         };
+    }
+
+    fn initAt(output_size: u32, input_size: u32, output_index: u32) AxisCursor {
+        var cursor = init(output_size, input_size);
+        cursor.position_q32 += cursor.step_q32 * @as(i128, output_index);
+        return cursor;
     }
 
     fn next(self: *AxisCursor) AxisSample {
@@ -336,4 +561,65 @@ test "filtered scaling keeps odd I420 planes in bounds for every rotation" {
             try std.testing.expectEqual(@as(u8, 255), output[pixel * 4 + 3]);
         }
     }
+}
+
+test "row-parallel conversion is bit-exact for every rotation" {
+    const frame_width: u32 = 640;
+    const frame_height: u32 = 360;
+    const chroma_width = (frame_width + 1) / 2;
+    const chroma_height = (frame_height + 1) / 2;
+    const allocator = std.testing.allocator;
+
+    const y = try allocator.alloc(u8, @as(usize, frame_width) * frame_height);
+    defer allocator.free(y);
+    const u = try allocator.alloc(u8, @as(usize, chroma_width) * chroma_height);
+    defer allocator.free(u);
+    const v = try allocator.alloc(u8, @as(usize, chroma_width) * chroma_height);
+    defer allocator.free(v);
+    var prng = std.Random.DefaultPrng.init(0x9b58_6d27_41e3_0acf);
+    const random = prng.random();
+    random.bytes(y);
+    random.bytes(u);
+    random.bytes(v);
+
+    for ([_]u16{ 0, 90, 180, 270 }) |rotation| {
+        const frame = try frame_mod.Frame.createI420(
+            allocator,
+            frame_width,
+            frame_height,
+            rotation,
+            1,
+            y,
+            frame_width,
+            u,
+            chroma_width,
+            v,
+            chroma_width,
+        );
+        defer frame.release();
+
+        // The odd output height leaves the remainder rows with worker four.
+        try expectSerialParallelEqual(frame, 517, 291);
+        try expectSerialParallelEqual(frame, frame.displayWidth(), frame.displayHeight());
+    }
+}
+
+fn expectSerialParallelEqual(frame: *const frame_mod.Frame, width: u32, height: u32) !void {
+    const stride = width * 4 + 16;
+    const byte_count = @as(usize, stride) * height;
+    const uncached = try std.testing.allocator.alloc(u8, byte_count);
+    defer std.testing.allocator.free(uncached);
+    const serial = try std.testing.allocator.alloc(u8, byte_count);
+    defer std.testing.allocator.free(serial);
+    const parallel = try std.testing.allocator.alloc(u8, byte_count);
+    defer std.testing.allocator.free(parallel);
+    @memset(uncached, 0xa5);
+    @memset(serial, 0xa5);
+    @memset(parallel, 0xa5);
+
+    try i420ToRgbaWithMode(frame, width, height, uncached, stride, .serial_uncached);
+    try i420ToRgbaWithMode(frame, width, height, serial, stride, .serial);
+    try i420ToRgbaWithMode(frame, width, height, parallel, stride, .parallel);
+    try std.testing.expectEqualSlices(u8, uncached, serial);
+    try std.testing.expectEqualSlices(u8, serial, parallel);
 }

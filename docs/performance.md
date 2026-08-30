@@ -46,6 +46,32 @@ predecessor even when a consumer currently holds a separate lease. The OpenTUI
 adapter's `skippedFrames` counter is the relevant consumer-side signal: it sums
 generation gaps between frames handed to `ImageRenderable`.
 
+## Native frame-conversion benchmark
+
+`bun run native:bench:conversion` measures a ReleaseFast conversion of a
+deterministically randomized 1920×1080 I420 source into common fitted output
+sizes. It reuses the caller-owned output as the adapter does, hashes every
+result outside the timed interval, and reports nearest-rank percentiles. On the
+same Apple-silicon development Mac, 20 measured iterations before and after row
+parallelism gave:
+
+| Output | Serial mean / p95 | Four-row-partition mean / p95 |
+| --- | ---: | ---: |
+| 1920×1080 | 5.70 / 5.76 ms | 1.03 / 1.01 ms |
+| 1728×972 | 22.64 / 22.72 ms | 2.91 / 3.13 ms |
+| 1280×720 | 12.52 / 12.57 ms | 1.62 / 1.68 ms |
+| 960×540 | 7.05 / 7.10 ms | 0.95 / 1.02 ms |
+
+Conversions of at least 256K output pixels split four disjoint row ranges
+between three temporary workers and the caller. Resized conversions precompute
+the bounded horizontal luma/chroma samples once; every worker derives its first
+vertical sample directly from its starting row. If a worker cannot be created,
+completed workers are joined and the caller deterministically rewrites the
+whole output serially. Small conversions, including the latency probe's 3×3
+sample, remain serial. The bounded horizontal cache occupies about 192 KiB on
+the caller's stack at the ABI's 8192-pixel dimension limit; a future asynchronous
+conversion thread must reserve at least a 512 KiB stack.
+
 ## Work and memory bounds
 
 - The native pending queue retains one I420 frame. Consumers can add only the
@@ -58,11 +84,12 @@ generation gaps between frames handed to `ImageRenderable`.
   per dimension and 32 million pixels total. A larger Kitty placement is
   enlarged by Ghostty's linear GPU sampler, reducing CPU and terminal traffic.
 - Conversion rotates, center-aligned-bilinear scales, and converts luma and
-  chroma in one native pass. It allocates no source-sized RGBA intermediate.
-- `NativeImage.fromRgba` and OpenTUI retain their own native image storage, so
-  one submitted generation currently incurs a caller-owned RGBA buffer plus
-  OpenTUI's retained copy. The caller buffer becomes collectible immediately
-  after the source assignment.
+  chroma in one native pass. It allocates no source-sized RGBA intermediate;
+  parallel row ranges write directly into disjoint parts of the caller's
+  output buffer.
+- `NativeImage.fromRgba` retains its own native image storage. The adapter keeps
+  one exact-size caller-owned RGBA scratch buffer while connected and reuses it
+  across conversions, replacing it only when fitted dimensions change.
 - Each decoded WebRTC frame is still copied once into an immutable I420 frame,
   even when the OpenTUI poller will skip its generation. Producer-side
   throttling is a possible optimization only after measurements show that copy

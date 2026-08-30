@@ -537,7 +537,7 @@ export class NativeFrameLease {
     };
   }
 
-  convertRgba(width: number, height: number): Uint8Array {
+  convertRgba(width: number, height: number, reusable?: Uint8Array): Uint8Array {
     const outputWidth = positiveU32(width, "width");
     const outputHeight = positiveU32(height, "height");
     if (
@@ -550,7 +550,7 @@ export class NativeFrameLease {
     const stride = outputWidth * 4;
     const byteLength = stride * outputHeight;
     if (!Number.isSafeInteger(byteLength)) throw new RangeError("RGBA output is too large");
-    const output = Buffer.allocUnsafe(byteLength);
+    const output = reusable?.byteLength === byteLength ? reusable : Buffer.allocUnsafe(byteLength);
     checkResult(
       "frame conversion",
       this.native.symbols.ab_live_view_frame_convert_rgba(

@@ -22,6 +22,7 @@
     "agentbrowse": "bun run cli/main.ts",
     "native:build": "tools/fetch-webrtc && zig build live-view-lib -Doptimize=ReleaseFast",
     "native:build:app": "tools/fetch-webrtc && zig build -Doptimize=ReleaseFast",
+    "native:bench:conversion": "zig run -O ReleaseFast --dep frame_conversion -Mroot=tools/frame-conversion-benchmark.zig -Mframe_conversion=src/session/frame_conversion.zig",
     "live-view:latency": "bun run tools/live-view-latency.ts",
     "images:update-lock": "bun run tools/update-kernel-image-lock.ts",
     "opentui:example": "bun run examples/opentui-browser.ts",

@@ -90,6 +90,14 @@ test("OpenTUI leaves cursor presentation exclusively to the terminal host", () =
   expect(source).not.toMatch(/\.cursor(?:Snapshot|Image)\s*\(/u);
 });
 
+test("OpenTUI reuses its caller-owned RGBA conversion buffer", () => {
+  const source = readFileSync(LIVE_VIEW_RENDERABLE, "utf8");
+  expect(source).toMatch(
+    /lease\.convertRgba\([\s\S]+this\.rgbaScratch[\s\S]+this\.rgbaScratch = rgba/u,
+  );
+  expect(source).toContain("this.rgbaScratch = undefined");
+});
+
 test("frame fitting preserves browser aspect in terminal pixels", () => {
   const cellPixels = terminalCellPixels({
     resolution: { width: 800, height: 480 },

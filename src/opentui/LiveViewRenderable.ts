@@ -121,6 +121,7 @@ export class LiveViewRenderable extends ImageRenderable {
   private conversionMaxMs = 0;
   private lastSubmittedAt: number | null = null;
   private latestFrameTimestampUs: bigint | null = null;
+  private rgbaScratch: Uint8Array | undefined;
 
   constructor(context: RenderContext, options: LiveViewRenderableOptions = {}) {
     const {
@@ -390,7 +391,12 @@ export class LiveViewRenderable extends ImageRenderable {
         }
 
         const conversionStartedAt = performance.now();
-        const rgba = lease.convertRgba(geometry.outputWidth, geometry.outputHeight);
+        const rgba = lease.convertRgba(
+          geometry.outputWidth,
+          geometry.outputHeight,
+          this.rgbaScratch,
+        );
+        this.rgbaScratch = rgba;
         const conversionMs = performance.now() - conversionStartedAt;
         const image = NativeImage.fromRgba(rgba, geometry.outputWidth, geometry.outputHeight);
         try {
@@ -534,6 +540,7 @@ export class LiveViewRenderable extends ImageRenderable {
     session?.releaseHeldInput();
     session?.close();
     this.source = undefined;
+    this.rgbaScratch = undefined;
     this.fittedGeometry = null;
     this.latestFrameInfo = null;
     this.resetPresentationMetrics();
