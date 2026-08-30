@@ -15,6 +15,11 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   body(static_cast<const uint8_t *>(data.bytes), data.length);
 }
 
+static BOOL KLIsLocalCommandShortcut(NSEvent *event, NSString *character) {
+  if ((event.modifierFlags & NSEventModifierFlagCommand) == 0) return NO;
+  return [character isEqualToString:@"v"] || [character isEqualToString:@"q"];
+}
+
 @interface KLInputView : NSView
 @property(nonatomic, assign) KLAppKitCallbacks callbacks;
 @property(nonatomic, strong) LKRTCMTLVideoView *videoView;
@@ -292,15 +297,21 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 }
 
 - (BOOL)performKeyEquivalent:(NSEvent *)event {
+  if (self.window.firstResponder != self) return [super performKeyEquivalent:event];
+  NSString *character = event.charactersIgnoringModifiers.lowercaseString ?: @"";
   if ((event.modifierFlags & NSEventModifierFlagCommand) != 0 &&
-      [event.charactersIgnoringModifiers.lowercaseString isEqualToString:@"v"]) {
+      [character isEqualToString:@"v"]) {
     // Command-V is owned locally. AppKit may already have delivered the
     // Command flagsChanged event, so clear either Meta keysym before the
-    // delayed guest Control-V sequence.
+    // delayed guest Control-V sequence without dropping Shift or Option.
     if (_callbacks.on_key) {
       static const uint8_t empty = 0;
-      _callbacks.on_key(_callbacks.context, 55, 0, false, false, &empty, 0);
-      _callbacks.on_key(_callbacks.context, 54, 0, false, false, &empty, 0);
+      uint64_t remainingModifiers = static_cast<uint64_t>(
+          event.modifierFlags & ~NSEventModifierFlagCommand);
+      _callbacks.on_key(_callbacks.context, 55, remainingModifiers, false,
+                        false, &empty, 0);
+      _callbacks.on_key(_callbacks.context, 54, remainingModifiers, false,
+                        false, &empty, 0);
     }
     NSString *text = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
     if (text && _callbacks.on_paste) {
@@ -308,6 +319,14 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
       _callbacks.on_paste(_callbacks.context,
                           static_cast<const uint8_t *>(data.bytes), data.length);
     }
+    return YES;
+  }
+  if ((event.modifierFlags & NSEventModifierFlagCommand) != 0 &&
+      !KLIsLocalCommandShortcut(event, character)) {
+    // Let Zig translate the allowlisted browser conventions. Other Command
+    // chords reach the Linux guest as ordinary Meta input instead of being
+    // silently consumed by AppKit.
+    [self keyDown:event];
     return YES;
   }
   return [super performKeyEquivalent:event];
@@ -499,16 +518,14 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   self.window.contentView = self.inputView;
   [self.window center];
   __weak KLNativeSession *weakSelf = self;
-  // AppKit does not route a key-up through the ordinary responder chain when
-  // the key was released while Command remained held. Recover only events for
-  // this focused Live View and consume them so a future AppKit change cannot
-  // deliver the same release twice.
+  // Key equivalents bypass the ordinary keyDown:/keyUp: responder pairing.
+  // Route every focused release through the same view and consume it here;
+  // this also preserves a translated release after Command itself went up.
   self.commandKeyUpMonitor = [NSEvent
       addLocalMonitorForEventsMatchingMask:NSEventMaskKeyUp
                                   handler:^NSEvent *(NSEvent *event) {
     KLNativeSession *strongSelf = weakSelf;
-    if (!strongSelf || strongSelf.closing ||
-        (event.modifierFlags & NSEventModifierFlagCommand) == 0) {
+    if (!strongSelf || strongSelf.closing) {
       return event;
     }
     NSWindow *window = strongSelf.window;

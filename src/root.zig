@@ -11,6 +11,7 @@ pub const input_event = @import("session/input_event.zig");
 pub const input_metrics = @import("session/input_metrics.zig");
 pub const input_state = @import("session/input_state.zig");
 pub const pending_input = @import("session/pending_input.zig");
+pub const physical_key_state = @import("session/physical_key_state.zig");
 pub const cursor_state = @import("session/cursor_state.zig");
 pub const keymap = @import("platform/macos/keymap.zig");
 pub const appkit = @import("platform/macos/appkit.zig");
@@ -31,6 +32,7 @@ test {
     _ = input_metrics;
     _ = input_state;
     _ = pending_input;
+    _ = physical_key_state;
     _ = cursor_state;
     _ = keymap;
     _ = appkit;

@@ -19,9 +19,15 @@ import {
   terminalCellPixels,
 } from "../src/opentui/geometry.ts";
 import {
+  applyOpenTuiKeyTargetModifiers,
+  isOpenTuiLocalShortcut,
   isOpenTuiModifierKey,
   keysymForOpenTuiKey,
+  openTuiKeyLevelRemovesShift,
+  openTuiKeyLevelRequiresShift,
   openTuiModifierSnapshot,
+  openTuiPhysicalKeyIdentity,
+  openTuiShortcutTranslation,
   X11_MODIFIER_KEYSYMS,
 } from "../src/opentui/keysym.ts";
 import {
@@ -48,7 +54,11 @@ const browserEntries: BrowserListEntry[] = [
     status: "Up",
     cdpUrl: "http://browser-host:9223",
     liveViewUrl: "http://127.0.0.1:18081",
-    liveViewAccess: { mode: "ssh", remoteHost: "browser-host", remotePort: 18081 },
+    liveViewAccess: {
+      mode: "ssh",
+      remoteHost: "browser-host",
+      remotePort: 18081,
+    },
     slotConflict: false,
   },
   {
@@ -61,7 +71,11 @@ const browserEntries: BrowserListEntry[] = [
     status: "Exited (0)",
     cdpUrl: "http://browser-host:9224",
     liveViewUrl: "http://127.0.0.1:18082",
-    liveViewAccess: { mode: "ssh", remoteHost: "browser-host", remotePort: 18082 },
+    liveViewAccess: {
+      mode: "ssh",
+      remoteHost: "browser-host",
+      remotePort: 18082,
+    },
     slotConflict: false,
   },
   {
@@ -74,7 +88,11 @@ const browserEntries: BrowserListEntry[] = [
     status: "Up",
     cdpUrl: "http://browser-host:9225",
     liveViewUrl: "http://127.0.0.1:18083",
-    liveViewAccess: { mode: "ssh", remoteHost: "browser-host", remotePort: 18083 },
+    liveViewAccess: {
+      mode: "ssh",
+      remoteHost: "browser-host",
+      remotePort: 18083,
+    },
     slotConflict: false,
   },
 ];
@@ -210,7 +228,10 @@ test("pixel mouse mapping preserves exact DPR-2 device coordinates", () => {
     rotationDegrees: 0,
   };
 
-  expect(mapPixelToRemote(400, 200, geometry, cellPixels)).toEqual({ x: 400, y: 200 });
+  expect(mapPixelToRemote(400, 200, geometry, cellPixels)).toEqual({
+    x: 400,
+    y: 200,
+  });
   expect(mapPixelToRemote(-1, 200, geometry, cellPixels)).toBeNull();
   expect(mapPixelToRemote(800, 200, geometry, cellPixels)).toBeNull();
 });
@@ -230,14 +251,26 @@ test("pixel mouse mapping respects letterboxing and frame rotation", () => {
   const cellPixels = { width: 10, height: 20 };
 
   expect(mapPixelToRemote(9, 80, geometry, cellPixels)).toBeNull();
-  expect(mapPixelToRemote(10, 40, geometry, cellPixels)).toEqual({ x: 0, y: 1 });
-  expect(mapPixelToRemote(29, 119, geometry, cellPixels)).toEqual({ x: 3, y: 0 });
+  expect(mapPixelToRemote(10, 40, geometry, cellPixels)).toEqual({
+    x: 0,
+    y: 1,
+  });
+  expect(mapPixelToRemote(29, 119, geometry, cellPixels)).toEqual({
+    x: 3,
+    y: 0,
+  });
 });
 
 test("OpenTUI keys map to X11 special, printable, and Unicode keysyms", () => {
   expect(keysymForOpenTuiKey({ name: "left", shift: false })).toBe(0xff51n);
   expect(keysymForOpenTuiKey({ name: "f12", shift: false })).toBe(0xffc9n);
-  expect(keysymForOpenTuiKey({ name: "!", shift: true })).toBe(BigInt("1".codePointAt(0)!));
+  expect(keysymForOpenTuiKey({ name: "!", shift: true })).toBe(BigInt("!".codePointAt(0)!));
+  expect(openTuiKeyLevelRequiresShift({ name: "!", shift: false })).toBe(true);
+  expect(openTuiKeyLevelRemovesShift({ name: "z", sequence: "z", shift: true })).toBe(true);
+  expect(openTuiKeyLevelRequiresShift({ name: "c", sequence: "C", shift: false })).toBe(true);
+  expect(keysymForOpenTuiKey({ name: "z", sequence: "Z", shift: true })).toBe(
+    BigInt("Z".codePointAt(0)!),
+  );
   expect(keysymForOpenTuiKey({ name: "λ", shift: false })).toBe(0x0100_03bbn);
 });
 
@@ -295,8 +328,204 @@ test("OpenTUI legacy meta maps to Alt and platform super maps to Meta", () => {
     hyper: false,
   });
   expect(
-    openTuiModifierSnapshot({ ...common, meta: true, option: true, super: true }),
+    openTuiModifierSnapshot({
+      ...common,
+      meta: true,
+      option: true,
+      super: true,
+    }),
   ).toMatchObject({ alt: true, meta: true });
+});
+
+test("OpenTUI translates macOS browser shortcuts by physical Kitty identity", () => {
+  const commandC = {
+    name: "ㅊ",
+    baseCode: 99,
+    super: true,
+    option: false,
+    meta: false,
+    shift: false,
+  };
+  expect(openTuiPhysicalKeyIdentity(commandC)).toBe("base:99");
+  expect(openTuiShortcutTranslation(commandC)).toEqual({
+    keysym: 0x63n,
+    forceControl: true,
+    forceShift: false,
+    removeShift: false,
+    removeAlt: false,
+    removeMeta: true,
+  });
+  expect(
+    openTuiShortcutTranslation({
+      name: "c",
+      baseCode: "i".codePointAt(0)!,
+      super: true,
+      option: false,
+      meta: false,
+      shift: false,
+    }),
+  ).toMatchObject({ keysym: 0x63n });
+  expect(
+    openTuiShortcutTranslation({
+      name: "z",
+      sequence: "Z",
+      baseCode: "z".codePointAt(0)!,
+      super: true,
+      option: false,
+      meta: false,
+      shift: true,
+    }),
+  ).toMatchObject({ keysym: 0x5an, forceShift: true });
+  expect(
+    openTuiShortcutTranslation({
+      name: "C",
+      baseCode: "c".codePointAt(0)!,
+      super: true,
+      option: false,
+      meta: false,
+      shift: false,
+      capsLock: true,
+    }),
+  ).toMatchObject({ keysym: 0x63n, forceShift: false });
+  expect(
+    openTuiShortcutTranslation({
+      name: "z",
+      sequence: "z",
+      baseCode: "z".codePointAt(0)!,
+      super: true,
+      option: false,
+      meta: false,
+      shift: true,
+      capsLock: true,
+    }),
+  ).toMatchObject({ keysym: 0x5an, forceShift: true });
+  expect(
+    openTuiShortcutTranslation({
+      name: "left",
+      super: false,
+      option: true,
+      meta: false,
+      shift: false,
+    }),
+  ).toEqual({
+    keysym: 0xff51n,
+    forceControl: true,
+    forceShift: false,
+    removeShift: false,
+    removeAlt: true,
+    removeMeta: false,
+  });
+  expect(
+    openTuiShortcutTranslation({
+      name: "up",
+      super: true,
+      option: false,
+      meta: false,
+      shift: false,
+    }),
+  ).toEqual({
+    keysym: 0xff50n,
+    forceControl: true,
+    forceShift: false,
+    removeShift: false,
+    removeAlt: false,
+    removeMeta: true,
+  });
+  expect(
+    openTuiShortcutTranslation({
+      name: "left",
+      super: true,
+      option: false,
+      meta: false,
+      shift: false,
+    }),
+  ).toEqual({
+    keysym: 0xff50n,
+    forceControl: false,
+    forceShift: false,
+    removeShift: false,
+    removeAlt: false,
+    removeMeta: true,
+  });
+  expect(isOpenTuiLocalShortcut({ name: "v", super: true })).toBe(true);
+  expect(isOpenTuiLocalShortcut({ name: "q", super: true })).toBe(true);
+});
+
+test("translated OpenTUI modifiers preserve Shift and replace only their trigger", () => {
+  const physical = {
+    shift: true,
+    control: false,
+    alt: true,
+    meta: true,
+    hyper: true,
+  };
+  expect(
+    applyOpenTuiKeyTargetModifiers(physical, {
+      keysym: 0x43n,
+      forceControl: true,
+      forceShift: true,
+      removeShift: false,
+      removeAlt: false,
+      removeMeta: true,
+    }),
+  ).toEqual({
+    shift: true,
+    control: true,
+    alt: true,
+    meta: false,
+    hyper: true,
+  });
+  expect(
+    applyOpenTuiKeyTargetModifiers(physical, {
+      keysym: 0xff51n,
+      forceControl: true,
+      forceShift: false,
+      removeShift: false,
+      removeAlt: true,
+      removeMeta: false,
+    }),
+  ).toEqual({
+    shift: true,
+    control: true,
+    alt: false,
+    meta: true,
+    hyper: true,
+  });
+  expect(
+    applyOpenTuiKeyTargetModifiers(
+      { ...physical, control: false },
+      {
+        keysym: 0xff50n,
+        forceControl: false,
+        forceShift: false,
+        removeShift: false,
+        removeAlt: false,
+        removeMeta: true,
+      },
+    ),
+  ).toEqual({
+    shift: true,
+    control: false,
+    alt: true,
+    meta: false,
+    hyper: true,
+  });
+  expect(
+    applyOpenTuiKeyTargetModifiers(physical, {
+      keysym: 0x7an,
+      forceControl: false,
+      forceShift: false,
+      removeShift: true,
+      removeAlt: false,
+      removeMeta: false,
+    }),
+  ).toEqual({
+    shift: false,
+    control: false,
+    alt: true,
+    meta: true,
+    hyper: true,
+  });
 });
 
 test("Browser-target picker skips disabled rows and closes before choosing", async () => {

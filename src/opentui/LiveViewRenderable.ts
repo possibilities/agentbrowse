@@ -28,9 +28,16 @@ import {
   terminalCellPixels,
 } from "./geometry.ts";
 import {
+  applyOpenTuiKeyTargetModifiers,
+  isOpenTuiLocalShortcut,
   isOpenTuiModifierKey,
   keysymForOpenTuiKey,
+  type OpenTuiKeyTarget,
+  openTuiKeyLevelRemovesShift,
+  openTuiKeyLevelRequiresShift,
   openTuiModifierSnapshot,
+  openTuiPhysicalKeyIdentity,
+  openTuiShortcutTranslation,
   X11_MODIFIER_KEYSYMS,
 } from "./keysym.ts";
 import {
@@ -96,6 +103,11 @@ export interface LiveViewRenderableOptions extends Omit<ImageRenderableOptions, 
   onSubmission?: (metrics: LiveViewSubmissionMetrics) => void;
 }
 
+interface ActiveOpenTuiKey {
+  name: string;
+  target: OpenTuiKeyTarget;
+}
+
 /**
  * A focusable OpenTUI image surface backed by one headless Live View session.
  * Bun polls the native ABI; WebRTC threads never call into JavaScript.
@@ -121,6 +133,8 @@ export class LiveViewRenderable extends ImageRenderable {
   private session: NativeLiveViewSession | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private keyreleaseHandler: ((key: KeyEvent) => void) | null = null;
+  private readonly activeKeys = new Map<string, ActiveOpenTuiKey>();
+  private lastInputGate: { dataOpen: boolean; authorized: boolean } | null = null;
   private operationGeneration = 0;
   private operationAbortController: AbortController | null = null;
   private readonly pendingConnects = new Set<Promise<void>>();
@@ -319,10 +333,12 @@ export class LiveViewRenderable extends ImageRenderable {
   }
 
   public releaseControl(): boolean {
+    this.activeKeys.clear();
     return this.session?.releaseControl() ?? false;
   }
 
   public releaseHeldInput(): void {
+    this.activeKeys.clear();
     this.session?.releaseHeldInput();
   }
 
@@ -380,6 +396,17 @@ export class LiveViewRenderable extends ImageRenderable {
     if (!session || this.isDestroyed) return;
     try {
       const snapshot = session.snapshot();
+      const previousInputGate = this.lastInputGate;
+      if (
+        (previousInputGate?.dataOpen === true && !snapshot.dataOpen) ||
+        (previousInputGate?.authorized === true && !snapshot.authorized)
+      ) {
+        this.activeKeys.clear();
+      }
+      this.lastInputGate = {
+        dataOpen: snapshot.dataOpen,
+        authorized: snapshot.authorized,
+      };
       const status = session.status();
       this.setSurfaceState({
         phase: snapshot.lifecycle,
@@ -574,31 +601,96 @@ export class LiveViewRenderable extends ImageRenderable {
   private forwardKey(key: KeyEvent): boolean {
     const session = this.session;
     if (!session) return false;
-    const modifiers = openTuiModifierSnapshot(key);
-    setModifiers(session, modifiers);
-    if (isOpenTuiModifierKey(key)) return true;
+    if (isOpenTuiLocalShortcut(key)) return false;
 
-    const keysym = keysymForOpenTuiKey(key);
-    if (keysym === null) {
-      if (key.source === "raw") clearModifiers(session);
+    const physicalModifiers = openTuiModifierSnapshot(key);
+    if (isOpenTuiModifierKey(key)) {
+      setModifiers(session, physicalModifiers);
+      return true;
+    }
+
+    const pressed = key.eventType !== "release";
+    const raw = key.source === "raw";
+    const identity = openTuiPhysicalKeyIdentity(key);
+    const active = raw ? null : this.findActiveKey(key);
+    const sameNameActive =
+      !raw && pressed && active === null ? this.findActiveKeyByName(key.name) : null;
+    let target = active?.[1].target ?? sameNameActive?.[1].target ?? null;
+    if (target === null) {
+      if (pressed) target = openTuiShortcutTranslation(key);
+      if (target === null) {
+        const keysym = keysymForOpenTuiKey(key);
+        if (keysym !== null) {
+          target = {
+            keysym,
+            forceControl: false,
+            forceShift: openTuiKeyLevelRequiresShift(key),
+            removeShift: openTuiKeyLevelRemovesShift(key),
+            removeAlt: false,
+            removeMeta: false,
+          };
+        }
+      }
+    }
+
+    if (target === null) {
+      if (raw) clearModifiers(session);
+      else setModifiers(session, physicalModifiers);
       return false;
     }
-    const pressed = key.eventType !== "release";
-    session.setKey(keysym, pressed, Boolean(key.repeated));
+    if (!pressed) {
+      session.setKey(target.keysym, false, Boolean(key.repeated));
+      if (active) this.activeKeys.delete(active[0]);
+      setModifiers(session, physicalModifiers);
+      return true;
+    }
+
+    const effectiveModifiers = applyOpenTuiKeyTargetModifiers(physicalModifiers, target);
+    setModifiers(session, effectiveModifiers);
+    const accepted = session.setKey(target.keysym, pressed, Boolean(key.repeated));
     // A terminal without Kitty event types reports presses only. Treat those
     // as taps so one legacy input cannot remain held until the next blur.
-    if (pressed && key.source === "raw" && !key.repeated) {
-      session.setKey(keysym, false);
+    if (pressed && raw) {
+      session.setKey(target.keysym, false);
       clearModifiers(session);
+    } else {
+      if (active === null && sameNameActive !== null) {
+        this.activeKeys.delete(sameNameActive[0]);
+        this.activeKeys.set(identity, { name: key.name.toLowerCase(), target });
+      } else if (active === null && accepted) {
+        const name = key.name.toLowerCase();
+        this.activeKeys.set(identity, { name, target });
+      } else if (active === null && !accepted) {
+        setModifiers(session, physicalModifiers);
+      }
     }
     return true;
+  }
+
+  private findActiveKey(key: KeyEvent): [string, ActiveOpenTuiKey] | null {
+    const identity = openTuiPhysicalKeyIdentity(key);
+    const exact = this.activeKeys.get(identity);
+    if (exact) return [identity, exact];
+    if (key.eventType !== "release") return null;
+    return this.findActiveKeyByName(key.name);
+  }
+
+  private findActiveKeyByName(nameValue: string): [string, ActiveOpenTuiKey] | null {
+    const name = nameValue.toLowerCase();
+    for (const entry of this.activeKeys) {
+      if (entry[1].name === name) return entry;
+    }
+    return null;
   }
 
   private forwardMouse(event: MouseEvent): void {
     const session = this.session;
     const geometry = this.fittedGeometry;
     if (!session || !geometry) return;
-    const pixelEvent = event as MouseEvent & { readonly pixelX?: number; readonly pixelY?: number };
+    const pixelEvent = event as MouseEvent & {
+      readonly pixelX?: number;
+      readonly pixelY?: number;
+    };
     const cellPixels = terminalCellPixels(this.ctx);
     const point =
       pixelEvent.pixelX !== undefined && pixelEvent.pixelY !== undefined
@@ -680,6 +772,8 @@ export class LiveViewRenderable extends ImageRenderable {
     this.session = null;
     this.tunnel = null;
     this.presentationEpoch += 1;
+    this.activeKeys.clear();
+    this.lastInputGate = null;
     session?.releaseHeldInput();
     session?.close();
     const activeConversion = this.activeConversion;

@@ -10,6 +10,7 @@ const input_metrics = @import("input_metrics.zig");
 const input_packets = @import("../protocol/input_packets.zig");
 const input_state = @import("input_state.zig");
 const pending_input = @import("pending_input.zig");
+const physical_key_state = @import("physical_key_state.zig");
 const native = @import("../platform/macos/native.zig");
 const signaling = @import("../protocol/signaling.zig");
 const state_mod = @import("state.zig");
@@ -26,6 +27,18 @@ pub const Metrics = struct {
     mapped_key_events: u64,
     data_packets_sent: u64,
     data_packets_failed: u64,
+};
+
+pub const PhysicalKeyTarget = physical_key_state.Target;
+
+pub const PhysicalKeyEvent = struct {
+    physical_id: u32,
+    modifier_flags: u64,
+    keysym: ?u64,
+    pressed: bool,
+    repeat: bool = false,
+    modifier_only: bool = false,
+    target: ?PhysicalKeyTarget = null,
 };
 
 pub const Session = struct {
@@ -67,6 +80,7 @@ pub const Session = struct {
     paste_sink_context: ?*anyopaque = null,
     paste_sink: ?*const fn (?*anyopaque, []const u8) bool = null,
     held_input: input_state.InputState = .{},
+    physical_keys: physical_key_state.State = .{},
     status_mutex: std.atomic.Mutex = .unlocked,
     status_bytes: [256]u8 = [_]u8{0} ** 256,
     status_len: u16 = 0,
@@ -455,28 +469,145 @@ pub const Session = struct {
             if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
             return;
         };
-        for (modifiers) |modifier| {
-            const left_held = desired.isKeyHeld(modifier.left_keysym);
-            const right_held = desired.isKeyHeld(modifier.right_keysym);
-            if ((flags & modifier.flag) != 0) {
-                if (!left_held and !right_held) {
-                    if (desired.pressKey(modifier.left_keysym) catch false) {
-                        transitions[transition_count] = .{ .keysym = modifier.left_keysym, .pressed = true };
-                        transition_count += 1;
-                    }
-                }
-            } else {
-                if (left_held) {
-                    transitions[transition_count] = .{ .keysym = modifier.left_keysym, .pressed = false };
-                    transition_count += 1;
-                    _ = desired.releaseKey(modifier.left_keysym);
-                }
-                if (right_held) {
-                    transitions[transition_count] = .{ .keysym = modifier.right_keysym, .pressed = false };
-                    transition_count += 1;
-                    _ = desired.releaseKey(modifier.right_keysym);
-                }
+        appendModifierTransitions(
+            flags,
+            modifiers,
+            &desired,
+            &transitions,
+            &transition_count,
+        );
+        const should_drain = self.enqueueKeyBatchLocked(
+            transitions[0..transition_count],
+            admission.route,
+            now_ns,
+        );
+        self.admission_mutex.unlock();
+        if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+        if (should_drain) _ = self.drainInputQueue(null);
+    }
+
+    /// Admit one AppKit physical-key event as an indivisible modifier/target
+    /// batch. The remembered target makes key-up independent of later layout
+    /// or modifier changes, while unrelated keys always use physical flags.
+    pub fn setPhysicalKey(self: *Session, event: PhysicalKeyEvent, modifiers: anytype) bool {
+        _ = event.repeat;
+        const target_attempted = !event.modifier_only;
+        var transitions: [32]KeyTransition = undefined;
+        var transition_count: usize = 0;
+
+        self.admission_mutex.lock();
+        const stored_target = self.physical_keys.get(event.physical_id);
+        const target = stored_target orelse if (event.pressed) event.target else null;
+        if (target) |value| std.debug.assert(value.physical_id == event.physical_id);
+        const target_keysym = if (target) |value| value.keysym else event.keysym;
+        if (!event.modifier_only and target_keysym == null) {
+            if (!event.pressed) _ = self.physical_keys.take(event.physical_id);
+            self.admission_mutex.unlock();
+            return false;
+        }
+
+        const now_ns = monotonicNowNs();
+        const admission = self.inputRouteLocked(now_ns);
+        if (admission.route == .reject) {
+            if (target_attempted) {
+                self.input_counters.note(.key, .attempted);
+                self.input_counters.note(.key, .control_dropped);
             }
+            if (!event.pressed) _ = self.physical_keys.take(event.physical_id);
+            self.admission_mutex.unlock();
+            return false;
+        }
+        var desired = self.desiredInputLocked() catch {
+            if (target_attempted) {
+                self.input_counters.note(.key, .attempted);
+                self.input_counters.note(.key, .control_dropped);
+            }
+            if (!event.pressed) _ = self.physical_keys.take(event.physical_id);
+            self.admission_mutex.unlock();
+            if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+            return false;
+        };
+
+        if (event.modifier_only) {
+            appendModifierTransitions(
+                event.modifier_flags,
+                modifiers,
+                &desired,
+                &transitions,
+                &transition_count,
+            );
+        } else {
+            if (event.pressed) {
+                const effective_flags = if (target) |value|
+                    (physical_key_state.ModifierTransform{
+                        .removed = value.removed_modifiers,
+                        .forced = value.forced_modifiers,
+                    }).apply(event.modifier_flags)
+                else
+                    event.modifier_flags;
+                appendModifierTransitions(
+                    effective_flags,
+                    modifiers,
+                    &desired,
+                    &transitions,
+                    &transition_count,
+                );
+            }
+
+            const change: input_event.StateChange = .{ .key = .{
+                .keysym = target_keysym.?,
+                .pressed = event.pressed,
+            } };
+            if (input_event.changeNeeded(change, &desired)) {
+                std.debug.assert(transition_count < transitions.len);
+                transitions[transition_count] = .{
+                    .keysym = target_keysym.?,
+                    .pressed = event.pressed,
+                };
+                transition_count += 1;
+                input_event.applyChange(change, &desired) catch {
+                    self.input_counters.note(.key, .attempted);
+                    self.input_counters.note(.key, .control_dropped);
+                    if (!event.pressed) _ = self.physical_keys.take(event.physical_id);
+                    self.admission_mutex.unlock();
+                    if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+                    return false;
+                };
+            } else {
+                self.input_counters.note(.key, .attempted);
+                self.input_counters.note(.key, .duplicate_suppressed);
+            }
+
+            if (!event.pressed and stored_target != null) {
+                appendModifierTransitions(
+                    event.modifier_flags,
+                    modifiers,
+                    &desired,
+                    &transitions,
+                    &transition_count,
+                );
+            }
+        }
+
+        const waiting = admission.route == .wait;
+        if (transition_count != 0 and !self.input_queue.canAppend(transition_count, waiting)) {
+            _ = self.enqueueKeyBatchLocked(
+                transitions[0..transition_count],
+                admission.route,
+                now_ns,
+            );
+            if (!event.pressed) _ = self.physical_keys.take(event.physical_id);
+            self.admission_mutex.unlock();
+            if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
+            return false;
+        }
+
+        if (event.pressed) {
+            if (stored_target == null) {
+                if (event.target) |candidate| _ = self.physical_keys.remember(candidate);
+            }
+        } else {
+            _ = self.physical_keys.take(event.physical_id);
         }
         const should_drain = self.enqueueKeyBatchLocked(
             transitions[0..transition_count],
@@ -486,6 +617,7 @@ pub const Session = struct {
         self.admission_mutex.unlock();
         if (admission.request_control) _ = self.sendClaimedControlRequest(now_ns);
         if (should_drain) _ = self.drainInputQueue(null);
+        return event.modifier_only or transition_count != 0;
     }
 
     pub fn notePointerEvent(self: *Session, mapped: bool) void {
@@ -1032,6 +1164,7 @@ pub const Session = struct {
         @memcpy(held.keys[0..held.key_count], self.held_input.keys[0..held.key_count]);
         held.buttons = self.held_input.buttons;
         self.held_input.clear();
+        self.physical_keys.clear();
         return held;
     }
 
@@ -1239,6 +1372,39 @@ const KeyTransition = struct {
     keysym: u64,
     pressed: bool,
 };
+
+fn appendModifierTransitions(
+    flags: u64,
+    modifiers: anytype,
+    desired: *input_state.InputState,
+    transitions: []KeyTransition,
+    transition_count: *usize,
+) void {
+    for (modifiers) |modifier| {
+        const left_held = desired.isKeyHeld(modifier.left_keysym);
+        const right_held = desired.isKeyHeld(modifier.right_keysym);
+        if ((flags & modifier.flag) != 0) {
+            if (!left_held and !right_held and (desired.pressKey(modifier.left_keysym) catch false)) {
+                std.debug.assert(transition_count.* < transitions.len);
+                transitions[transition_count.*] = .{ .keysym = modifier.left_keysym, .pressed = true };
+                transition_count.* += 1;
+            }
+            continue;
+        }
+        if (left_held) {
+            std.debug.assert(transition_count.* < transitions.len);
+            transitions[transition_count.*] = .{ .keysym = modifier.left_keysym, .pressed = false };
+            transition_count.* += 1;
+            _ = desired.releaseKey(modifier.left_keysym);
+        }
+        if (right_held) {
+            std.debug.assert(transition_count.* < transitions.len);
+            transitions[transition_count.*] = .{ .keysym = modifier.right_keysym, .pressed = false };
+            transition_count.* += 1;
+            _ = desired.releaseKey(modifier.right_keysym);
+        }
+    }
+}
 
 const InFlightInput = struct {
     sequence: u64,
@@ -1752,4 +1918,24 @@ test "modifier synchronization drains to the same desired and held state" {
     try std.testing.expectEqual(session.held_input.key_count, desired.key_count);
     try std.testing.expectEqual(session.held_input.buttons, desired.buttons);
     try std.testing.expectEqual(@as(usize, 0), session.input_queue.len());
+}
+
+test "held-input release clears remembered physical key targets" {
+    var session: Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{ .version = connection.current_version, .label = "shortcut-release-test", .base_url = "http://127.0.0.1" },
+        .native_handle = @ptrFromInt(1),
+    };
+    try std.testing.expect(session.physical_keys.remember(.{
+        .physical_id = 8,
+        .keysym = 'C',
+        .removed_modifiers = 1 << 20,
+        .forced_modifiers = (1 << 18) | (1 << 17),
+    }));
+    try std.testing.expect(session.physical_keys.hasActive());
+
+    session.releaseHeldInput();
+
+    try std.testing.expect(!session.physical_keys.hasActive());
+    try std.testing.expect(session.physical_keys.get(8) == null);
 }

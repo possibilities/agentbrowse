@@ -6,13 +6,40 @@ decoded frames, cursor observations, and held-input cleanup. AppKit and OpenTUI
 decide only how to present those observations and translate local input into
 that core.
 
-AppKit omits key-up events from its ordinary responder chain when a key is
-released while Command remains held. The AppKit frontend adapter installs one
-local key-up monitor, forwards only Command-modified releases for its focused
-Live View, consumes the recovered event to prevent duplicate delivery, and
-removes the monitor when the Live View session closes.
+AppKit key equivalents bypass the ordinary `keyDown:`/`keyUp:` responder pair.
+The AppKit frontend forwards every focused Command chord except local paste and
+quit, then lets the Zig adapter choose which browser conventions to translate.
+One local monitor forwards and consumes every focused key-up. The monitor is
+removed when the session closes, so releases arrive exactly once even when
+Command went up first.
+
+Both frontend adapters translate macOS browser conventions before admission:
+Command-C/X/A/Z/L/T/W/R/F/N/P/D/+/−/0 become Control chords, Command-Left/Right
+become Home/End, Command-Up/Down become Control-Home/End, and Option-Left/Right
+become Control-Left/Right. Shift and unrelated physical modifiers are retained.
+Each translated key uses only its own modifier transform, so a concurrently
+held shortcut cannot turn an unrelated key into a Control chord. The effective
+snapshot precedes the target key-down; an explicit key-up releases the target
+before restoring the current physical snapshot. Shifted targets retain their
+shifted keysym and XKB level instead of sending an unshifted symbol while Shift
+is held. Ordinary Caps Lock text selects the guest level from the reported
+character, while translated shortcuts follow physical Shift and ignore Caps
+Lock. Physical-key targets are cleared with held input on blur, control loss,
+reconnect, and teardown.
+Command-V remains local paste and Command-Q remains local quit. Terminals
+without explicit key-up reports send translated keys as taps and clear their
+modifier snapshot immediately.
 
 ## OpenTUI path
+
+OpenTUI can translate only key reports that the terminal passes through. A
+terminal's own bindings win first: stock Ghostty consumes most macOS Command
+shortcuts (including copy/paste, select-all, undo, tabs/windows, search, zoom,
+and Command/Option-arrow editing) before OpenTUI can observe them. Unbind those
+Ghostty actions when full guest-shortcut parity is desired. With the defaults,
+unbound chords such as Command-L/R/X/P still reach the adapter; terminal-emitted
+replacement text is forwarded as text and cannot be reconstructed as the
+original physical chord.
 
 ```text
 BrowserTargetSource -> BrowserPickerController

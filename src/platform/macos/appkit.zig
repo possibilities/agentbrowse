@@ -1,5 +1,7 @@
 const std = @import("std");
+const connection = @import("../../app/connection.zig");
 const coordinates = @import("../../session/coordinates.zig");
+const input_packets = @import("../../protocol/input_packets.zig");
 const keymap = @import("keymap.zig");
 const native = @import("native.zig");
 const session_mod = @import("../../session/session.zig");
@@ -79,13 +81,24 @@ fn onPointer(context: ?*anyopaque, x: f64, y: f64, view_width: f64, view_height:
 fn onKey(context: ?*anyopaque, key_code: u16, modifiers: u64, pressed: bool, repeat: bool, characters: [*]const u8, characters_len: usize) callconv(.c) void {
     const live_session = fromContext(context);
     live_session.noteKeyEvent(false);
-    const keysym_value = keymap.keysym(key_code, characters[0..characters_len]) orelse return;
-    live_session.noteKeyEvent(true);
-    // AppKit can deliver an ordinary key without a preceding flagsChanged
-    // callback. Reconcile the modifier snapshot first so guest chords retain
-    // their ordering.
-    if (!keymap.isModifierKey(key_code)) live_session.syncModifiers(modifiers, &keymap.modifiers);
-    _ = live_session.setKey(keysym_value, pressed, repeat);
+    const character_bytes = characters[0..characters_len];
+    const keysym_value = keymap.keysym(key_code, character_bytes);
+    const modifier_only = keymap.isModifierKey(key_code);
+    const target: ?session_mod.PhysicalKeyTarget = if (!pressed or modifier_only or keysym_value == null)
+        null
+    else
+        keymap.shortcutTranslation(key_code, modifiers, character_bytes) orelse
+            keymap.physicalTarget(key_code, keysym_value.?);
+    const handled = live_session.setPhysicalKey(.{
+        .physical_id = key_code,
+        .modifier_flags = modifiers,
+        .keysym = keysym_value,
+        .pressed = pressed,
+        .repeat = repeat,
+        .modifier_only = modifier_only,
+        .target = target,
+    }, &keymap.modifiers);
+    if (handled or keysym_value != null) live_session.noteKeyEvent(true);
 }
 
 fn onPaste(context: ?*anyopaque, bytes: [*]const u8, len: usize) callconv(.c) void {
@@ -166,4 +179,97 @@ test "scroll deltas follow macOS direction and Neko units" {
     try std.testing.expectEqual(@as(i16, -8), normalizeScrollDelta(2, true));
     try std.testing.expectEqual(@as(i16, 12), normalizeScrollDelta(-3, true));
     try std.testing.expectEqual(@as(i16, -19), normalizeScrollDelta(1, false));
+}
+
+const KeyPacketRecorder = struct {
+    packets: [32][11]u8 = undefined,
+    count: usize = 0,
+};
+
+fn recordKeyPacket(context: ?*anyopaque, bytes: []const u8) bool {
+    const recorder: *KeyPacketRecorder = @ptrCast(@alignCast(context.?));
+    std.debug.assert(bytes.len == 11);
+    @memcpy(&recorder.packets[recorder.count], bytes);
+    recorder.count += 1;
+    return true;
+}
+
+test "translated AppKit key-up restores the current physical modifiers" {
+    var session: session_mod.Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{ .version = connection.current_version, .label = "appkit-shortcut-test", .base_url = "http://127.0.0.1" },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    var recorder: KeyPacketRecorder = .{};
+    session.packet_sink_context = &recorder;
+    session.packet_sink = recordKeyPacket;
+    session.data_open.store(1, .release);
+    session.authorized.store(1, .release);
+    const character = "C";
+
+    onKey(&session, 8, keymap.command_flag | keymap.shift_flag, true, false, character.ptr, character.len);
+    // AppKit reports the Command flagsChanged release before the character
+    // key-up. That modifier event restores the physical Shift-only snapshot;
+    // releasing C must not synthesize another Control tap.
+    onKey(&session, 55, keymap.shift_flag, false, false, "".ptr, 0);
+    onKey(&session, 8, keymap.shift_flag, false, false, character.ptr, character.len);
+
+    const expected = [_][11]u8{
+        input_packets.key(.down, 0xffe1),
+        input_packets.key(.down, 0xffe3),
+        input_packets.key(.down, 'C'),
+        input_packets.key(.up, 0xffe3),
+        input_packets.key(.up, 'C'),
+    };
+    try std.testing.expectEqual(expected.len, recorder.count);
+    for (expected, 0..) |packet, index| {
+        try std.testing.expectEqualSlices(u8, &packet, &recorder.packets[index]);
+    }
+    try std.testing.expect(!session.physical_keys.hasActive());
+}
+
+test "AppKit modifier sides reconcile and translations do not leak into unrelated keys" {
+    var session: session_mod.Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{ .version = connection.current_version, .label = "appkit-shortcut-isolation-test", .base_url = "http://127.0.0.1" },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.cursor.deinit(std.testing.allocator);
+    var recorder: KeyPacketRecorder = .{};
+    session.packet_sink_context = &recorder;
+    session.packet_sink = recordKeyPacket;
+    session.data_open.store(1, .release);
+    session.authorized.store(1, .release);
+    const empty = "";
+
+    // Right Command is deliberately reconciled through the side-neutral
+    // modifier path, which consistently owns Meta_L.
+    onKey(&session, 54, keymap.command_flag, true, false, empty.ptr, empty.len);
+    onKey(&session, 8, keymap.command_flag, true, false, "c".ptr, 1);
+    // B is not translated. Even while translated C remains down, B sees the
+    // physical Command snapshot rather than an aggregate forced Control.
+    onKey(&session, 11, keymap.command_flag, true, false, "b".ptr, 1);
+    onKey(&session, 11, keymap.command_flag, false, false, "b".ptr, 1);
+    onKey(&session, 8, keymap.command_flag, false, false, "c".ptr, 1);
+    onKey(&session, 54, 0, false, false, empty.ptr, empty.len);
+
+    const expected = [_][11]u8{
+        input_packets.key(.down, 0xffe7),
+        input_packets.key(.down, 0xffe3),
+        input_packets.key(.up, 0xffe7),
+        input_packets.key(.down, 'c'),
+        input_packets.key(.up, 0xffe3),
+        input_packets.key(.down, 0xffe7),
+        input_packets.key(.down, 'b'),
+        input_packets.key(.up, 'b'),
+        input_packets.key(.up, 'c'),
+        input_packets.key(.up, 0xffe7),
+    };
+    try std.testing.expectEqual(expected.len, recorder.count);
+    for (expected, 0..) |packet, index| {
+        try std.testing.expectEqualSlices(u8, &packet, &recorder.packets[index]);
+    }
+    try std.testing.expectEqual(@as(usize, 0), session.held_input.key_count);
+    try std.testing.expect(!session.physical_keys.hasActive());
 }

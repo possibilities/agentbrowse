@@ -142,12 +142,316 @@ test("a native conversion result failure marks the current surface failed", asyn
   }
 });
 
+test("Kitty shortcut release restores the physical modifiers after Command was released first", async () => {
+  const harness = await renderableHarness();
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+
+    expect(
+      harness.internals.forwardKey(keyEvent({ name: "c", baseCode: 99, super: true, shift: true })),
+    ).toBe(true);
+    expect(session.keyCalls.slice(0, 6)).toEqual([
+      { keysym: 0xffe1n, pressed: true, repeat: false },
+      { keysym: 0xffe3n, pressed: true, repeat: false },
+      { keysym: 0xffe9n, pressed: false, repeat: false },
+      { keysym: 0xffe7n, pressed: false, repeat: false },
+      { keysym: 0xffedn, pressed: false, repeat: false },
+      { keysym: 0x43n, pressed: true, repeat: false },
+    ]);
+
+    harness.internals.forwardKey(
+      keyEvent({ name: "leftsuper", super: false, eventType: "release" }),
+    );
+    expect(session.keyCalls.slice(-5)).toContainEqual({
+      keysym: 0xffe3n,
+      pressed: false,
+      repeat: false,
+    });
+
+    expect(
+      harness.internals.forwardKey(
+        keyEvent({
+          name: "c",
+          baseCode: 99,
+          super: false,
+          shift: true,
+          eventType: "release",
+        }),
+      ),
+    ).toBe(true);
+    expect(session.keyCalls.slice(-6)).toEqual([
+      { keysym: 0x43n, pressed: false, repeat: false },
+      { keysym: 0xffe1n, pressed: true, repeat: false },
+      { keysym: 0xffe3n, pressed: false, repeat: false },
+      { keysym: 0xffe9n, pressed: false, repeat: false },
+      { keysym: 0xffe7n, pressed: false, repeat: false },
+      { keysym: 0xffedn, pressed: false, repeat: false },
+    ]);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("raw Option navigation remains a tap and clears translated modifiers", async () => {
+  const harness = await renderableHarness();
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+
+    expect(
+      harness.internals.forwardKey(
+        keyEvent({ name: "left", source: "raw", meta: true, option: false }),
+      ),
+    ).toBe(true);
+    expect(session.keyCalls.slice(0, 7)).toEqual([
+      { keysym: 0xffe1n, pressed: false, repeat: false },
+      { keysym: 0xffe3n, pressed: true, repeat: false },
+      { keysym: 0xffe9n, pressed: false, repeat: false },
+      { keysym: 0xffe7n, pressed: false, repeat: false },
+      { keysym: 0xffedn, pressed: false, repeat: false },
+      { keysym: 0xff51n, pressed: true, repeat: false },
+      { keysym: 0xff51n, pressed: false, repeat: false },
+    ]);
+    expect(session.keyCalls.slice(-5).every((call) => call.pressed === false)).toBe(true);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("releaseHeldInput clears translated Kitty state and leaves Command-V local", async () => {
+  const harness = await renderableHarness();
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+    expect(harness.internals.forwardKey(keyEvent({ name: "c", baseCode: 99, super: true }))).toBe(
+      true,
+    );
+    session.keyCalls.length = 0;
+
+    harness.surface.releaseHeldInput();
+    expect(session.releasedHeldInput).toBe(1);
+    expect(
+      harness.internals.forwardKey(
+        keyEvent({
+          name: "c",
+          baseCode: 99,
+          super: false,
+          eventType: "release",
+        }),
+      ),
+    ).toBe(true);
+    expect(session.keyCalls.some((call) => call.keysym === 0xffe3n && call.pressed)).toBe(false);
+
+    session.keyCalls.length = 0;
+    expect(harness.internals.forwardKey(keyEvent({ name: "v", baseCode: 118, super: true }))).toBe(
+      false,
+    );
+    expect(session.keyCalls).toEqual([]);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("an observed control loss clears translated Kitty state", async () => {
+  const harness = await renderableHarness();
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+    harness.internals.pollNative();
+    expect(harness.internals.forwardKey(keyEvent({ name: "c", baseCode: 99, super: true }))).toBe(
+      true,
+    );
+
+    session.authorized = false;
+    harness.internals.pollNative();
+    session.keyCalls.length = 0;
+    expect(
+      harness.internals.forwardKey(
+        keyEvent({
+          name: "c",
+          baseCode: 99,
+          super: false,
+          eventType: "release",
+        }),
+      ),
+    ).toBe(true);
+    expect(session.keyCalls.some((call) => call.keysym === 0xffe3n && call.pressed)).toBe(false);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("an active translated key does not transform an unrelated Kitty key", async () => {
+  const harness = await renderableHarness();
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+    expect(harness.internals.forwardKey(keyEvent({ name: "c", baseCode: 99, super: true }))).toBe(
+      true,
+    );
+    session.keyCalls.length = 0;
+
+    expect(harness.internals.forwardKey(keyEvent({ name: "b", baseCode: 98, super: true }))).toBe(
+      true,
+    );
+    expect(session.keyCalls.slice(0, 6)).toEqual([
+      { keysym: 0xffe1n, pressed: false, repeat: false },
+      { keysym: 0xffe3n, pressed: false, repeat: false },
+      { keysym: 0xffe9n, pressed: false, repeat: false },
+      { keysym: 0xffe7n, pressed: true, repeat: false },
+      { keysym: 0xffedn, pressed: false, repeat: false },
+      { keysym: 0x62n, pressed: true, repeat: false },
+    ]);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("an identity-less repeat replaces the prior same-name Kitty target", async () => {
+  const harness = await renderableHarness();
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+    harness.internals.forwardKey(keyEvent({ name: "c", baseCode: 99, super: true }));
+    expect([...harness.internals.activeKeys.keys()]).toEqual(["base:99"]);
+
+    // Native duplicate suppression rejects the repeated key-down. The JS
+    // identity still has to migrate so a release without Kitty alternates can
+    // find and clear the target.
+    session.acceptKeys = false;
+    harness.internals.forwardKey(
+      keyEvent({ name: "c", super: true, eventType: "repeat", repeated: true }),
+    );
+    expect([...harness.internals.activeKeys.keys()]).toEqual(["name:c"]);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("shifted Kitty targets survive modifier-first release and missing release alternates", async () => {
+  const harness = await renderableHarness();
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+    expect(
+      harness.internals.forwardKey(
+        keyEvent({ name: "z", sequence: "Z", baseCode: 122, shift: true }),
+      ),
+    ).toBe(true);
+    expect(session.keyCalls.at(-1)).toEqual({
+      keysym: 0x5an,
+      pressed: true,
+      repeat: false,
+    });
+
+    harness.internals.forwardKey(
+      keyEvent({ name: "leftshift", shift: false, eventType: "release" }),
+    );
+    session.keyCalls.length = 0;
+    expect(
+      harness.internals.forwardKey(
+        keyEvent({
+          name: "z",
+          sequence: "z",
+          shift: false,
+          eventType: "release",
+        }),
+      ),
+    ).toBe(true);
+    expect(session.keyCalls.slice(0, 6)).toEqual([
+      { keysym: 0x5an, pressed: false, repeat: false },
+      { keysym: 0xffe1n, pressed: false, repeat: false },
+      { keysym: 0xffe3n, pressed: false, repeat: false },
+      { keysym: 0xffe9n, pressed: false, repeat: false },
+      { keysym: 0xffe7n, pressed: false, repeat: false },
+      { keysym: 0xffedn, pressed: false, repeat: false },
+    ]);
+    expect(session.keyCalls.slice(-5).every((call) => call.pressed === false)).toBe(true);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("Caps Lock text selects the guest XKB level without changing shortcut meaning", async () => {
+  const harness = await renderableHarness();
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+
+    expect(
+      harness.internals.forwardKey(
+        keyEvent({ name: "c", sequence: "C", capsLock: true, shift: false }),
+      ),
+    ).toBe(true);
+    expect(session.keyCalls.slice(0, 6)).toEqual([
+      { keysym: 0xffe1n, pressed: true, repeat: false },
+      { keysym: 0xffe3n, pressed: false, repeat: false },
+      { keysym: 0xffe9n, pressed: false, repeat: false },
+      { keysym: 0xffe7n, pressed: false, repeat: false },
+      { keysym: 0xffedn, pressed: false, repeat: false },
+      { keysym: 0x43n, pressed: true, repeat: false },
+    ]);
+    harness.internals.forwardKey(
+      keyEvent({
+        name: "c",
+        sequence: "C",
+        capsLock: true,
+        eventType: "release",
+      }),
+    );
+
+    session.keyCalls.length = 0;
+    expect(
+      harness.internals.forwardKey(
+        keyEvent({ name: "C", baseCode: 99, capsLock: true, super: true }),
+      ),
+    ).toBe(true);
+    expect(session.keyCalls.slice(0, 6)).toEqual([
+      { keysym: 0xffe1n, pressed: false, repeat: false },
+      { keysym: 0xffe3n, pressed: true, repeat: false },
+      { keysym: 0xffe9n, pressed: false, repeat: false },
+      { keysym: 0xffe7n, pressed: false, repeat: false },
+      { keysym: 0xffedn, pressed: false, repeat: false },
+      { keysym: 0x63n, pressed: true, repeat: false },
+    ]);
+    harness.internals.forwardKey(
+      keyEvent({
+        name: "C",
+        baseCode: 99,
+        capsLock: true,
+        super: false,
+        eventType: "release",
+      }),
+    );
+
+    session.keyCalls.length = 0;
+    expect(
+      harness.internals.forwardKey(
+        keyEvent({ name: "z", sequence: "z", capsLock: true, shift: true }),
+      ),
+    ).toBe(true);
+    expect(session.keyCalls.slice(0, 6)).toEqual([
+      { keysym: 0xffe1n, pressed: false, repeat: false },
+      { keysym: 0xffe3n, pressed: false, repeat: false },
+      { keysym: 0xffe9n, pressed: false, repeat: false },
+      { keysym: 0xffe7n, pressed: false, repeat: false },
+      { keysym: 0xffedn, pressed: false, repeat: false },
+      { keysym: 0x7an, pressed: true, repeat: false },
+    ]);
+  } finally {
+    await harness.dispose();
+  }
+});
+
 interface RenderableInternals {
   session: FakeSession | null;
+  activeKeys: Map<string, unknown>;
   activeConversion: Promise<void> | null;
   _widthValue: number;
   pollNative(): void;
   frameConverter: FakeConversionClient;
+  forwardKey(key: ReturnType<typeof keyEvent>): boolean;
 }
 
 async function renderableHarness(): Promise<{
@@ -169,7 +473,9 @@ async function renderableHarness(): Promise<{
     conversionMode: "synchronous",
   });
   const internals = surface as unknown as RenderableInternals;
-  const original = internals.frameConverter as unknown as { close(): Promise<void> };
+  const original = internals.frameConverter as unknown as {
+    close(): Promise<void>;
+  };
   await original.close();
   const converter = new FakeConversionClient();
   internals.frameConverter = converter;
@@ -240,9 +546,17 @@ class FakeSession {
   closed = false;
   callsAfterClose = 0;
   releasedHeldInput = 0;
+  dataOpen = true;
+  authorized = true;
+  acceptKeys = true;
+  readonly keyCalls: Array<{
+    keysym: bigint;
+    pressed: boolean;
+    repeat: boolean;
+  }> = [];
   private readonly leases: FakeLease[];
 
-  constructor(lease: FakeLease | FakeLease[]) {
+  constructor(lease: FakeLease | FakeLease[] = []) {
     this.leases = Array.isArray(lease) ? [...lease] : [lease];
   }
 
@@ -250,8 +564,8 @@ class FakeSession {
     this.assertOpen();
     return {
       lifecycle: "connected" as const,
-      dataOpen: true,
-      authorized: true,
+      dataOpen: this.dataOpen,
+      authorized: this.authorized,
       controlRequested: false,
       readOnly: false,
       closed: false,
@@ -277,6 +591,12 @@ class FakeSession {
     this.releasedHeldInput += 1;
   }
 
+  setKey(keysym: bigint, pressed: boolean, repeat = false): boolean {
+    this.assertOpen();
+    this.keyCalls.push({ keysym, pressed, repeat });
+    return this.acceptKeys;
+  }
+
   close(): void {
     this.closed = true;
   }
@@ -286,6 +606,40 @@ class FakeSession {
     this.callsAfterClose += 1;
     throw new Error("fake session used after close");
   }
+}
+
+function keyEvent(
+  overrides: Partial<{
+    name: string;
+    sequence: string;
+    baseCode: number;
+    code: string;
+    super: boolean;
+    option: boolean;
+    meta: boolean;
+    ctrl: boolean;
+    shift: boolean;
+    capsLock: boolean;
+    hyper: boolean;
+    eventType: "press" | "repeat" | "release";
+    source: "raw" | "kitty";
+    repeated: boolean;
+  }> = {},
+) {
+  return {
+    name: "a",
+    super: false,
+    option: false,
+    meta: false,
+    ctrl: false,
+    shift: false,
+    capsLock: false,
+    hyper: false,
+    eventType: "press" as const,
+    source: "kitty" as const,
+    repeated: false,
+    ...overrides,
+  };
 }
 
 class FakeLease implements AsyncConvertibleFrameLease {

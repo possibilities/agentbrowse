@@ -58,8 +58,13 @@ test("embeddable native sessions never write process diagnostics", () => {
   expect(readFileSync(NATIVE_SESSION, "utf8")).not.toContain("std.debug.print");
 });
 
-test("AppKit recovers focused Command-held key-up events and removes its monitor", () => {
+test("AppKit forwards browser key equivalents and pairs every focused key-up", () => {
   const bridge = readFileSync(NATIVE_BRIDGE, "utf8");
+  expect(bridge).toContain("KLIsLocalCommandShortcut");
+  expect(bridge).toContain("self.window.firstResponder != self");
+  expect(bridge).toMatch(/Command-V is owned locally[\s\S]+KLIsLocalCommandShortcut/u);
+  expect(bridge).toContain("event.modifierFlags & ~NSEventModifierFlagCommand");
+  expect(bridge).toContain("[self keyDown:event]");
   expect(bridge).toContain("addLocalMonitorForEventsMatchingMask:NSEventMaskKeyUp");
   expect(bridge).toMatch(/event\.window != window[\s\S]+window\.firstResponder != inputView/u);
   expect(bridge).toMatch(/\[inputView keyUp:event\];\s*return nil;/u);

@@ -8,6 +8,15 @@ export interface OpenTuiModifierSnapshot {
   hyper: boolean;
 }
 
+export interface OpenTuiKeyTarget {
+  keysym: bigint;
+  forceControl: boolean;
+  forceShift: boolean;
+  removeShift: boolean;
+  removeAlt: boolean;
+  removeMeta: boolean;
+}
+
 export const X11_MODIFIER_KEYSYMS = {
   shift: 0xffe1n,
   control: 0xffe3n,
@@ -122,6 +131,26 @@ const UNSHIFTED_ASCII: Readonly<Record<string, string>> = {
   "?": "/",
 };
 
+const UNSHIFTED_LEVEL_ASCII = "`1234567890-=[]\\;',./";
+
+const COMMAND_CONTROL_SHORTCUTS = new Set([
+  "a",
+  "c",
+  "d",
+  "f",
+  "l",
+  "n",
+  "p",
+  "r",
+  "t",
+  "w",
+  "x",
+  "z",
+  "=",
+  "-",
+  "0",
+]);
+
 export function isOpenTuiModifierKey(key: Pick<KeyEvent, "name">): boolean {
   return key.name.toLowerCase() in MODIFIER_NAMES;
 }
@@ -154,8 +183,133 @@ export function openTuiModifierSnapshot(
   return snapshot;
 }
 
+/** A stable physical identity for matching Kitty press and release reports. */
+export function openTuiPhysicalKeyIdentity(
+  key: Pick<KeyEvent, "name" | "baseCode" | "code">,
+): string {
+  if (key.baseCode !== undefined) return `base:${key.baseCode}`;
+  if (key.code) return `code:${key.code}`;
+  return `name:${key.name.toLowerCase()}`;
+}
+
+/** Translate macOS browser conventions into the Linux guest's shortcuts. */
+export function openTuiShortcutTranslation(
+  key: Pick<KeyEvent, "name" | "baseCode" | "super" | "option" | "meta" | "shift"> &
+    Partial<Pick<KeyEvent, "sequence" | "capsLock">>,
+): OpenTuiKeyTarget | null {
+  const command = Boolean(key.super);
+  const option = Boolean(key.option || (key.meta && !key.super));
+  const name = key.name.toLowerCase();
+
+  if (command && !option) {
+    const navigation =
+      name === "left"
+        ? 0xff50n
+        : name === "right"
+          ? 0xff57n
+          : name === "up"
+            ? 0xff50n
+            : name === "down"
+              ? 0xff57n
+              : null;
+    if (navigation !== null) {
+      return {
+        keysym: navigation,
+        forceControl: name === "up" || name === "down",
+        forceShift: key.shift,
+        removeShift: false,
+        removeAlt: false,
+        removeMeta: true,
+      };
+    }
+    const shortcutName = shortcutLayoutName(key);
+    if (!COMMAND_CONTROL_SHORTCUTS.has(shortcutName)) return null;
+    const keysym = shortcutTargetKeysym(shortcutName, key.shift);
+    return keysym === null
+      ? null
+      : {
+          keysym,
+          forceControl: true,
+          forceShift: key.shift,
+          removeShift: false,
+          removeAlt: false,
+          removeMeta: true,
+        };
+  }
+
+  if (option && !command && (name === "left" || name === "right")) {
+    return {
+      keysym: name === "left" ? 0xff51n : 0xff53n,
+      forceControl: true,
+      forceShift: key.shift,
+      removeShift: false,
+      removeAlt: true,
+      removeMeta: false,
+    };
+  }
+  return null;
+}
+
+export function isOpenTuiLocalShortcut(
+  key: Pick<KeyEvent, "name" | "baseCode" | "super">,
+): boolean {
+  if (!key.super) return false;
+  const name = shortcutLayoutName(key);
+  return name === "v" || name === "q";
+}
+
+export function applyOpenTuiKeyTargetModifiers(
+  physical: OpenTuiModifierSnapshot,
+  target: OpenTuiKeyTarget | null,
+): OpenTuiModifierSnapshot {
+  const effective = { ...physical };
+  if (target?.forceControl) effective.control = true;
+  if (target?.removeShift) effective.shift = false;
+  if (target?.forceShift) effective.shift = true;
+  if (target?.removeAlt) effective.alt = false;
+  if (target?.removeMeta) effective.meta = false;
+  return effective;
+}
+
+function shortcutLayoutName(key: Pick<KeyEvent, "name" | "baseCode">): string {
+  const layoutCharacter = singleAsciiCharacter(key.name);
+  if (layoutCharacter !== null) return normalizeShortcutCharacter(layoutCharacter);
+  if (key.baseCode !== undefined && key.baseCode >= 0 && key.baseCode <= 0x10ffff) {
+    const baseCharacter = singleAsciiCharacter(String.fromCodePoint(key.baseCode));
+    if (baseCharacter !== null) return normalizeShortcutCharacter(baseCharacter);
+  }
+  return key.name.toLowerCase();
+}
+
+function shortcutTargetKeysym(shortcutName: string, shifted: boolean): bigint | null {
+  return keysymForCharacter(shifted ? shiftedAscii(shortcutName) : shortcutName);
+}
+
+function normalizeShortcutCharacter(character: string): string {
+  const lower = character.toLowerCase();
+  return UNSHIFTED_ASCII[lower] ?? lower;
+}
+
+function singleAsciiCharacter(value: string): string | null {
+  const characters = [...value];
+  if (characters.length !== 1) return null;
+  const codepoint = characters[0]!.codePointAt(0)!;
+  return codepoint >= 0x20 && codepoint <= 0x7e ? characters[0]! : null;
+}
+
+function shiftedAscii(character: string): string {
+  const upper = character.toLocaleUpperCase();
+  if (upper !== character && [...upper].length === 1) return upper;
+  for (const [shifted, unshifted] of Object.entries(UNSHIFTED_ASCII)) {
+    if (unshifted === character) return shifted;
+  }
+  return character;
+}
+
 /** Map an OpenTUI key to the X11 keysym expected by Neko's input channel. */
-export function keysymForOpenTuiKey(key: Pick<KeyEvent, "name" | "shift">): bigint | null {
+export function keysymForOpenTuiKey(
+  key: Pick<KeyEvent, "name" | "shift"> & Partial<Pick<KeyEvent, "sequence">>,
+): bigint | null {
   const name = key.name.toLowerCase();
   if (name === "space") return 0x20n;
   const special = SPECIAL_KEYSYMS[name];
@@ -164,11 +318,58 @@ export function keysymForOpenTuiKey(key: Pick<KeyEvent, "name" | "shift">): bigi
   const functionMatch = /^f([1-9]|[12][0-9]|3[0-5])$/u.exec(name);
   if (functionMatch) return 0xffben + BigInt(Number(functionMatch[1]) - 1);
 
-  const characters = [...key.name];
-  if (characters.length !== 1) return null;
-  let character = characters[0]!;
-  if (/^[A-Z]$/u.test(character)) character = character.toLowerCase();
-  else if (key.shift) character = UNSHIFTED_ASCII[character] ?? character;
+  const sequenceCharacter = reportedSequenceCharacter(key.sequence);
+  let character = sequenceCharacter ?? singleCharacter(key.name);
+  if (character === null) return null;
+  if (key.shift && sequenceCharacter === null) character = shiftedAscii(character);
+  return keysymForCharacter(character);
+}
+
+/** Whether an exact printable target needs the guest's shifted XKB level. */
+export function openTuiKeyLevelRequiresShift(
+  key: Pick<KeyEvent, "name" | "shift"> & Partial<Pick<KeyEvent, "sequence">>,
+): boolean {
+  return openTuiKeyShiftLevel(key) === "shifted";
+}
+
+/** Whether an exact printable target needs physical Shift suppressed. */
+export function openTuiKeyLevelRemovesShift(
+  key: Pick<KeyEvent, "name" | "shift"> & Partial<Pick<KeyEvent, "sequence">>,
+): boolean {
+  return openTuiKeyShiftLevel(key) === "unshifted";
+}
+
+function openTuiKeyShiftLevel(
+  key: Pick<KeyEvent, "name" | "shift"> & Partial<Pick<KeyEvent, "sequence">>,
+): "preserve" | "unshifted" | "shifted" {
+  const sequenceCharacter = reportedSequenceCharacter(key.sequence);
+  let character = sequenceCharacter ?? singleCharacter(key.name);
+  if (character === null) return "preserve";
+  if (key.shift && sequenceCharacter === null) character = shiftedAscii(character);
+  if (UNSHIFTED_ASCII[character] !== undefined) return "shifted";
+  if (/^[A-Z]$/u.test(character)) return "shifted";
+  if (/^[a-z]$/u.test(character)) return "unshifted";
+  if (UNSHIFTED_LEVEL_ASCII.includes(character)) return "unshifted";
+  return "preserve";
+}
+
+function reportedSequenceCharacter(sequence: string | undefined): string | null {
+  if (sequence === undefined) return null;
+  const characters = [...sequence];
+  return characters.length === 1 && isPrintableCharacter(characters[0]!) ? characters[0]! : null;
+}
+
+function singleCharacter(value: string): string | null {
+  const characters = [...value];
+  return characters.length === 1 ? characters[0]! : null;
+}
+
+function isPrintableCharacter(character: string): boolean {
+  const codepoint = character.codePointAt(0);
+  return codepoint !== undefined && codepoint >= 0x20 && codepoint !== 0x7f;
+}
+
+function keysymForCharacter(character: string): bigint | null {
   const codepoint = character.codePointAt(0);
   if (codepoint === undefined || codepoint < 0x20 || codepoint === 0x7f) return null;
   if (codepoint <= 0xff) return BigInt(codepoint);
