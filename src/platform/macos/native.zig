@@ -21,6 +21,7 @@ pub const Callbacks = extern struct {
     on_state: ?*const fn (?*anyopaque, State) callconv(.c) void,
     on_error: ?*const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void,
     on_frame: ?*const fn (?*anyopaque, u32, u32, u16, i64, [*]const u8, u32, [*]const u8, u32, [*]const u8, u32) callconv(.c) void,
+    on_frame_metadata: ?*const fn (?*anyopaque, u32, u32) callconv(.c) void,
     on_paste_ready: ?*const fn (?*anyopaque) callconv(.c) void,
 };
 

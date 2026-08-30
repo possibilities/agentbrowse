@@ -319,6 +319,7 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 @property(nonatomic, assign) KLNativeCallbacks callbacks;
 @property(nonatomic, strong) NSLock *callbackLock;
 @property(nonatomic, assign) BOOL enabled;
+@property(nonatomic, assign) BOOL copyFrames;
 @end
 
 @implementation KLFrameSink
@@ -326,7 +327,19 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 - (void)renderFrame:(LKRTCVideoFrame *)frame {
   if (!frame) return;
   [_callbackLock lock];
-  if (!_enabled || !_callbacks.on_frame) {
+  if (!_enabled) {
+    [_callbackLock unlock];
+    return;
+  }
+  if (!_copyFrames) {
+    if (_callbacks.on_frame_metadata) {
+      _callbacks.on_frame_metadata(_callbacks.context, frame.buffer.width,
+                                   frame.buffer.height);
+    }
+    [_callbackLock unlock];
+    return;
+  }
+  if (!_callbacks.on_frame) {
     [_callbackLock unlock];
     return;
   }
@@ -393,6 +406,7 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
   _frameSink.callbacks = callbacks;
   _frameSink.callbackLock = [NSLock new];
   _frameSink.enabled = YES;
+  _frameSink.copyFrames = YES;
   return self;
 }
 
@@ -450,6 +464,9 @@ static void KLBytes(NSString *value, void (^body)(const uint8_t *, size_t)) {
 - (BOOL)createWindowWithCallbacks:(KLAppKitCallbacks)callbacks
                              title:(NSString *)title {
   if (self.window) return NO;
+  [self.frameSink.callbackLock lock];
+  self.frameSink.copyFrames = NO;
+  [self.frameSink.callbackLock unlock];
   self.appKitCallbacks = callbacks;
   self.windowTitle = title.length ? title : @"Kernel Live View";
   [NSApplication sharedApplication];

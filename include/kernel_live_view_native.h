@@ -63,6 +63,7 @@ typedef struct KLNativeCallbacks {
                    const uint8_t *plane_y, uint32_t stride_y,
                    const uint8_t *plane_u, uint32_t stride_u,
                    const uint8_t *plane_v, uint32_t stride_v);
+  void (*on_frame_metadata)(void *context, uint32_t width, uint32_t height);
   void (*on_paste_ready)(void *context);
 } KLNativeCallbacks;
 

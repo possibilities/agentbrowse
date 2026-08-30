@@ -129,10 +129,12 @@ the next release cycle or that server sweep.
 The Objective-C++ bridge attaches two renderers to the WebRTC video track:
 
 - LiveKitWebRTC's Metal view presents frames for the AppKit adapter.
-- A raw renderer copies decoded I420 planes into an immutable, reference-counted
-  `Frame` for every frontend-neutral consumer.
+- A frontend-neutral observer copies decoded I420 planes into an immutable,
+  reference-counted `Frame` for headless/OpenTUI sessions. AppKit sessions keep
+  the observer metadata-only: it publishes decoded dimensions for input mapping
+  and metrics without calling `toI420` or copying planes that Metal already owns.
 
-Publishing a frame assigns a monotonically increasing generation and replaces
+Publishing a headless frame assigns a monotonically increasing generation and replaces
 the queue's one retained frame. A consumer acquires only a generation newer
 than the one it has seen and receives an independent frame lease. Replacing or
 clearing the queue cannot invalidate an outstanding lease, and releasing a

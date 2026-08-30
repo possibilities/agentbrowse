@@ -86,6 +86,7 @@ pub const Session = struct {
             .on_state = onNativeState,
             .on_error = onNativeError,
             .on_frame = onFrame,
+            .on_frame_metadata = onFrameMetadata,
             .on_paste_ready = onPasteReady,
         };
         const native_handle = native.kl_native_create(callbacks) orelse return error.NativeInitializationFailed;
@@ -1198,6 +1199,13 @@ fn onFrame(context: ?*anyopaque, width: u32, height: u32, rotation: u16, timesta
     self.remote_height.store(height, .release);
     self.frames.publish(frame);
     if (decoded == 1 or decoded % 100 == 0) noteFrameSample(self);
+}
+
+fn onFrameMetadata(context: ?*anyopaque, width: u32, height: u32) callconv(.c) void {
+    const self = fromContext(context);
+    _ = self.decoded_frames.fetchAdd(1, .monotonic);
+    self.remote_width.store(width, .release);
+    self.remote_height.store(height, .release);
 }
 
 fn noteFrameSample(self: *Session) void {

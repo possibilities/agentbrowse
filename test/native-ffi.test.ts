@@ -66,6 +66,14 @@ test("AppKit recovers focused Command-held key-up events and removes its monitor
   expect(bridge).toContain("[NSEvent removeMonitor:commandKeyUpMonitor]");
 });
 
+test("AppKit observes frame dimensions without copying decoded I420 planes", () => {
+  const bridge = readFileSync(NATIVE_BRIDGE, "utf8");
+  expect(bridge).toContain("self.frameSink.copyFrames = NO");
+  expect(bridge).toMatch(
+    /if \(!_copyFrames\)[\s\S]+_callbacks\.on_frame_metadata[\s\S]+return;[\s\S]+\[frame\.buffer toI420\]/u,
+  );
+});
+
 test("paste readiness leaves the native session monitor before draining Zig input", () => {
   const bridge = readFileSync(NATIVE_BRIDGE, "utf8");
   expect(bridge).toMatch(

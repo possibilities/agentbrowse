@@ -9,9 +9,10 @@ and 17 threads after more than ten minutes. These are development (`Debug`)
 build figures, not release targets.
 
 The LiveKit Metal renderer does not expose a display acknowledgement. AppKit
-therefore reports decoded frames, conversion failures, queue publications,
-queue replacements, and periodic frame checksums; it does not describe
-submitted frames as confirmed display refreshes.
+therefore reports decoded-frame counts and dimensions, but does not describe
+those frames as confirmed display refreshes. Conversion failures, queue
+publications, queue replacements, and periodic frame checksums belong to the
+headless/OpenTUI path.
 
 An outage test kept the tunnel down across multiple failed WebSocket attempts,
 then restored it. The same window re-established signaling, WebRTC, the
@@ -135,6 +136,12 @@ display refresh. The expected physical floor is 0–16.7 ms for Chromium paint,
 plus 0–40 ms at 25 fps for capture, then encode, LAN transport, jitter buffer,
 decode, and at most the declared poll interval. Neko exposes no per-frame
 server telemetry, so the probe cannot apportion those internal stages.
+
+AppKit presents the decoded WebRTC buffer directly through LiveKitWebRTC's
+Metal renderer. Its parallel observer is metadata-only, retaining decoded size
+for input mapping without converting the same frame to I420 or publishing a
+headless Frame copy. Headless/OpenTUI sessions retain raw publication because
+their polling ABI owns conversion and presentation.
 
 Terminal-protocol throughput, sustained CPU/RSS for Kitty graphics versus
 block fallback, and presentation acknowledgement still need controlled adapter
