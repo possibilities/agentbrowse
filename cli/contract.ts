@@ -22,6 +22,14 @@ export interface ContractArgument {
   readonly choices?: readonly string[];
   readonly default?: unknown;
   readonly aliases?: readonly string[];
+  readonly csv?: boolean;
+  readonly minimum?: number;
+  readonly maximum?: number;
+  /** What kind of knob this is, for a consumer building a call surface.
+   * Absent means `call`. AgentBrowse's two globals are `output-format` and
+   * `meta`, so both are suppressed from that surface and neither is ever
+   * `call` by omission here. */
+  readonly role?: "call" | "output-format" | "store-selection" | "meta";
 }
 
 export interface ContractStdin {
@@ -31,7 +39,7 @@ export interface ContractStdin {
 }
 
 export interface ContractConstraint {
-  readonly kind: "one_of" | "conflicts" | "requires";
+  readonly kind: "one_of" | "at_least_one" | "conflicts" | "requires";
   readonly arguments: readonly string[];
   readonly required?: boolean;
   readonly description?: string;
@@ -47,6 +55,11 @@ export interface ContractCommand {
   readonly subcommands?: readonly ContractCommand[];
   readonly stdin?: ContractStdin;
   readonly constraints?: readonly ContractConstraint[];
+  /** The command waits on something outside itself and may not return
+   * promptly. `mcp` is the one command here that sets it: it serves until its
+   * transport closes, and a caller with a request timeout needs to know
+   * before it calls, not after it hangs. */
+  readonly blocking?: boolean;
 }
 
 export interface ContractErrorCode {
@@ -379,6 +392,37 @@ const ERROR_CODES: readonly ContractErrorCode[] = [
   },
 ];
 
+/**
+ * One constraint, in the CLI's own words, with its arguments spelled however
+ * the caller asked (a consumer building a call surface passes a `spell` that
+ * renders them as its own schema's properties instead of as flags). Read by
+ * `mcp-tools.ts`, which cannot invent this prose without re-authoring the
+ * relation `constraints[]` already states.
+ */
+export function constraintSentence(
+  constraint: ContractConstraint,
+  spell: (name: string) => string = (name) => name,
+): string {
+  const members = constraint.arguments.map(spell);
+  const list = members.join(", ");
+  let head: string;
+  switch (constraint.kind) {
+    case "one_of":
+      head = `Give ${constraint.required === true ? "exactly" : "at most"} one of ${list}.`;
+      break;
+    case "at_least_one":
+      head = `Give at least one of ${list}.`;
+      break;
+    case "requires":
+      head = `${members[0]!} requires ${members.slice(1).join(", ")}.`;
+      break;
+    case "conflicts":
+      head = `${list} may not be combined.`;
+      break;
+  }
+  return constraint.description === undefined ? head : `${head} ${constraint.description}`;
+}
+
 const NAME_ARGUMENT: ContractArgument = {
   name: "name",
   type: "string",
@@ -444,12 +488,14 @@ export const CONTRACT: Contract = {
       type: "boolean",
       description:
         "Emit the stable machine envelope. Accepted by every command that produces output; provider speaks its own protocol and view launches a viewer, and both refuse it.",
+      role: "output-format",
     },
     {
       name: "--help",
       type: "boolean",
       description: "Show help for the command and exit",
       aliases: ["-h"],
+      role: "meta",
     },
   ],
   commands: [
@@ -467,6 +513,8 @@ export const CONTRACT: Contract = {
           type: "integer",
           description: "Port slot from 0 to 999; fixes the CDP, Live View HTTP, and WebRTC ports",
           required: true,
+          minimum: 0,
+          maximum: 999,
         },
         {
           name: "--profile",
@@ -576,8 +624,9 @@ export const CONTRACT: Contract = {
       summary: "Open a session's browser target in the Live View",
       audience: "agent",
       mutates: true,
+      blocking: true,
       guidance:
-        "Opens the operator's own display on the live target, for a human who is present and wants to look now. For a durable handoff with an outcome an agent can wait on, create an attention item against the resolved target name instead.",
+        "Opens the operator's own display on the live target, for a human who is present and wants to look now. For a durable handoff with an outcome an agent can wait on, create an attention item against the resolved target name instead. Waits for the Live View app itself to exit, which normally means the human closed it.",
       arguments: [SESSION_ARGUMENT],
     },
     {
@@ -587,6 +636,16 @@ export const CONTRACT: Contract = {
       mutates: false,
       guidance:
         "With --json, the fleet agent contract, version 1, inside the ordinary envelope. Without it, the same document rendered as the agent runbook.",
+      arguments: [],
+    },
+    {
+      name: "mcp",
+      summary: "Serve a stdio MCP server generated from this contract",
+      audience: "internal",
+      mutates: true,
+      blocking: true,
+      guidance:
+        "Every audience: agent leaf above becomes a tool, generated from this contract at start-up; adding one here adds a tool with no further edit. provider stays hidden because its audience is internal, and so does mcp itself. Dispatch happens in this same process, through the exact functions create, list, destroy, profile, resolve, and view already call — nothing is spawned and no argv is re-parsed. The server therefore owns the same three responsibilities as the CLI: browser target lifecycle, session resolution, and human handoff through view. Page interaction — clicking, typing, snapshots — stays with the third-party agent-browser CLI and is deliberately absent here.",
       arguments: [],
     },
   ],
@@ -736,9 +795,11 @@ function renderCommand(leaf: Leaf): string[] {
     const relation =
       constraint.kind === "one_of"
         ? `${constraint.required === true ? "exactly" : "at most"} one of`
-        : constraint.kind === "conflicts"
-          ? "may not be combined:"
-          : "requires:";
+        : constraint.kind === "at_least_one"
+          ? "at least one of"
+          : constraint.kind === "conflicts"
+            ? "may not be combined:"
+            : "requires:";
     lines.push(...hanging(`${relation} ${constraint.arguments.join(", ")}`, "      ", "        "));
   }
   if (command.stdin !== undefined) {

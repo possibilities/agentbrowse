@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { CONTRACT, renderAgentHelp, renderHelp, renderTeaser } from "./contract.ts";
+import { failure as failureEnvelope, success as successEnvelope } from "./envelope.ts";
 import { CliError, UsageError } from "./errors.ts";
 import type {
   BrowserListEntry,
@@ -10,7 +11,8 @@ import type {
   ProfileDeleteResult,
   ProfileListEntry,
 } from "./farm.ts";
-import { parseSlot, SCHEMA_VERSION } from "./model.ts";
+import type { BrowserFleet } from "./fleet.ts";
+import { parseSlot } from "./model.ts";
 import { runProvider } from "./provider.ts";
 import { type ResolvedProviderTarget, resolveProviderTarget } from "./resolve.ts";
 import { browserFarm } from "./runtime.ts";
@@ -75,6 +77,7 @@ type Parsed =
   | ParsedView
   | { command: "list"; json: boolean }
   | { command: "provider"; json: false }
+  | { command: "mcp"; json: false }
   | { command: "guide"; json: boolean }
   | { command: "help"; json: boolean }
   | { command: "agent-help"; json: boolean }
@@ -109,6 +112,11 @@ export function parseArgs(argv: readonly string[]): Parsed {
   }
   if (command === "provider") {
     if (json) throw new UsageError("provider does not accept --json");
+    if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
+    return { command, json: false };
+  }
+  if (command === "mcp") {
+    if (json) throw new UsageError("mcp does not accept --json");
     if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
     return { command, json: false };
   }
@@ -193,10 +201,10 @@ export function parseArgs(argv: readonly string[]): Parsed {
 }
 
 function success(data: unknown): string {
-  return `${JSON.stringify({ schema_version: SCHEMA_VERSION, ok: true, error: null, data })}\n`;
+  return `${JSON.stringify(successEnvelope(data))}\n`;
 }
 
-function createPayload(result: CreateResult): Record<string, unknown> {
+export function createPayload(result: CreateResult): Record<string, unknown> {
   return {
     name: result.name,
     profile: result.profile,
@@ -216,16 +224,7 @@ function createPayload(result: CreateResult): Record<string, unknown> {
 }
 
 function failure(error: CliError): string {
-  return `${JSON.stringify({
-    schema_version: SCHEMA_VERSION,
-    ok: false,
-    error: {
-      code: error.code,
-      message: error.message,
-      ...(error.recovery === undefined ? {} : { recovery: error.recovery }),
-    },
-    data: null,
-  })}\n`;
+  return `${JSON.stringify(failureEnvelope(error))}\n`;
 }
 
 function humanCreate(result: CreateResult): string {
@@ -254,7 +253,7 @@ function humanDestroy(result: DestroyResult): string {
     : `${result.container} was already absent from ${result.backend}; removed its runtime metadata\n`;
 }
 
-function listPayload(results: readonly BrowserListEntry[]): Record<string, unknown> {
+export function listPayload(results: readonly BrowserListEntry[]): Record<string, unknown> {
   return {
     browsers: results.map((browser) => ({
       name: browser.name,
@@ -299,7 +298,7 @@ function humanProfileCreate(result: ProfileCreateResult): string {
   return `${result.created ? "Created" : "Ready"} Browser profile ${result.name} on ${result.backend} (${result.volume})\n`;
 }
 
-function profileListPayload(results: readonly ProfileListEntry[]): Record<string, unknown> {
+export function profileListPayload(results: readonly ProfileListEntry[]): Record<string, unknown> {
   return { profiles: results, count: results.length };
 }
 
@@ -329,7 +328,7 @@ function humanProfileDelete(result: ProfileDeleteResult): string {
     : `Browser profile ${result.name} was already absent from ${result.backend}\n`;
 }
 
-function resolvePayload(result: ResolvedProviderTarget): Record<string, unknown> {
+export function resolvePayload(result: ResolvedProviderTarget): Record<string, unknown> {
   return {
     session: result.session,
     profile: result.profile,
@@ -346,6 +345,31 @@ function resolvePayload(result: ResolvedProviderTarget): Record<string, unknown>
 
 function humanResolve(result: ResolvedProviderTarget): string {
   return `agent-browser session ${result.session}\n  Browser profile: ${result.profile}\n  Backend: ${result.target.backend}\n  Browser target: ${result.target.name}\n  Slot: ${result.target.slot}\n  State: ${result.target.state}\n`;
+}
+
+/**
+ * `resolve`'s own fifteen-second bound, factored out so `mcp-server.ts` can
+ * give a tool call the exact same timeout instead of resolving unbounded.
+ */
+export async function resolveWithTimeout(
+  session: string,
+  farm: Pick<BrowserFleet, "targetForProfile">,
+): Promise<ResolvedProviderTarget> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort(
+      new CliError(
+        "browser_target_resolve_timeout",
+        `resolving agent-browser session ${session} exceeded ${TARGET_RESOLVE_TIMEOUT_MS / 1_000} seconds`,
+        "check the configured browser host and retry",
+      ),
+    );
+  }, TARGET_RESOLVE_TIMEOUT_MS);
+  try {
+    return await resolveProviderTarget(session, farm, controller.signal);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function run(argv: readonly string[], env = process.env): Promise<number> {
@@ -374,6 +398,13 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
     return 0;
   }
   if (parsed.command === "provider") return await runProvider(env);
+  if (parsed.command === "mcp") {
+    // Imported here, not at the top: the MCP server pulls in the protocol
+    // SDK, and no other command should pay for loading it.
+    const { serveAgentbrowseMcp } = await import("./mcp.ts");
+    await serveAgentbrowseMcp({ env });
+    return 0;
+  }
   if (parsed.command === "view") {
     try {
       return await runView(parsed.session, env);
@@ -399,22 +430,8 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
       const result = await farm.list();
       process.stdout.write(parsed.json ? success(listPayload(result)) : humanList(result));
     } else if (parsed.command === "resolve") {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => {
-        controller.abort(
-          new CliError(
-            "browser_target_resolve_timeout",
-            `resolving agent-browser session ${parsed.session} exceeded ${TARGET_RESOLVE_TIMEOUT_MS / 1_000} seconds`,
-            "check the configured browser host and retry",
-          ),
-        );
-      }, TARGET_RESOLVE_TIMEOUT_MS);
-      try {
-        const result = await resolveProviderTarget(parsed.session, farm, controller.signal);
-        process.stdout.write(parsed.json ? success(resolvePayload(result)) : humanResolve(result));
-      } finally {
-        clearTimeout(timeout);
-      }
+      const result = await resolveWithTimeout(parsed.session, farm);
+      process.stdout.write(parsed.json ? success(resolvePayload(result)) : humanResolve(result));
     } else if (parsed.command === "profile") {
       if (parsed.action === "create") {
         const result = await farm.createProfile(parsed.name);
