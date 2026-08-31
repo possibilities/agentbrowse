@@ -9,6 +9,15 @@ contains:
 - a Zig Live View core with AppKit and OpenTUI frontend adapters for
   interacting with those targets through Kernel/Neko.
 
+## The CLI describes itself
+
+`agentbrowse guide --json` publishes the fleet agent contract, version 1: every
+command with its audience, whether it mutates durable state, its typed
+arguments, and every `error.code` the CLI can return. `--help`, `--agent-help`,
+and `--agent-teaser` are renders of that one document in `cli/contract.ts`, not
+separate copies of it, so a command or a refusal code is described in exactly
+one place.
+
 ## Create a browser target
 
 Install the Bun dependencies and expose the checkout's CLI:

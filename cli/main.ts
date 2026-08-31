@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { CONTRACT, renderAgentHelp, renderHelp, renderTeaser } from "./contract.ts";
 import { CliError, UsageError } from "./errors.ts";
 import type {
   BrowserListEntry,
@@ -14,36 +15,6 @@ import { runProvider } from "./provider.ts";
 import { type ResolvedProviderTarget, resolveProviderTarget } from "./resolve.ts";
 import { browserFarm } from "./runtime.ts";
 import { runView } from "./view.ts";
-
-const HELP = `agentbrowse: create Kernel browsers on ordered backends
-
-Usage:
-  agentbrowse create NAME --slot N [--profile PROFILE] [--image REF] [--json]
-  agentbrowse list [--json]
-  agentbrowse destroy NAME [--json]
-  agentbrowse profile create NAME [--json]
-  agentbrowse profile list [--json]
-  agentbrowse profile delete NAME [--json]
-  agentbrowse provider
-  agentbrowse resolve [SESSION] [--json]
-  agentbrowse view [SESSION]
-
-Commands:
-  create   Create or start one CDP + Live View browser target
-  list     List every browser target managed by agentbrowse
-  destroy  Delete one exactly owned browser target; preserve its Browser profile
-  profile  Create, list, or explicitly delete durable Browser profiles
-  provider Handle one agent-browser plugin protocol request over standard I/O
-  resolve  Resolve an agent-browser session to its exact current Browser target
-  view     Open a session's Browser target; uses the default session if omitted
-
-Options:
-  --slot N          Port slot from 0 to 999; required by create
-  --profile PROFILE Durable Browser profile; defaults to the target NAME
-  --image REF       Kernel image already loaded on the configured browser host
-  --json            Emit the stable machine envelope
-  -h, --help        Show this help
-`;
 
 const TARGET_RESOLVE_TIMEOUT_MS = 15_000;
 
@@ -104,7 +75,10 @@ type Parsed =
   | ParsedView
   | { command: "list"; json: boolean }
   | { command: "provider"; json: false }
-  | { command: "help"; json: boolean };
+  | { command: "guide"; json: boolean }
+  | { command: "help"; json: boolean }
+  | { command: "agent-help"; json: boolean }
+  | { command: "agent-teaser"; json: boolean };
 
 function takeValue(args: readonly string[], index: number, flag: string): string {
   const value = args[index + 1];
@@ -120,7 +94,19 @@ export function parseArgs(argv: readonly string[]): Parsed {
   if (args.length === 0 || args[0] === "-h" || args[0] === "--help" || args[0] === "help") {
     return { command: "help", json };
   }
+  if (args[0] === "--agent-help") {
+    if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
+    return { command: "agent-help", json };
+  }
+  if (args[0] === "--agent-teaser") {
+    if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
+    return { command: "agent-teaser", json };
+  }
   const command = args[0];
+  if (command === "guide") {
+    if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
+    return { command, json };
+  }
   if (command === "provider") {
     if (json) throw new UsageError("provider does not accept --json");
     if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
@@ -368,11 +354,23 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
   try {
     parsed = parseArgs(argv);
   } catch (error) {
-    process.stderr.write(`agentbrowse: ${(error as Error).message}\n\n${HELP}`);
+    process.stderr.write(`agentbrowse: ${(error as Error).message}\n\n${renderHelp()}`);
     return 2;
   }
   if (parsed.command === "help") {
-    process.stdout.write(HELP);
+    process.stdout.write(renderHelp());
+    return 0;
+  }
+  if (parsed.command === "agent-teaser") {
+    process.stdout.write(renderTeaser());
+    return 0;
+  }
+  if (parsed.command === "agent-help") {
+    process.stdout.write(renderAgentHelp());
+    return 0;
+  }
+  if (parsed.command === "guide") {
+    process.stdout.write(parsed.json ? success(CONTRACT) : renderAgentHelp());
     return 0;
   }
   if (parsed.command === "provider") return await runProvider(env);
