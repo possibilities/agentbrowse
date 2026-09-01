@@ -17,6 +17,8 @@ pub fn attach(live_session: *session_mod.Session) !void {
         .copy_status = copyStatus,
         .copy_cursor_snapshot = copyCursorSnapshot,
         .copy_cursor_image = copyCursorImage,
+        .copy_clipboard_snapshot = copyClipboardSnapshot,
+        .copy_clipboard_text = copyClipboardText,
     };
     const label = live_session.descriptor.label;
     if (!native.kl_native_attach_appkit(live_session.nativeHandle(), callbacks, label.ptr, label.len)) {
@@ -165,6 +167,37 @@ fn copyCursorImage(
 ) callconv(.c) u32 {
     return @intCast(fromContext(context).copyCursorImage(
         image_generation,
+        output[0..output_capacity],
+    ));
+}
+
+fn copyClipboardSnapshot(
+    context: ?*anyopaque,
+    output: *native.AppKitClipboardSnapshot,
+    output_size: u32,
+) callconv(.c) bool {
+    if (output_size < @sizeOf(native.AppKitClipboardSnapshot)) return false;
+    const clipboard = fromContext(context).clipboardSnapshot();
+    var flags: u32 = 0;
+    if (clipboard.text_available) flags |= 1 << 0;
+    output.* = .{
+        .struct_size = @sizeOf(native.AppKitClipboardSnapshot),
+        .flags = flags,
+        .text_byte_length = clipboard.text_length,
+        .reserved = 0,
+        .generation = clipboard.generation,
+    };
+    return true;
+}
+
+fn copyClipboardText(
+    context: ?*anyopaque,
+    generation: u64,
+    output: [*]u8,
+    output_capacity: u32,
+) callconv(.c) u32 {
+    return @intCast(fromContext(context).copyClipboardText(
+        generation,
         output[0..output_capacity],
     ));
 }

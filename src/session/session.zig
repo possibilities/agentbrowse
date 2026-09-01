@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const clipboard_state = @import("clipboard_state.zig");
 const connection = @import("../app/connection.zig");
 const cursor_packets = @import("../protocol/cursor_packets.zig");
 const cursor_state = @import("cursor_state.zig");
@@ -88,6 +89,7 @@ pub const Session = struct {
     status_len: u16 = 0,
     frames: frame_queue.Queue = .{},
     cursor: cursor_state.State = .{},
+    clipboard: clipboard_state.State = .{},
 
     pub fn create(allocator: std.mem.Allocator, descriptor: connection.Descriptor) !*Session {
         const self = try allocator.create(Session);
@@ -146,7 +148,7 @@ pub const Session = struct {
         // releasing any Session-owned fields they may still be using.
         native.kl_native_destroy(self.native_handle);
         self.frames.clear();
-        self.cursor.deinit(self.allocator);
+        self.releaseRetainedObservations();
         lock(&self.id_mutex);
         const old_id = self.self_id;
         self.self_id = null;
@@ -173,6 +175,22 @@ pub const Session = struct {
 
     pub fn copyCursorImage(self: *Session, image_generation: u64, output: []u8) usize {
         return self.cursor.copyImage(image_generation, output);
+    }
+
+    /// Release every retained observation this session owns. `deinit` runs it
+    /// once the native adapter has quiesced; tests that build a Session in
+    /// place run it directly instead.
+    fn releaseRetainedObservations(self: *Session) void {
+        self.cursor.deinit(self.allocator);
+        self.clipboard.deinit(self.allocator);
+    }
+
+    pub fn clipboardSnapshot(self: *Session) clipboard_state.Snapshot {
+        return self.clipboard.snapshot();
+    }
+
+    pub fn copyClipboardText(self: *Session, generation: u64, output: []u8) usize {
+        return self.clipboard.copyText(generation, output);
     }
 
     pub fn nativeHandle(self: *Session) *native.Session {
@@ -826,6 +844,7 @@ pub const Session = struct {
             .control_release => {
                 self.applyControlRelease();
             },
+            .clipboard_updated => try self.applyClipboardUpdate(bytes),
             .system_disconnect, .signal_close => {
                 self.invalidateTransportState();
                 self.setLifecycle(.failed);
@@ -833,6 +852,22 @@ pub const Session = struct {
             },
             else => {},
         }
+    }
+
+    /// Retain one guest clipboard observation. Guest clipboard text is never
+    /// published as status or logged; it only reaches the retained observation,
+    /// which the frontend adapters poll.
+    fn applyClipboardUpdate(self: *Session, bytes: []const u8) !void {
+        const Payload = struct {
+            event: []const u8,
+            payload: struct { text: []const u8 = "" },
+        };
+        const parsed = try std.json.parseFromSlice(Payload, self.allocator, bytes, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        // An allocation failure drops this observation rather than the message
+        // handler: a clipboard the adapters cannot present is not a transport
+        // failure.
+        _ = self.clipboard.observe(self.allocator, parsed.value.payload.text) catch false;
     }
 
     fn applyControlHost(self: *Session, has_host: bool, host_id: []const u8) void {
@@ -997,9 +1032,13 @@ pub const Session = struct {
         self.data_open.store(0, .release);
         self.cancelInputLocked(monotonicNowNs());
         self.cursor.reset(self.allocator);
+        self.clipboard.reset(self.allocator);
     }
 
     fn sendPaste(self: *Session, text: []const u8) bool {
+        // Writing the guest clipboard reflects straight back as
+        // `clipboard/updated`; arm the guard before the write can be answered.
+        self.clipboard.noteLocalWrite(self.allocator, text);
         if (self.paste_sink) |sink| return sink(self.paste_sink_context, text);
         if (builtin.is_test) return true;
         if (!self.sendEvent("clipboard/set", .{ .text = text })) return false;
@@ -1502,7 +1541,7 @@ test "transport state revocation closes every input gate" {
         },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     session.data_open.store(1, .release);
     session.authorized.store(1, .release);
     session.remote_controller.store(1, .release);
@@ -1549,7 +1588,7 @@ test "legacy system error clears the request latch and pending input" {
         },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     defer _ = session.input_queue.clear(std.testing.allocator, 100);
     session.control_requested.store(1, .release);
     session.control_request_started_ns = 10;
@@ -1646,7 +1685,7 @@ test "precise scroll residuals emit whole units and discrete input clears them" 
         .descriptor = .{ .version = connection.current_version, .label = "precise-scroll-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     var recorder: PacketRecorder = .{ .session = &session };
     session.packet_sink_context = &recorder;
     session.packet_sink = recordPacket;
@@ -1677,7 +1716,7 @@ test "rejected scroll preserves residuals and cancellation clears them" {
         .descriptor = .{ .version = connection.current_version, .label = "precise-scroll-cancel-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     var recorder: PacketRecorder = .{ .session = &session };
     session.packet_sink_context = &recorder;
     session.packet_sink = recordPacket;
@@ -1706,7 +1745,7 @@ test "sub-unit waiting scroll requests control without queueing an empty packet"
         .descriptor = .{ .version = connection.current_version, .label = "precise-scroll-wait-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     session.data_open.store(1, .release);
 
     try std.testing.expect(session.scrollPrecise(0.5, 0, false));
@@ -1727,7 +1766,7 @@ test "explicit authorization replays semantic input in FIFO order" {
         },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     session.self_id = try std.testing.allocator.dupe(u8, "self");
     defer std.testing.allocator.free(session.self_id.?);
     var recorder: PacketRecorder = .{ .session = &session };
@@ -1763,7 +1802,7 @@ test "implicit hosting sends the triggering input while requesting ownership" {
         },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     var recorder: PacketRecorder = .{ .session = &session };
     session.packet_sink_context = &recorder;
     session.packet_sink = recordPacket;
@@ -1788,7 +1827,7 @@ test "input arriving during a drain remains behind resident FIFO input" {
         },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     var recorder: PacketRecorder = .{
         .session = &session,
         .inject_after_first = 'b',
@@ -1821,7 +1860,7 @@ test "held key state commits only after send and failed transitions can be retri
         .descriptor = .{ .version = connection.current_version, .label = "key-transaction-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     defer _ = session.input_queue.clear(std.testing.allocator, monotonicNowNs());
     var recorder: PacketRecorder = .{
         .session = &session,
@@ -1858,7 +1897,7 @@ test "held pointer button state commits only after send" {
         .descriptor = .{ .version = connection.current_version, .label = "button-transaction-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     defer _ = session.input_queue.clear(std.testing.allocator, monotonicNowNs());
     var recorder: PacketRecorder = .{
         .session = &session,
@@ -1885,7 +1924,7 @@ test "repeat downs are duplicate-suppressed before the native channel" {
         .descriptor = .{ .version = connection.current_version, .label = "repeat-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     var recorder: PacketRecorder = .{ .session = &session };
     session.packet_sink_context = &recorder;
     session.packet_sink = recordPacket;
@@ -1906,7 +1945,7 @@ test "failed queued down suppresses its now-unneeded queued up" {
         .descriptor = .{ .version = connection.current_version, .label = "failure-recovery-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     defer _ = session.input_queue.clear(std.testing.allocator, monotonicNowNs());
     var recorder: PacketRecorder = .{
         .session = &session,
@@ -1941,7 +1980,7 @@ test "epoch cancellation compensates a stale down and continues with new input" 
         .descriptor = .{ .version = connection.current_version, .label = "epoch-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     defer _ = session.input_queue.clear(std.testing.allocator, monotonicNowNs());
     var recorder: PacketRecorder = .{
         .session = &session,
@@ -1972,7 +2011,7 @@ test "explicit queue overflow attributes every abandoned event by kind" {
         .descriptor = .{ .version = connection.current_version, .label = "overflow-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     defer _ = session.input_queue.clear(std.testing.allocator, monotonicNowNs());
     session.data_open.store(1, .release);
 
@@ -2003,13 +2042,53 @@ fn cancelDuringPaste(context: ?*anyopaque, text: []const u8) bool {
     return true;
 }
 
+test "guest clipboard updates become an observation and skip our own paste echo" {
+    var session: Session = .{
+        .allocator = std.testing.allocator,
+        .descriptor = .{
+            .version = connection.current_version,
+            .label = "clipboard-test",
+            .base_url = "http://127.0.0.1",
+        },
+        .native_handle = @ptrFromInt(1),
+    };
+    defer session.releaseRetainedObservations();
+    defer _ = session.input_queue.clear(std.testing.allocator, monotonicNowNs());
+    session.data_open.store(1, .release);
+    session.authorized.store(1, .release);
+
+    try session.applyClipboardUpdate(
+        \\{"event":"clipboard/updated","payload":{"text":"copied in the guest"}}
+    );
+    const observed = session.clipboardSnapshot();
+    try std.testing.expect(observed.text_available);
+    var copied: ["copied in the guest".len]u8 = undefined;
+    try std.testing.expectEqual(copied.len, session.copyClipboardText(observed.generation, &copied));
+    try std.testing.expectEqualSlices(u8, "copied in the guest", &copied);
+
+    // A local paste writes the guest clipboard, and Neko reflects that write
+    // back. The reflection must not republish it as a new observation.
+    try std.testing.expect(session.paste("locally pasted"));
+    try session.applyClipboardUpdate(
+        \\{"event":"clipboard/updated","payload":{"text":"locally pasted"}}
+    );
+    try std.testing.expectEqual(observed.generation, session.clipboardSnapshot().generation);
+
+    // Transport loss drops the retained guest text rather than carrying it
+    // across a reconnect.
+    session.admission_mutex.lock();
+    session.revokeTransportState();
+    session.admission_mutex.unlock();
+    try std.testing.expect(!session.clipboardSnapshot().text_available);
+}
+
 test "cancel during paste send leaves its popped allocation owned by the drainer" {
     var session: Session = .{
         .allocator = std.testing.allocator,
         .descriptor = .{ .version = connection.current_version, .label = "paste-cancel-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     defer _ = session.input_queue.clear(std.testing.allocator, monotonicNowNs());
     var canceller: PasteCanceller = .{ .session = &session };
     session.paste_sink_context = &canceller;
@@ -2031,7 +2110,7 @@ test "modifier synchronization drains to the same desired and held state" {
         .descriptor = .{ .version = connection.current_version, .label = "modifier-test", .base_url = "http://127.0.0.1" },
         .native_handle = @ptrFromInt(1),
     };
-    defer session.cursor.deinit(std.testing.allocator);
+    defer session.releaseRetainedObservations();
     var recorder: PacketRecorder = .{ .session = &session };
     session.packet_sink_context = &recorder;
     session.packet_sink = recordPacket;

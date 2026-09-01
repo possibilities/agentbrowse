@@ -530,6 +530,67 @@ interface RenderableInternals {
   forwardKey(key: ReturnType<typeof keyEvent>): boolean;
 }
 
+test("a new guest clipboard observation is mirrored to the terminal exactly once", async () => {
+  const harness = await renderableHarness();
+  const copies: string[] = [];
+  (
+    harness.renderer as unknown as { copyToClipboardOSC52(text: string): boolean }
+  ).copyToClipboardOSC52 = (text: string) => {
+    copies.push(text);
+    return true;
+  };
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+
+    // Generation zero is the untouched observation: nothing has been copied in
+    // the guest, so the operator's own clipboard is left alone.
+    harness.internals.pollNative();
+    expect(copies).toEqual([]);
+
+    session.clipboardTextValue = "copied in the guest";
+    session.clipboardGeneration = 1n;
+    harness.internals.pollNative();
+    expect(copies).toEqual(["copied in the guest"]);
+
+    // The observation is latest-value, so repeated polls at the same generation
+    // must not rewrite the terminal clipboard.
+    harness.internals.pollNative();
+    expect(copies).toEqual(["copied in the guest"]);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("an oversized guest clipboard is skipped rather than copied in part", async () => {
+  const harness = await renderableHarness();
+  const copies: string[] = [];
+  (
+    harness.renderer as unknown as { copyToClipboardOSC52(text: string): boolean }
+  ).copyToClipboardOSC52 = (text: string) => {
+    copies.push(text);
+    return true;
+  };
+  try {
+    const session = new FakeSession();
+    harness.internals.session = session;
+    session.clipboardTextValue = "x".repeat(64 * 1024 + 1);
+    session.clipboardGeneration = 1n;
+
+    harness.internals.pollNative();
+    expect(copies).toEqual([]);
+
+    // The skipped generation is still claimed, so a later copy is not blocked
+    // behind the one that could not be presented.
+    session.clipboardTextValue = "small enough";
+    session.clipboardGeneration = 2n;
+    harness.internals.pollNative();
+    expect(copies).toEqual(["small enough"]);
+  } finally {
+    await harness.dispose();
+  }
+});
+
 async function renderableHarness(): Promise<{
   renderer: CliRenderer;
   surface: LiveViewRenderable;
@@ -625,6 +686,8 @@ class FakeSession {
   dataOpen = true;
   authorized = true;
   acceptKeys = true;
+  clipboardGeneration = 0n;
+  clipboardTextValue: string | null = null;
   readonly keyCalls: Array<{
     keysym: bigint;
     pressed: boolean;
@@ -654,6 +717,21 @@ class FakeSession {
   status(): string {
     this.assertOpen();
     return "Connected";
+  }
+
+  clipboardSnapshot() {
+    this.assertOpen();
+    const text = this.clipboardTextValue;
+    return {
+      textAvailable: text !== null,
+      textByteLength: text === null ? 0 : Buffer.byteLength(text, "utf8"),
+      generation: this.clipboardGeneration,
+    };
+  }
+
+  clipboardText(): string | null {
+    this.assertOpen();
+    return this.clipboardTextValue;
   }
 
   acquireFrame(afterGeneration: bigint): FakeLease | null {

@@ -322,7 +322,8 @@ async function shutdown(): Promise<void> {
 
 `LiveViewRenderable` owns one headless native session and its Live View access. It
 uses OpenTUI's public `NativeImage`/`ImageRenderable` API, forwards
-keyboard, pointer, scroll, and paste input, and releases held input on every
+keyboard, pointer, scroll, and paste input, mirrors the guest clipboard back
+over OSC 52 while it holds control, and releases held input on every
 focus or lifecycle boundary. Hosts keep ownership of layout, command routing,
 and Browser-target selection. See `examples/opentui-browser.ts` for the complete
 fxnk Ramp picker and `docs/architecture.md` for the runtime and ownership

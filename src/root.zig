@@ -13,6 +13,7 @@ pub const input_state = @import("session/input_state.zig");
 pub const pending_input = @import("session/pending_input.zig");
 pub const physical_key_state = @import("session/physical_key_state.zig");
 pub const scroll_accumulator = @import("session/scroll_accumulator.zig");
+pub const clipboard_state = @import("session/clipboard_state.zig");
 pub const cursor_state = @import("session/cursor_state.zig");
 pub const keymap = @import("platform/macos/keymap.zig");
 pub const appkit = @import("platform/macos/appkit.zig");
@@ -35,6 +36,7 @@ test {
     _ = pending_input;
     _ = physical_key_state;
     _ = scroll_accumulator;
+    _ = clipboard_state;
     _ = cursor_state;
     _ = keymap;
     _ = appkit;

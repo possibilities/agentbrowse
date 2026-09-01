@@ -31,8 +31,10 @@ static BOOL KLIsLocalCommandShortcut(NSEvent *event, NSString *character) {
 @property(nonatomic, assign) KLAppKitCursorSnapshot cursorSnapshot;
 @property(nonatomic, assign) BOOL pointerInsideVideo;
 @property(nonatomic, assign) CGSize videoSize;
+@property(nonatomic, assign) uint64_t clipboardGeneration;
 - (void)updateRemoteCursorPresentation;
 - (void)refreshCursorObservation;
+- (void)refreshClipboardObservation;
 @end
 
 @implementation KLInputView
@@ -140,6 +142,40 @@ static BOOL KLIsLocalCommandShortcut(NSEvent *event, NSString *character) {
   _remoteCursorView.frame = NSMakeRect(originX, originY, imageSize.width,
                                         imageSize.height);
   _remoteCursorView.hidden = NO;
+}
+
+// The guest clipboard is mirrored onto the Mac clipboard as it changes, which
+// is what makes a translated Command-C reach the local pasteboard. The session
+// already refuses the reflection of this client's own paste, so a Command-V
+// never rewrites what the operator copied locally.
+- (void)refreshClipboardObservation {
+  if (!_callbacks.copy_clipboard_snapshot || !_callbacks.copy_clipboard_text) return;
+  KLAppKitClipboardSnapshot snapshot{};
+  if (!_callbacks.copy_clipboard_snapshot(_callbacks.context, &snapshot,
+                                          sizeof(snapshot)) ||
+      snapshot.struct_size != sizeof(snapshot)) return;
+  if (snapshot.generation == _clipboardGeneration) return;
+  // Claim the generation before the copy so a text this view cannot present
+  // is not retried on every timer tick.
+  _clipboardGeneration = snapshot.generation;
+
+  BOOL hasText = (snapshot.flags & KL_APPKIT_CLIPBOARD_TEXT_AVAILABLE) != 0;
+  if (!hasText || snapshot.text_byte_length == 0 ||
+      snapshot.text_byte_length > 1024 * 1024) {
+    // A cleared observation leaves the Mac clipboard alone; the operator's own
+    // clipboard is never emptied by a guest transport transition.
+    return;
+  }
+  NSMutableData *bytes = [NSMutableData dataWithLength:snapshot.text_byte_length];
+  uint32_t copied = _callbacks.copy_clipboard_text(
+      _callbacks.context, snapshot.generation,
+      static_cast<uint8_t *>(bytes.mutableBytes), snapshot.text_byte_length);
+  if (copied != snapshot.text_byte_length) return;
+  NSString *text = [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
+  if (!text.length) return;
+  NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
+  [pasteboard clearContents];
+  [pasteboard setString:text forType:NSPasteboardTypeString];
 }
 
 - (void)refreshCursorObservation {
@@ -549,6 +585,7 @@ static BOOL KLIsLocalCommandShortcut(NSEvent *event, NSString *character) {
     if (length > sizeof(buffer)) length = sizeof(buffer);
     strongSelf.inputView.statusLabel.stringValue = KLString(buffer, length);
     [strongSelf.inputView refreshCursorObservation];
+    [strongSelf.inputView refreshClipboardObservation];
   }];
   return YES;
 }

@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-#define AB_LIVE_VIEW_ABI_VERSION 3u
+#define AB_LIVE_VIEW_ABI_VERSION 4u
 
 typedef struct ABLiveViewSession ABLiveViewSession;
 typedef struct ABLiveViewFrameLease ABLiveViewFrameLease;
@@ -153,6 +153,18 @@ typedef struct ABLiveViewCursorSnapshot {
   uint64_t position_generation;
 } ABLiveViewCursorSnapshot;
 
+// A clipboard observation is the bounded latest-value guest clipboard text the
+// session retained from clipboard/updated. Neko sends it only to the control
+// host, so it stays empty until this session holds control. Frontend adapters
+// decide whether and how to write it to a local clipboard.
+typedef struct ABLiveViewClipboardSnapshot {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t flags;
+  uint32_t text_byte_length;
+  uint64_t generation;
+} ABLiveViewClipboardSnapshot;
+
 AB_LIVE_VIEW_API uint32_t ab_live_view_abi_version(void);
 
 // The descriptor bytes are copied and retained until session destruction.
@@ -185,6 +197,15 @@ AB_LIVE_VIEW_API uint32_t ab_live_view_session_cursor_snapshot(
 // no longer current, no cursor image is available, or the buffer is too small.
 AB_LIVE_VIEW_API uint32_t ab_live_view_session_copy_cursor_image(
     ABLiveViewSession *session, uint64_t image_generation, uint8_t *output,
+    uint32_t output_capacity);
+AB_LIVE_VIEW_API uint32_t ab_live_view_session_clipboard_snapshot(
+    ABLiveViewSession *session, ABLiveViewClipboardSnapshot *output,
+    uint32_t output_size);
+// Returns the UTF-8 byte count copied, or zero when the requested generation is
+// no longer current, no guest clipboard text is available, or the buffer is too
+// small. The text is never NUL-terminated.
+AB_LIVE_VIEW_API uint32_t ab_live_view_session_copy_clipboard_text(
+    ABLiveViewSession *session, uint64_t generation, uint8_t *output,
     uint32_t output_capacity);
 
 // Returns NULL when no frame newer than after_generation is available.

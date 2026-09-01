@@ -51,6 +51,12 @@ import {
 import { openTuiScrollDelta } from "./scroll.ts";
 
 const DEFAULT_POLL_FPS = 15;
+/**
+ * OSC 52 payloads above a terminal's own limit are dropped or truncated without
+ * a report. Skip an oversized guest clipboard entirely rather than hand the
+ * operator a silently partial copy.
+ */
+const MAX_OSC52_TEXT_BYTES = 64 * 1024;
 const MIN_POLL_FPS = 1;
 const MAX_POLL_FPS = 30;
 
@@ -135,6 +141,7 @@ export class LiveViewRenderable extends ImageRenderable {
   private keyreleaseHandler: ((key: KeyEvent) => void) | null = null;
   private readonly activeKeys = new Map<string, ActiveOpenTuiKey>();
   private lastInputGate: { dataOpen: boolean; authorized: boolean } | null = null;
+  private lastClipboardGeneration = 0n;
   private operationGeneration = 0;
   private operationAbortController: AbortController | null = null;
   private readonly pendingConnects = new Set<Promise<void>>();
@@ -420,6 +427,9 @@ export class LiveViewRenderable extends ImageRenderable {
       if (snapshot.lifecycle === "closed" || snapshot.lifecycle === "failed") {
         this.releaseHeldInput();
       }
+      // Clipboard sync is not a presentation concern, so it runs before the
+      // visibility and geometry gates that skip frame work.
+      this.syncGuestClipboard(session);
       // Cursor policy: `main` frames are pointerless, and the terminal host
       // pointer is the only cursor OpenTUI presents. Deliberately do not poll or
       // composite cursor observations; remote-controller movement is therefore
@@ -478,6 +488,32 @@ export class LiveViewRenderable extends ImageRenderable {
         error: message,
       });
     }
+  }
+
+  /**
+   * Mirror new guest clipboard observations onto the terminal's clipboard.
+   *
+   * Neko sends `clipboard/updated` only to the control host, so nothing arrives
+   * until this session takes control. A terminal that owns Command-C itself —
+   * stock Ghostty does — copies its own selection instead, and the guest never
+   * sees the chord; unbind that action for guest copy, as with the other
+   * translated shortcuts.
+   */
+  private syncGuestClipboard(session: NativeLiveViewSession): void {
+    const snapshot = session.clipboardSnapshot();
+    if (!snapshot || snapshot.generation === this.lastClipboardGeneration) return;
+    // Claim the generation before the copy so text this adapter cannot present
+    // is not retried on every poll.
+    this.lastClipboardGeneration = snapshot.generation;
+    // A cleared observation leaves the terminal clipboard alone; the operator's
+    // own clipboard is never emptied by a guest transport transition.
+    if (!snapshot.textAvailable || snapshot.textByteLength > MAX_OSC52_TEXT_BYTES) return;
+    const text = session.clipboardText(snapshot);
+    if (!text) return;
+    // CliRenderer owns the output stream and already refuses OSC 52 on a
+    // terminal that does not report the capability.
+    const renderer = this.ctx as Partial<{ copyToClipboardOSC52(value: string): boolean }>;
+    renderer.copyToClipboardOSC52?.(text);
   }
 
   private startFrameConversion(

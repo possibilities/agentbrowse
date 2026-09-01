@@ -10,6 +10,7 @@ const PUBLIC_HEADER = fileURLToPath(new URL("../include/agentbrowse_live_view.h"
 const EXPORT_LIST = fileURLToPath(new URL("../platform/macos/live_view.exports", import.meta.url));
 const NATIVE_BRIDGE = fileURLToPath(new URL("../platform/macos/native_bridge.mm", import.meta.url));
 const NATIVE_SESSION = fileURLToPath(new URL("../src/session/session.zig", import.meta.url));
+const NATIVE_WRAPPER = fileURLToPath(new URL("../src/opentui/native.ts", import.meta.url));
 const PACKAGE_JSON = fileURLToPath(new URL("../package.json", import.meta.url));
 const NEGOTIATION_FIXTURE = fileURLToPath(
   new URL("./fixtures/native-negotiation.ts", import.meta.url),
@@ -41,16 +42,25 @@ test("Darwin export list matches every function in the public ABI header", () =>
   expect(exportedSymbols()).toEqual([...new Set(headerSymbols)].sort());
 });
 
-test("input telemetry is an additive ABI v3 snapshot with fixed layouts", () => {
+test("input telemetry is an additive ABI snapshot with fixed layouts", () => {
   const header = readFileSync(PUBLIC_HEADER, "utf8");
   const enumConstants = [...header.matchAll(/^\s+(AB_LIVE_VIEW_[A-Z0-9_]+)\s*=/gmu)].map(
     (match) => match[1]!,
   );
-  expect(header).toContain("#define AB_LIVE_VIEW_ABI_VERSION 3u");
   expect(new Set(enumConstants).size).toBe(enumConstants.length);
   expect(header).toContain("AB_LIVE_VIEW_INPUT_KIND_COUNT = 5");
   expect(header).toContain("ABLiveViewInputKindMetrics kinds[AB_LIVE_VIEW_INPUT_KIND_COUNT]");
   expect(header).toContain("ab_live_view_session_input_metrics(");
+});
+
+test("the guest clipboard observation is an additive ABI v4 snapshot", () => {
+  const header = readFileSync(PUBLIC_HEADER, "utf8");
+  expect(header).toContain("#define AB_LIVE_VIEW_ABI_VERSION 4u");
+  expect(header).toContain("ab_live_view_session_clipboard_snapshot(");
+  expect(header).toContain("ab_live_view_session_copy_clipboard_text(");
+  // The OpenTUI wrapper reads this snapshot at fixed offsets, so its declared
+  // size has to track the header's layout.
+  expect(readFileSync(NATIVE_WRAPPER, "utf8")).toContain("const CLIPBOARD_SNAPSHOT_SIZE = 24;");
 });
 
 test("embeddable native sessions never write process diagnostics", () => {
@@ -83,6 +93,23 @@ test("paste readiness leaves the native session monitor before draining Zig inpu
   const bridge = readFileSync(NATIVE_BRIDGE, "utf8");
   expect(bridge).toMatch(
     /@synchronized \(session\)[\s\S]+callbacks = session\.callbacks;[\s\S]+\}\s*\/\/ Paste readiness[\s\S]+callbacks\.on_paste_ready/u,
+  );
+});
+
+test("AppKit writes new guest clipboard observations to the Mac pasteboard", () => {
+  const bridge = readFileSync(NATIVE_BRIDGE, "utf8");
+  expect(bridge).toContain("refreshClipboardObservation");
+  // The generation is claimed before the copy, so text this view cannot present
+  // is not retried on every timer tick.
+  expect(bridge).toMatch(/_clipboardGeneration = snapshot\.generation;[\s\S]+copy_clipboard_text/u);
+  expect(bridge).toMatch(
+    /\[pasteboard clearContents\];\s+\[pasteboard setString:text forType:NSPasteboardTypeString\];/u,
+  );
+  // A cleared or oversized observation must leave the operator's own clipboard
+  // alone rather than emptying it.
+  expect(bridge).toMatch(/if \(!hasText \|\| snapshot\.text_byte_length == 0[\s\S]+return;/u);
+  expect(bridge).toMatch(
+    /refreshCursorObservation\];\s+\[strongSelf\.inputView refreshClipboardObservation\];/u,
   );
 });
 
@@ -138,6 +165,12 @@ test.skipIf(!existsSync(defaultNativeLibraryPath()))(
         positionGeneration: 0n,
       });
       expect(session.cursorImage()).toBeNull();
+      expect(session.clipboardSnapshot()).toEqual({
+        textAvailable: false,
+        textByteLength: 0,
+        generation: 0n,
+      });
+      expect(session.clipboardText()).toBeNull();
       expect(session.metrics().input).toEqual({
         queueDepth: 0,
         queueCapacity: 256,

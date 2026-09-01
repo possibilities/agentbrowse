@@ -93,6 +93,13 @@ Frontend adapters decide whether and how to present it; it is not itself a
 rendered cursor.
 _Avoid: cursor event, cursor overlay, guest pointer._
 
+**Clipboard observation** — The bounded latest-value guest clipboard text a Live
+View session retains from `clipboard/updated`. Neko sends it only to the control
+host, so it stays empty until the session holds control. Frontend adapters decide
+whether and how to write it to a local clipboard; it is not itself a clipboard
+write.
+_Avoid: clipboard sync, remote clipboard, pasteboard._
+
 **Physical key target** — The guest keysym plus removed and forced modifier
 flags chosen when one physical key was pressed. The Live View session keeps it
 until that key's release so the release and its Shift level stay correct

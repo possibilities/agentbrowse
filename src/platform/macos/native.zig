@@ -35,6 +35,8 @@ pub const AppKitCallbacks = extern struct {
     copy_status: ?*const fn (?*anyopaque, [*]u8, u32) callconv(.c) u32,
     copy_cursor_snapshot: ?*const fn (?*anyopaque, *AppKitCursorSnapshot, u32) callconv(.c) bool,
     copy_cursor_image: ?*const fn (?*anyopaque, u64, [*]u8, u32) callconv(.c) u32,
+    copy_clipboard_snapshot: ?*const fn (?*anyopaque, *AppKitClipboardSnapshot, u32) callconv(.c) bool,
+    copy_clipboard_text: ?*const fn (?*anyopaque, u64, [*]u8, u32) callconv(.c) u32,
 };
 
 pub const AppKitCursorSnapshot = extern struct {
@@ -51,6 +53,14 @@ pub const AppKitCursorSnapshot = extern struct {
     generation: u64,
     image_generation: u64,
     position_generation: u64,
+};
+
+pub const AppKitClipboardSnapshot = extern struct {
+    struct_size: u32,
+    flags: u32,
+    text_byte_length: u32,
+    reserved: u32,
+    generation: u64,
 };
 
 pub extern fn kl_native_create(Callbacks) ?*Session;

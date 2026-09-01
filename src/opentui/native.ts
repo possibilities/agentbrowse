@@ -10,7 +10,7 @@ import {
 import { liveViewBuildPrefix } from "../../client/live-view-build.ts";
 
 const MIN_ABI_VERSION = 2;
-const ABI_VERSION = 3;
+const ABI_VERSION = 4;
 const SNAPSHOT_SIZE = 32;
 const METRICS_SIZE = 96;
 const INPUT_KIND_METRICS_SIZE = 56;
@@ -18,7 +18,9 @@ const INPUT_METRICS_SIZE = 328;
 const INPUT_KIND_COUNT = 5;
 const FRAME_INFO_SIZE = 48;
 const CURSOR_SNAPSHOT_SIZE = 64;
+const CLIPBOARD_SNAPSHOT_SIZE = 24;
 const MAX_CURSOR_IMAGE_BYTES = 1024 * 1024;
+const MAX_CLIPBOARD_TEXT_BYTES = 1024 * 1024;
 const CREATE_ERROR_SIZE = 256;
 const MAX_OUTPUT_DIMENSION = 8192;
 const MAX_OUTPUT_PIXELS = 32 * 1024 * 1024;
@@ -105,6 +107,18 @@ const nativeSymbolsV3 = {
   },
 } as const;
 
+const nativeSymbolsV4 = {
+  ...nativeSymbolsV3,
+  ab_live_view_session_clipboard_snapshot: {
+    args: [FFIType.ptr, FFIType.ptr, FFIType.u32],
+    returns: FFIType.u32,
+  },
+  ab_live_view_session_copy_clipboard_text: {
+    args: [FFIType.ptr, FFIType.u64, FFIType.ptr, FFIType.u32],
+    returns: FFIType.u32,
+  },
+} as const;
+
 function openNativeLibraryV2(path: string) {
   return dlopen(path, nativeSymbols);
 }
@@ -113,28 +127,49 @@ function openNativeLibraryV3(path: string) {
   return dlopen(path, nativeSymbolsV3);
 }
 
+function openNativeLibraryV4(path: string) {
+  return dlopen(path, nativeSymbolsV4);
+}
+
 type NativeLibraryV2 = ReturnType<typeof openNativeLibraryV2>;
 type NativeLibraryV3 = ReturnType<typeof openNativeLibraryV3>;
+type NativeLibraryV4 = ReturnType<typeof openNativeLibraryV4>;
 type InputMetricsFunction = NativeLibraryV3["symbols"]["ab_live_view_session_input_metrics"];
+type ClipboardFunctions = Pick<
+  NativeLibraryV4["symbols"],
+  "ab_live_view_session_clipboard_snapshot" | "ab_live_view_session_copy_clipboard_text"
+>;
 
 interface NativeLibrary {
   abiVersion: number;
-  handle: NativeLibraryV2 | NativeLibraryV3;
+  handle: NativeLibraryV2 | NativeLibraryV3 | NativeLibraryV4;
   symbols: NativeLibraryV2["symbols"];
   inputMetrics: InputMetricsFunction | null;
+  clipboard: ClipboardFunctions | null;
 }
 
 function openNativeLibrary(path: string, abiVersion: number): NativeLibrary {
   if (abiVersion === 2) {
     const handle = openNativeLibraryV2(path);
-    return { abiVersion, handle, symbols: handle.symbols, inputMetrics: null };
+    return { abiVersion, handle, symbols: handle.symbols, inputMetrics: null, clipboard: null };
   }
-  const handle = openNativeLibraryV3(path);
+  if (abiVersion === 3) {
+    const handle = openNativeLibraryV3(path);
+    return {
+      abiVersion,
+      handle,
+      symbols: handle.symbols,
+      inputMetrics: handle.symbols.ab_live_view_session_input_metrics,
+      clipboard: null,
+    };
+  }
+  const handle = openNativeLibraryV4(path);
   return {
     abiVersion,
     handle,
     symbols: handle.symbols,
     inputMetrics: handle.symbols.ab_live_view_session_input_metrics,
+    clipboard: handle.symbols,
   };
 }
 
@@ -212,6 +247,12 @@ export interface NativeFrameInfo {
 export interface NativeWorkerRgbaOutput {
   bytes: Uint8Array;
   stride: number;
+}
+
+export interface NativeClipboardSnapshot {
+  textAvailable: boolean;
+  textByteLength: number;
+  generation: bigint;
 }
 
 export interface NativeCursorSnapshot {
@@ -415,6 +456,47 @@ export class NativeLiveViewSession {
       output.byteLength,
     );
     return written === output.byteLength ? output : null;
+  }
+
+  /**
+   * The retained guest clipboard observation, or null on a native library that
+   * predates ABI 4. Neko sends `clipboard/updated` only to the control host, so
+   * the generation stays zero until this session holds control.
+   */
+  clipboardSnapshot(): NativeClipboardSnapshot | null {
+    const clipboard = this.native.clipboard;
+    if (!clipboard) return null;
+    const output = Buffer.alloc(CLIPBOARD_SNAPSHOT_SIZE);
+    checkResult(
+      "clipboard snapshot",
+      clipboard.ab_live_view_session_clipboard_snapshot(
+        this.requireHandle(),
+        ptr(output),
+        output.byteLength,
+      ),
+    );
+    const textByteLength = output.readUInt32LE(12);
+    if (textByteLength > MAX_CLIPBOARD_TEXT_BYTES) {
+      throw new Error(`native Live View clipboard text exceeds ${MAX_CLIPBOARD_TEXT_BYTES} bytes`);
+    }
+    return {
+      textAvailable: (output.readUInt32LE(8) & (1 << 0)) !== 0,
+      textByteLength,
+      generation: output.readBigUInt64LE(16),
+    };
+  }
+
+  clipboardText(snapshot = this.clipboardSnapshot()): string | null {
+    const clipboard = this.native.clipboard;
+    if (!clipboard || !snapshot?.textAvailable || snapshot.textByteLength === 0) return null;
+    const output = Buffer.alloc(snapshot.textByteLength);
+    const written = clipboard.ab_live_view_session_copy_clipboard_text(
+      this.requireHandle(),
+      snapshot.generation,
+      ptr(output),
+      output.byteLength,
+    );
+    return written === output.byteLength ? output.toString("utf8") : null;
   }
 
   acquireFrame(afterGeneration: bigint): NativeFrameLease | null {

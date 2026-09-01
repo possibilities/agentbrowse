@@ -49,5 +49,6 @@ test "classify known and unknown signaling events" {
     try std.testing.expectEqual(Event.signal_provide, try eventFromJson(std.testing.allocator, "{\"event\":\"signal/provide\",\"payload\":{\"sdp\":\"redacted\"}}"));
     try std.testing.expectEqual(Event.control_host, try eventFromJson(std.testing.allocator, "{\"event\":\"control/host\",\"payload\":{\"has_host\":true}}"));
     try std.testing.expectEqual(Event.system_error, try eventFromJson(std.testing.allocator, "{\"event\":\"system/error\",\"message\":\"backend failure\"}"));
+    try std.testing.expectEqual(Event.clipboard_updated, try eventFromJson(std.testing.allocator, "{\"event\":\"clipboard/updated\",\"payload\":{\"text\":\"redacted\"}}"));
     try std.testing.expectEqual(Event.unknown, try eventFromJson(std.testing.allocator, "{\"event\":\"future/event\"}"));
 }

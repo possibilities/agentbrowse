@@ -34,6 +34,21 @@ typedef struct KLAppKitCursorSnapshot {
   uint64_t position_generation;
 } KLAppKitCursorSnapshot;
 
+typedef enum KLAppKitClipboardFlags {
+  KL_APPKIT_CLIPBOARD_TEXT_AVAILABLE = 1u << 0,
+} KLAppKitClipboardFlags;
+
+// The bounded latest-value guest clipboard text the session retained. Neko
+// sends it only to the control host, so it stays empty until this session
+// holds control.
+typedef struct KLAppKitClipboardSnapshot {
+  uint32_t struct_size;
+  uint32_t flags;
+  uint32_t text_byte_length;
+  uint32_t reserved;
+  uint64_t generation;
+} KLAppKitClipboardSnapshot;
+
 typedef enum KLNativeState {
   KL_NATIVE_WS_OPEN = 1,
   KL_NATIVE_WS_CLOSED = 2,
@@ -86,6 +101,11 @@ typedef struct KLAppKitCallbacks {
                                uint32_t output_size);
   uint32_t (*copy_cursor_image)(void *context, uint64_t image_generation,
                                 uint8_t *output, uint32_t output_capacity);
+  bool (*copy_clipboard_snapshot)(void *context,
+                                  KLAppKitClipboardSnapshot *output,
+                                  uint32_t output_size);
+  uint32_t (*copy_clipboard_text)(void *context, uint64_t generation,
+                                  uint8_t *output, uint32_t output_capacity);
 } KLAppKitCallbacks;
 
 KLNativeSessionHandle *kl_native_create(KLNativeCallbacks callbacks);

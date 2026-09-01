@@ -32,7 +32,12 @@ The useful order is:
 Current WebSocket messages use an `{ "event": …, "payload": … }` envelope.
 Events without data may omit `payload`. Offers and answers place `sdp` in the
 payload, while ICE candidate fields are the payload itself. Clipboard writes
-use `clipboard/set`. The login token is reused across transport reconnects;
+use `clipboard/set`, which the pinned runtime accepts from any session. Clipboard
+reads arrive as `clipboard/updated` carrying `payload.text`, which Neko sends
+only to the current control host and only when the guest's X11 CLIPBOARD
+selection owner changes; a session that never takes control observes nothing.
+Writing the guest clipboard changes that owner, so a `clipboard/set` is reported
+straight back to its own sender. The login token is reused across transport reconnects;
 final close makes a best-effort `/api/logout` request bounded to 500 ms.
 
 ## Data channels and cursor packets

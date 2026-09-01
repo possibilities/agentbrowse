@@ -1,7 +1,7 @@
 const std = @import("std");
 const klv = @import("kernel_live_view");
 
-const abi_version: u32 = 3;
+const abi_version: u32 = 4;
 const allocator = std.heap.page_allocator;
 const max_descriptor_bytes: u32 = 64 * 1024;
 const max_output_dimension = klv.frame_conversion.max_output_dimension;
@@ -95,6 +95,14 @@ const CursorSnapshot = extern struct {
     position_generation: u64,
 };
 
+const ClipboardSnapshot = extern struct {
+    struct_size: u32,
+    abi_version: u32,
+    flags: u32,
+    text_byte_length: u32,
+    generation: u64,
+};
+
 const Result = enum(u32) {
     ok = 0,
     invalid_argument = 1,
@@ -111,6 +119,7 @@ comptime {
     if (@sizeOf(InputMetrics) != 328) @compileError("ABLiveViewInputMetrics layout changed");
     if (@sizeOf(FrameInfo) != 48) @compileError("ABLiveViewFrameInfo layout changed");
     if (@sizeOf(CursorSnapshot) != 64) @compileError("ABLiveViewCursorSnapshot layout changed");
+    if (@sizeOf(ClipboardSnapshot) != 24) @compileError("ABLiveViewClipboardSnapshot layout changed");
 }
 
 export fn ab_live_view_abi_version() callconv(.c) u32 {
@@ -314,6 +323,42 @@ export fn ab_live_view_session_copy_cursor_image(
     const target = output orelse return 0;
     return @intCast(session_handle.live_session.copyCursorImage(
         image_generation,
+        target[0..output_capacity],
+    ));
+}
+
+export fn ab_live_view_session_clipboard_snapshot(
+    handle: ?*AbiSession,
+    output: ?*ClipboardSnapshot,
+    output_size: u32,
+) callconv(.c) u32 {
+    const session_handle = handle orelse return result(.invalid_argument);
+    const target = output orelse return result(.invalid_argument);
+    if (output_size < @sizeOf(ClipboardSnapshot)) return result(.buffer_too_small);
+    const clipboard = session_handle.live_session.clipboardSnapshot();
+    var flags: u32 = 0;
+    if (clipboard.text_available) flags |= 1 << 0;
+    target.* = .{
+        .struct_size = @sizeOf(ClipboardSnapshot),
+        .abi_version = abi_version,
+        .flags = flags,
+        .text_byte_length = clipboard.text_length,
+        .generation = clipboard.generation,
+    };
+    return result(.ok);
+}
+
+export fn ab_live_view_session_copy_clipboard_text(
+    handle: ?*AbiSession,
+    generation: u64,
+    output: ?[*]u8,
+    output_capacity: u32,
+) callconv(.c) u32 {
+    const session_handle = handle orelse return 0;
+    if (output_capacity == 0) return 0;
+    const target = output orelse return 0;
+    return @intCast(session_handle.live_session.copyClipboardText(
+        generation,
         target[0..output_capacity],
     ));
 }

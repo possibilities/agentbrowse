@@ -38,13 +38,27 @@ Command-V remains local paste and Command-Q remains local quit. Terminals
 without explicit key-up reports send translated keys as taps and clear their
 modifier snapshot immediately.
 
+Copy travels the other way as a Clipboard observation. The translated
+Control-C lands in the guest's X11 CLIPBOARD selection, Neko reports that
+selection change to the control host as `clipboard/updated`, and the session
+retains the text. Each adapter mirrors a new generation onto its own local
+clipboard: AppKit writes `NSPasteboard`, OpenTUI hands the text to the
+renderer's OSC 52 writer. Neither adapter ever clears a local clipboard, so an
+empty observation, one too large to present, or a transport transition leaves
+what the operator copied locally intact. Nothing arrives until this session
+takes control, because Neko sends the event only to the host.
+
 ## OpenTUI path
 
 OpenTUI can translate only key reports that the terminal passes through. A
 terminal's own bindings win first: stock Ghostty consumes most macOS Command
 shortcuts (including copy/paste, select-all, undo, tabs/windows, search, zoom,
 and Command/Option-arrow editing) before OpenTUI can observe them. Unbind those
-Ghostty actions when full guest-shortcut parity is desired. With the defaults,
+Ghostty actions when full guest-shortcut parity is desired — that includes
+Command-C, which otherwise copies the terminal's own selection and never
+reaches the guest. Mirroring the guest clipboard back also needs a terminal
+that reports OSC 52 support; the renderer refuses the write on one that does
+not, and an oversized selection is skipped rather than copied in part. With the defaults,
 unbound chords such as Command-L/R/X still reach the adapter; terminal-emitted
 replacement text is forwarded as text and cannot be reconstructed as the
 original physical chord.
@@ -264,7 +278,8 @@ safe for ordinary OpenTUI ownership teardown.
 
 AppKit-specific behavior is confined to `src/platform/macos/appkit.zig` and the
 AppKit half of `platform/macos/native_bridge.mm`: window and responder
-lifecycle, native Metal presentation, macOS events, pasteboard access,
+lifecycle, native Metal presentation, macOS events, pasteboard access
+(reading it for Command-V and writing new Clipboard observations to it),
 application shortcuts, and cursor presentation over the aspect-fitted guest
 image. While this client controls input, the local pointer uses the current
 metadata-derived `NSCursor`; otherwise it remains an ordinary arrow. If a
