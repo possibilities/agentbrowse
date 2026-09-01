@@ -1,5 +1,6 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 
+import { MAX_ABI_VERSION, MIN_ABI_VERSION } from "./abi-version.ts";
 import {
   type FrameConversionWorkerMessage,
   type FrameConversionWorkerRequest,
@@ -9,9 +10,6 @@ import {
 } from "./frame-conversion-protocol.ts";
 
 declare const self: Worker;
-
-const MIN_ABI_VERSION = 2;
-const MAX_ABI_VERSION = 3;
 
 const symbols = {
   ab_live_view_abi_version: { args: [], returns: FFIType.u32 },

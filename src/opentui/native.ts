@@ -2,15 +2,13 @@ import { dlopen, FFIType, type Pointer, ptr } from "bun:ffi";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-
 import {
   encodeConnectionDescriptor,
   type LiveViewConnectionDescriptor,
 } from "../../client/connection.ts";
 import { liveViewBuildPrefix } from "../../client/live-view-build.ts";
+import { MAX_ABI_VERSION, MIN_ABI_VERSION } from "./abi-version.ts";
 
-const MIN_ABI_VERSION = 2;
-const ABI_VERSION = 4;
 const SNAPSHOT_SIZE = 32;
 const METRICS_SIZE = 96;
 const INPUT_KIND_METRICS_SIZE = 56;
@@ -163,14 +161,26 @@ function openNativeLibrary(path: string, abiVersion: number): NativeLibrary {
       clipboard: null,
     };
   }
-  const handle = openNativeLibraryV4(path);
-  return {
-    abiVersion,
-    handle,
-    symbols: handle.symbols,
-    inputMetrics: handle.symbols.ab_live_view_session_input_metrics,
-    clipboard: handle.symbols,
-  };
+  if (abiVersion === 4) {
+    const handle = openNativeLibraryV4(path);
+    return {
+      abiVersion,
+      handle,
+      symbols: handle.symbols,
+      inputMetrics: handle.symbols.ab_live_view_session_input_metrics,
+      clipboard: handle.symbols,
+    };
+  }
+  // Dispatch is exhaustive on purpose. A version that `library()` admitted but
+  // no branch here claims would otherwise fall through to the newest symbol
+  // table, reporting its own version while serving an older symbol set — the
+  // same silent mismatch that once made the conversion Worker refuse a library
+  // the wrapper accepted. Widening MAX_ABI_VERSION without adding the branch
+  // must fail loudly here instead.
+  throw new Error(
+    `native Live View ABI ${abiVersion} has no symbol table in this wrapper; ` +
+      "add its branch to openNativeLibrary rather than widening MAX_ABI_VERSION",
+  );
 }
 
 const libraries = new Map<string, NativeLibrary>();
@@ -475,6 +485,15 @@ export class NativeLiveViewSession {
         output.byteLength,
       ),
     );
+    // A library whose struct GREW is already refused as buffer_too_small above.
+    // One that SHRANK is the silent case: the call succeeds, writes fewer bytes
+    // than this buffer, and every field past the truncation reads stale zeroes.
+    const structSize = output.readUInt32LE(0);
+    if (structSize !== CLIPBOARD_SNAPSHOT_SIZE) {
+      throw new Error(
+        `native Live View clipboard snapshot layout is unsupported: size=${structSize} expected=${CLIPBOARD_SNAPSHOT_SIZE}`,
+      );
+    }
     const textByteLength = output.readUInt32LE(12);
     if (textByteLength > MAX_CLIPBOARD_TEXT_BYTES) {
       throw new Error(`native Live View clipboard text exceeds ${MAX_CLIPBOARD_TEXT_BYTES} bytes`);
@@ -708,9 +727,9 @@ function library(path: string): NativeLibrary {
   const probe = dlopen(path, abiSymbols);
   const actualAbi = probe.symbols.ab_live_view_abi_version();
   probe.close();
-  if (actualAbi < MIN_ABI_VERSION || actualAbi > ABI_VERSION) {
+  if (actualAbi < MIN_ABI_VERSION || actualAbi > MAX_ABI_VERSION) {
     throw new Error(
-      `native Live View ABI mismatch: client=${MIN_ABI_VERSION}-${ABI_VERSION} library=${actualAbi}; rebuild agentbrowse`,
+      `native Live View ABI mismatch: client=${MIN_ABI_VERSION}-${MAX_ABI_VERSION} library=${actualAbi}; rebuild agentbrowse`,
     );
   }
   const opened = openNativeLibrary(path, actualAbi);

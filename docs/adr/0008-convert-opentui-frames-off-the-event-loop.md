@@ -10,8 +10,9 @@ release ownership but before publishing completion, one frame lease can remain
 unreleased. The main thread deliberately does not retry that ambiguous state:
 leaking one frame is safer than risking a double release and use-after-free.
 
-The Worker probes the exact absolute ABI version 2/3 dylib before any lease is
-transferred. Startup or probe failure converts the same frame synchronously,
+The Worker probes the exact absolute dylib before any lease is transferred,
+accepting the same ABI range as the session wrapper from the one constant both
+import. Startup or probe failure converts the same frame synchronously,
 and a later infrastructure failure makes future frames use that fallback. Busy
 poll ticks acquire nothing, completed buffers are committed only when their
 session operation and fitted dimensions are still current, and no ABI version

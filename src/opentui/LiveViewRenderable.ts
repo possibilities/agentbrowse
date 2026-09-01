@@ -808,6 +808,10 @@ export class LiveViewRenderable extends ImageRenderable {
     this.presentationEpoch += 1;
     this.activeKeys.clear();
     this.lastInputGate = null;
+    // Generations are per session. Carrying the old one across a replacement
+    // would suppress the new session's first clipboard whenever the two happen
+    // to collide.
+    this.lastClipboardGeneration = 0n;
     session?.releaseHeldInput();
     session?.close();
     const activeConversion = this.activeConversion;

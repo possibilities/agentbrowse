@@ -128,8 +128,12 @@ therefore discard a completed buffer without touching a closed session. Worker
 startup and dylib loading are probed before lease transfer. If either fails,
 the same frame is converted synchronously; an unexpected failure after transfer
 uses a shared atomic ownership word to claim one main-thread backstop release,
-then future frames use synchronous fallback. This remains ABI version 2/3
-behavior: the Worker loads the same absolute dylib and needs no new native API.
+then future frames use synchronous fallback. The Worker loads the same absolute
+dylib and needs no new native API, so it accepts the same ABI range the session
+wrapper does. Both read that range from `src/opentui/abi-version.ts` rather than
+declaring it twice: a Worker that refuses an ABI the wrapper accepts is recorded
+as a permanently failed library path and answered by converting every later
+frame synchronously, which is silent apart from the reported conversion mode.
 
 The OpenTUI 0.5.8 native Kitty renderer does require one downstream correction
 for continuously changing images. Its stock replacement path deletes the

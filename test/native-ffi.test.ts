@@ -11,6 +11,7 @@ const EXPORT_LIST = fileURLToPath(new URL("../platform/macos/live_view.exports",
 const NATIVE_BRIDGE = fileURLToPath(new URL("../platform/macos/native_bridge.mm", import.meta.url));
 const NATIVE_SESSION = fileURLToPath(new URL("../src/session/session.zig", import.meta.url));
 const NATIVE_WRAPPER = fileURLToPath(new URL("../src/opentui/native.ts", import.meta.url));
+const LIVE_VIEW_ABI = fileURLToPath(new URL("../src/live_view_abi.zig", import.meta.url));
 const PACKAGE_JSON = fileURLToPath(new URL("../package.json", import.meta.url));
 const NEGOTIATION_FIXTURE = fileURLToPath(
   new URL("./fixtures/native-negotiation.ts", import.meta.url),
@@ -53,14 +54,92 @@ test("input telemetry is an additive ABI snapshot with fixed layouts", () => {
   expect(header).toContain("ab_live_view_session_input_metrics(");
 });
 
-test("the guest clipboard observation is an additive ABI v4 snapshot", () => {
+test("every ABI version bound comes from one shared constant", async () => {
+  // The session wrapper and the conversion Worker open the same dylib from
+  // different threads. When they carried separate copies of this range they
+  // drifted on an additive bump, and the Worker's rejection is recorded
+  // permanently by the pool as a silent synchronous fallback for every frame.
+  const { MAX_ABI_VERSION, MIN_ABI_VERSION } = await import("../src/opentui/abi-version.ts");
+
+  // Discover the consumers rather than listing them. A hand-written list is how
+  // the Worker's private copy of the bound went unnoticed in the first place,
+  // so anything that opens the library must be found here automatically.
+  const found = Bun.spawnSync(["git", "grep", "-l", "dlopen(", "--", "*.ts", ":(exclude)test/"], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+  });
+  expect(found.exitCode).toBe(0);
+  const consumers = new TextDecoder()
+    .decode(found.stdout)
+    .trim()
+    .split("\n")
+    .filter((line) => line && !line.endsWith("abi-version.ts"));
+  // Tests legitimately dlopen the library to probe it, so they are excluded —
+  // which also keeps this assertion's own needle from matching this file.
+  expect(consumers).toEqual(
+    expect.arrayContaining(["src/opentui/native.ts", "src/opentui/frame-conversion-worker.ts"]),
+  );
+  for (const consumer of consumers) {
+    const source = readFileSync(fileURLToPath(new URL(`../${consumer}`, import.meta.url)), "utf8");
+    expect(source).toContain('from "./abi-version.ts"');
+    expect(source).not.toMatch(/^const (?:MIN_ABI_VERSION|MAX_ABI_VERSION|ABI_VERSION)\s*=/mu);
+  }
+
+  // The shared maximum is the ABI the native library actually reports, and the
+  // header consumers compile against.
+  expect(readFileSync(LIVE_VIEW_ABI, "utf8")).toContain(
+    `const abi_version: u32 = ${MAX_ABI_VERSION};`,
+  );
+  expect(readFileSync(PUBLIC_HEADER, "utf8")).toContain(
+    `#define AB_LIVE_VIEW_ABI_VERSION ${MAX_ABI_VERSION}u`,
+  );
+  expect(MIN_ABI_VERSION).toBeLessThanOrEqual(MAX_ABI_VERSION);
+});
+
+test.skipIf(!existsSync(defaultNativeLibraryPath()))(
+  "the conversion Worker accepts the ABI the built dylib reports",
+  async () => {
+    const worker = new Worker(
+      new URL("../src/opentui/frame-conversion-worker.ts", import.meta.url).href,
+    );
+    try {
+      const message = await new Promise<{ infrastructureError: string | null }>(
+        (resolve, reject) => {
+          worker.onmessage = (event: MessageEvent) => resolve(event.data);
+          worker.onerror = (event) => reject(event);
+          worker.postMessage({
+            type: "initialize",
+            id: 1,
+            libraryPath: defaultNativeLibraryPath(),
+          });
+          const timer = setTimeout(
+            () => reject(new Error("conversion worker did not answer initialize")),
+            5_000,
+          );
+          worker.addEventListener("message", () => clearTimeout(timer), { once: true });
+          worker.addEventListener("error", () => clearTimeout(timer), { once: true });
+        },
+      );
+      // An infrastructure error here is not a thrown failure at runtime: the
+      // pool records it and silently runs every conversion on the event loop.
+      expect(message.infrastructureError).toBeNull();
+    } finally {
+      worker.terminate();
+    }
+  },
+);
+
+test("the guest clipboard observation is an additive ABI snapshot", () => {
   const header = readFileSync(PUBLIC_HEADER, "utf8");
-  expect(header).toContain("#define AB_LIVE_VIEW_ABI_VERSION 4u");
+  // The version itself is pinned to the shared constant by the test above; a
+  // second literal here would be one more copy to drift.
   expect(header).toContain("ab_live_view_session_clipboard_snapshot(");
   expect(header).toContain("ab_live_view_session_copy_clipboard_text(");
-  // The OpenTUI wrapper reads this snapshot at fixed offsets, so its declared
-  // size has to track the header's layout.
-  expect(readFileSync(NATIVE_WRAPPER, "utf8")).toContain("const CLIPBOARD_SNAPSHOT_SIZE = 24;");
+  // The wrapper's declared size is checked against the library at runtime
+  // rather than here: `clipboardSnapshot()` rejects a struct_size that is not
+  // exactly its own constant, which is what catches a SHRUNK struct — the case
+  // a buffer_too_small result cannot catch. A string match on the constant
+  // would pass while the layouts diverged.
+  expect(readFileSync(NATIVE_WRAPPER, "utf8")).toMatch(/structSize !== CLIPBOARD_SNAPSHOT_SIZE/u);
 });
 
 test("embeddable native sessions never write process diagnostics", () => {

@@ -580,8 +580,14 @@ test("an oversized guest clipboard is skipped rather than copied in part", async
     harness.internals.pollNative();
     expect(copies).toEqual([]);
 
-    // The skipped generation is still claimed, so a later copy is not blocked
-    // behind the one that could not be presented.
+    // The skipped generation is genuinely claimed: re-offering a presentable
+    // text at that SAME generation must stay skipped, or the claim is doing
+    // nothing and a stuck oversize observation would retry every tick.
+    session.clipboardTextValue = "now presentable";
+    harness.internals.pollNative();
+    expect(copies).toEqual([]);
+
+    // A later observation is a new generation and is not blocked behind it.
     session.clipboardTextValue = "small enough";
     session.clipboardGeneration = 2n;
     harness.internals.pollNative();

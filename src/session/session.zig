@@ -112,6 +112,9 @@ pub const Session = struct {
             .allocator = allocator,
             .descriptor = descriptor,
             .native_handle = native_handle,
+            // Guard digests are seeded per session so a partial disclosure of
+            // one cannot be dictionary-attacked back to a pasted secret.
+            .clipboard = .{ .seed = clipboard_state.randomSeed() },
         };
         self.setStatus("Ready");
         return self;
@@ -844,7 +847,7 @@ pub const Session = struct {
             .control_release => {
                 self.applyControlRelease();
             },
-            .clipboard_updated => try self.applyClipboardUpdate(bytes),
+            .clipboard_updated => self.applyClipboardUpdate(bytes),
             .system_disconnect, .signal_close => {
                 self.invalidateTransportState();
                 self.setLifecycle(.failed);
@@ -857,17 +860,20 @@ pub const Session = struct {
     /// Retain one guest clipboard observation. Guest clipboard text is never
     /// published as status or logged; it only reaches the retained observation,
     /// which the frontend adapters poll.
-    fn applyClipboardUpdate(self: *Session, bytes: []const u8) !void {
+    ///
+    /// A clipboard notification is an observation, not transport state. A
+    /// malformed or absent payload is dropped like a malformed cursor packet
+    /// rather than failing the session: a clipboard the adapters cannot present
+    /// must never cost the operator their Live View connection.
+    fn applyClipboardUpdate(self: *Session, bytes: []const u8) void {
         const Payload = struct {
             event: []const u8,
-            payload: struct { text: []const u8 = "" },
+            payload: struct { text: ?[]const u8 = null } = .{},
         };
-        const parsed = try std.json.parseFromSlice(Payload, self.allocator, bytes, .{ .ignore_unknown_fields = true });
+        const parsed = std.json.parseFromSlice(Payload, self.allocator, bytes, .{ .ignore_unknown_fields = true }) catch return;
         defer parsed.deinit();
-        // An allocation failure drops this observation rather than the message
-        // handler: a clipboard the adapters cannot present is not a transport
-        // failure.
-        _ = self.clipboard.observe(self.allocator, parsed.value.payload.text) catch false;
+        const text = parsed.value.payload.text orelse return;
+        _ = self.clipboard.observe(self.allocator, text, monotonicNowNs()) catch false;
     }
 
     fn applyControlHost(self: *Session, has_host: bool, host_id: []const u8) void {
@@ -883,6 +889,7 @@ pub const Session = struct {
         if (self.descriptor.read_only) {
             self.authorized.store(0, .release);
             self.cancelInputLocked(now_ns);
+            self.clipboard.clearOutstandingWrites();
             held = self.takeHeldInputLocked();
             release_held = true;
             self.setStatus("Connected · read-only");
@@ -897,6 +904,7 @@ pub const Session = struct {
         } else {
             self.authorized.store(0, .release);
             self.cancelInputLocked(now_ns);
+            self.clipboard.clearOutstandingWrites();
             held = self.takeHeldInputLocked();
             release_held = true;
             self.setStatus(if (has_host) "Connected · waiting for control" else "Connected · control released");
@@ -912,6 +920,7 @@ pub const Session = struct {
         self.remote_controller.store(0, .release);
         self.clearControlRequestLocked();
         self.cancelInputLocked(monotonicNowNs());
+        self.clipboard.clearOutstandingWrites();
         const held = self.takeHeldInputLocked();
         self.cursor.clearPosition();
         self.setStatus(if (self.descriptor.read_only) "Connected · read-only" else "Connected · control released");
@@ -930,6 +939,10 @@ pub const Session = struct {
         }
         self.clearControlRequestLocked();
         self.cancelInputLocked(monotonicNowNs());
+        // Input sent under implicit hosting can reach the guest before this
+        // session is confirmed host. Learning control was refused means those
+        // writes will never be echoed to us.
+        self.clipboard.clearOutstandingWrites();
         held = self.takeHeldInputLocked();
         self.setStatus(if (self.descriptor.read_only) "Connected · read-only" else "Connected · control unavailable");
         self.admission_mutex.unlock();
@@ -1037,11 +1050,19 @@ pub const Session = struct {
 
     fn sendPaste(self: *Session, text: []const u8) bool {
         // Writing the guest clipboard reflects straight back as
-        // `clipboard/updated`; arm the guard before the write can be answered.
-        self.clipboard.noteLocalWrite(self.allocator, text);
+        // `clipboard/updated`; arm the guard before the write can be answered,
+        // never after, or a fast echo would land unguarded. Several pastes can
+        // drain back to back, so each keeps its own guard.
+        self.clipboard.noteLocalWrite(text, monotonicNowNs());
         if (self.paste_sink) |sink| return sink(self.paste_sink_context, text);
         if (builtin.is_test) return true;
-        if (!self.sendEvent("clipboard/set", .{ .text = text })) return false;
+        if (!self.sendEvent("clipboard/set", .{ .text = text })) {
+            // The write never left the machine, so no echo can retire this
+            // guard. Retiring it here is what keeps it from swallowing a
+            // genuine later copy of the same text.
+            self.clipboard.retireLocalWrite(text);
+            return false;
+        }
         native.kl_native_schedule_paste(self.native_handle, 80);
         return true;
     }
@@ -2057,7 +2078,7 @@ test "guest clipboard updates become an observation and skip our own paste echo"
     session.data_open.store(1, .release);
     session.authorized.store(1, .release);
 
-    try session.applyClipboardUpdate(
+    session.applyClipboardUpdate(
         \\{"event":"clipboard/updated","payload":{"text":"copied in the guest"}}
     );
     const observed = session.clipboardSnapshot();
@@ -2069,10 +2090,41 @@ test "guest clipboard updates become an observation and skip our own paste echo"
     // A local paste writes the guest clipboard, and Neko reflects that write
     // back. The reflection must not republish it as a new observation.
     try std.testing.expect(session.paste("locally pasted"));
-    try session.applyClipboardUpdate(
+    session.applyClipboardUpdate(
         \\{"event":"clipboard/updated","payload":{"text":"locally pasted"}}
     );
     try std.testing.expectEqual(observed.generation, session.clipboardSnapshot().generation);
+
+    // A malformed, absent, or null payload is an unusable observation, not a
+    // protocol failure: dropping the Live View connection over a clipboard
+    // notification would cost the operator their session.
+    const before = session.clipboardSnapshot();
+    for ([_][]const u8{
+        \\{"event":"clipboard/updated"}
+        ,
+        \\{"event":"clipboard/updated","payload":{}}
+        ,
+        \\{"event":"clipboard/updated","payload":{"text":null}}
+        ,
+        \\{"event":"clipboard/updated","payload":{"text":42}}
+        ,
+        \\{"event":"clipboard/updated","payload":[]}
+        ,
+        "not json at all",
+    }) |malformed| session.applyClipboardUpdate(malformed);
+    try std.testing.expectEqual(before.generation, session.clipboardSnapshot().generation);
+    try std.testing.expect(session.state() != .failed);
+
+    // Losing control makes every outstanding guard unanswerable, because Neko
+    // routes clipboard/updated to the control host alone.
+    try std.testing.expect(session.paste("handed off"));
+    session.applyControlRelease();
+    session.data_open.store(1, .release);
+    session.authorized.store(1, .release);
+    session.applyClipboardUpdate(
+        \\{"event":"clipboard/updated","payload":{"text":"handed off"}}
+    );
+    try std.testing.expect(session.clipboardSnapshot().generation > observed.generation);
 
     // Transport loss drops the retained guest text rather than carrying it
     // across a reconnect.
