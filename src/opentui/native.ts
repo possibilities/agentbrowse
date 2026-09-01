@@ -7,7 +7,7 @@ import {
   type LiveViewConnectionDescriptor,
 } from "../../client/connection.ts";
 import { liveViewBuildPrefix } from "../../client/live-view-build.ts";
-import { MAX_ABI_VERSION, MIN_ABI_VERSION } from "./abi-version.ts";
+import { INPUT_METRICS_MIN_ABI_VERSION, MAX_ABI_VERSION, MIN_ABI_VERSION } from "./abi-version.ts";
 
 const SNAPSHOT_SIZE = 32;
 const METRICS_SIZE = 96;
@@ -393,7 +393,11 @@ export class NativeLiveViewSession {
     const structSize = output.readUInt32LE(0);
     const abiVersion = output.readUInt32LE(4);
     const kindCount = output.readUInt32LE(8);
-    if (structSize < INPUT_METRICS_SIZE || abiVersion < 3 || kindCount < INPUT_KIND_COUNT) {
+    if (
+      structSize < INPUT_METRICS_SIZE ||
+      abiVersion < INPUT_METRICS_MIN_ABI_VERSION ||
+      kindCount < INPUT_KIND_COUNT
+    ) {
       throw new Error(
         `native Live View input metrics layout is unsupported: size=${structSize} abi=${abiVersion} kinds=${kindCount}`,
       );
@@ -488,10 +492,15 @@ export class NativeLiveViewSession {
     // A library whose struct GREW is already refused as buffer_too_small above.
     // One that SHRANK is the silent case: the call succeeds, writes fewer bytes
     // than this buffer, and every field past the truncation reads stale zeroes.
+    // Size is not layout: two same-width fields could swap without changing
+    // either number. This pins the two self-describing fields, which is what is
+    // readable at generation 0; the rest is covered by the header/Zig pinning
+    // test and a compile against one header on both sides.
     const structSize = output.readUInt32LE(0);
-    if (structSize !== CLIPBOARD_SNAPSHOT_SIZE) {
+    const structAbi = output.readUInt32LE(4);
+    if (structSize !== CLIPBOARD_SNAPSHOT_SIZE || structAbi !== this.native.abiVersion) {
       throw new Error(
-        `native Live View clipboard snapshot layout is unsupported: size=${structSize} expected=${CLIPBOARD_SNAPSHOT_SIZE}`,
+        `native Live View clipboard snapshot layout is unsupported: size=${structSize} abi=${structAbi} expected size=${CLIPBOARD_SNAPSHOT_SIZE} abi=${this.native.abiVersion}`,
       );
     }
     const textByteLength = output.readUInt32LE(12);

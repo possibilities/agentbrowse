@@ -62,11 +62,14 @@ test("every ABI version bound comes from one shared constant", async () => {
   const { MAX_ABI_VERSION, MIN_ABI_VERSION } = await import("../src/opentui/abi-version.ts");
 
   // Discover the consumers rather than listing them. A hand-written list is how
-  // the Worker's private copy of the bound went unnoticed in the first place,
-  // so anything that opens the library must be found here automatically.
-  const found = Bun.spawnSync(["git", "grep", "-l", "dlopen(", "--", "*.ts", ":(exclude)test/"], {
-    cwd: fileURLToPath(new URL("..", import.meta.url)),
-  });
+  // the Worker's private copy of the bound went unnoticed in the first place.
+  // The predicate is the union of two signals because they catch different
+  // bugs: `dlopen(` finds a load carrying no version check at all, and
+  // `ab_live_view_abi_version` finds a version check that does not itself load.
+  const found = Bun.spawnSync(
+    ["git", "grep", "-lE", "dlopen\\(|ab_live_view_abi_version", "--", "*.ts", ":(exclude)test/"],
+    { cwd: fileURLToPath(new URL("..", import.meta.url)) },
+  );
   expect(found.exitCode).toBe(0);
   const consumers = new TextDecoder()
     .decode(found.stdout)
@@ -80,8 +83,16 @@ test("every ABI version bound comes from one shared constant", async () => {
   );
   for (const consumer of consumers) {
     const source = readFileSync(fileURLToPath(new URL(`../${consumer}`, import.meta.url)), "utf8");
-    expect(source).toContain('from "./abi-version.ts"');
-    expect(source).not.toMatch(/^const (?:MIN_ABI_VERSION|MAX_ABI_VERSION|ABI_VERSION)\s*=/mu);
+    // Name the file in the failure. The predicate can also match the token in a
+    // comment or string, and a bare boolean would not say where to look.
+    const imports = source.includes('from "./abi-version.ts"');
+    const declaresOwn = /^const (?:MIN_ABI_VERSION|MAX_ABI_VERSION|ABI_VERSION)\s*=/mu.test(source);
+    expect(`${consumer} imports shared bounds: ${imports}`).toBe(
+      `${consumer} imports shared bounds: true`,
+    );
+    expect(`${consumer} declares its own: ${declaresOwn}`).toBe(
+      `${consumer} declares its own: false`,
+    );
   }
 
   // The shared maximum is the ABI the native library actually reports, and the
@@ -105,7 +116,8 @@ test.skipIf(!existsSync(defaultNativeLibraryPath()))(
       const message = await new Promise<{ infrastructureError: string | null }>(
         (resolve, reject) => {
           worker.onmessage = (event: MessageEvent) => resolve(event.data);
-          worker.onerror = (event) => reject(event);
+          worker.onerror = (event) =>
+            reject(new Error(`conversion worker errored: ${event.message ?? String(event)}`));
           worker.postMessage({
             type: "initialize",
             id: 1,

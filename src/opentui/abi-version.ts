@@ -16,3 +16,14 @@
  */
 export const MIN_ABI_VERSION = 2;
 export const MAX_ABI_VERSION = 4;
+
+/**
+ * The ABI at which the input-metrics struct took its current shape.
+ *
+ * Deliberately its own constant rather than MIN_ABI_VERSION: those are
+ * different quantities. MIN_ABI_VERSION is the oldest library these consumers
+ * will open at all; this is the version below which one particular struct is
+ * absent, so a feature gate reads it and a load bound does not. Collapsing them
+ * would make raising the floor silently change which structs are read.
+ */
+export const INPUT_METRICS_MIN_ABI_VERSION = 3;
