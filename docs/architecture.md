@@ -298,7 +298,7 @@ and the fxnk Ramp and fx-faithful theme resolver used by the example picker.
 The resolver chooses one complete fixed set before first paint and its live
 monitor replaces that set atomically; neither samples nor derives a host
 palette. The reusable renderable contains no picker or application chrome, so
-an fmx-like host can compose it beside embedded Ghostty terminals and retain
+an smolmux-like host can compose it beside embedded Ghostty terminals and retain
 ownership of layout and commands.
 
 Both the command-line AppKit client and the dylib target deploy to macOS 11.0.

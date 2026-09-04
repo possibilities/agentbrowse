@@ -358,7 +358,7 @@ refuses to measure a native library that is not the pinned carry unless
 `OTUI_ASSET_ROOT` names a comparison build.
 
 Bun overrides belong to the installation root and are not inherited from a
-dependency. An OpenTUI host that embeds `agentbrowse/opentui`, including fmx,
+dependency. An OpenTUI host that embeds `agentbrowse/opentui`, including smolmux,
 must repeat both the `@opentui/core` and `@opentui/core-darwin-arm64` overrides
 from this repository and lock those resolutions until official OpenTUI releases
 include the changes. Pinning only the native package leaves pixel input and

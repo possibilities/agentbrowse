@@ -46,7 +46,7 @@ const LIGHT_NOTIFICATION = "\x1b[?997;2n";
 const OSC11_TIMEOUT_MS = 200;
 
 /**
- * fx's indexed roles, plus the two fixed fmx/agentbrowse surface steps.
+ * fx's indexed roles, plus the two fixed smolmux/agentbrowse surface steps.
  * The canvas remains the terminal's default background. Focus and error are
  * direct ANSI intents, not colors sampled from the host palette.
  */
