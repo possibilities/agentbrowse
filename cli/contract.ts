@@ -645,7 +645,7 @@ export const CONTRACT: Contract = {
       mutates: true,
       blocking: true,
       guidance:
-        "Every audience: agent leaf above becomes a tool, generated from this contract at start-up; adding one here adds a tool with no further edit. provider stays hidden because its audience is internal, and so does mcp itself. Dispatch happens in this same process, through the exact functions create, list, destroy, profile, resolve, and view already call — nothing is spawned and no argv is re-parsed. The server therefore owns the same three responsibilities as the CLI: browser target lifecycle, session resolution, and human handoff through view. Page interaction — clicking, typing, snapshots — stays with the third-party agent-browser CLI and is deliberately absent here.",
+        "Every audience: agent leaf above becomes a tool, generated from this contract at start-up; adding one here adds a tool with no further edit. provider stays hidden because its audience is internal, and so does mcp itself. Dispatch happens in this same process, through the exact functions create, list, destroy, profile, resolve, and view already call — nothing is spawned and no argv is re-parsed. The server therefore owns the same three responsibilities as the CLI: browser target lifecycle, session resolution, and human handoff through view. Page interaction — clicking, typing, snapshots — stays with the third-party agent-browser CLI and is deliberately absent here. The server runs until its host closes stdin and exits on that close without needing a signal.",
       arguments: [],
     },
   ],

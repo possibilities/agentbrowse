@@ -264,3 +264,23 @@ describe("a live stdio server", () => {
     expect(result.content[0]!.text).toContain("slot");
   });
 });
+
+describe("process lifetime", () => {
+  test("agentbrowse mcp exits on its own when the host closes stdin", async () => {
+    const child = Bun.spawn(["bun", MAIN, "mcp"], {
+      env: { ...process.env, AGENTBROWSE_CONFIG: "/nonexistent/agentbrowse/config.json" },
+      stdin: "pipe",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    // A host that is done closes the pipe rather than sending a signal. The
+    // SDK's transport itself never watches for that, so the CLI has to.
+    child.stdin.end();
+    const outcome = await Promise.race([
+      child.exited,
+      Bun.sleep(5_000).then(() => "still running" as const),
+    ]);
+    if (outcome === "still running") child.kill();
+    expect(outcome).toBe(0);
+  });
+});

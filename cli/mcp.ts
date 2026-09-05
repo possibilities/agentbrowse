@@ -13,10 +13,19 @@ import { createAgentbrowseMcpServer, type ServerOptions } from "./mcp-server.ts"
 
 export async function serveAgentbrowseMcp(options: ServerOptions): Promise<void> {
   const server = createAgentbrowseMcpServer(options);
-  await server.connect(new StdioServerTransport());
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
   // connect() returns as soon as the transport is listening. The process stays
   // alive on stdin, and this resolves when the host closes it.
+  //
+  // The SDK's stdio transport watches stdin for `data` and `error` only. A
+  // host that closes the pipe instead of signalling would otherwise leave this
+  // process parked forever, so end-of-input closes the transport, which is
+  // what fires `onclose`.
   await new Promise<void>((resolve) => {
     server.server.onclose = resolve;
+    process.stdin.once("end", () => {
+      void transport.close();
+    });
   });
 }
