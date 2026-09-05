@@ -305,7 +305,7 @@ export class BrowserFarm {
           backend: this.backend.id,
           container: browser.container,
         });
-        const access = await this.backend.browserAccess(target);
+        const access = await this.backend.browserAccess(target, undefined, signal);
         return {
           ...browser,
           backend: this.backend.id,

@@ -312,8 +312,14 @@ export class AppleContainerFarmBackend implements FarmBackend {
     return records;
   }
 
-  async inspectContainer(container: string): Promise<ContainerState | undefined> {
-    const result = await this.runCommand([this.backendConfig.command, "inspect", container]);
+  async inspectContainer(
+    container: string,
+    signal?: AbortSignal,
+  ): Promise<ContainerState | undefined> {
+    const result = await this.runCommand(
+      [this.backendConfig.command, "inspect", container],
+      signal,
+    );
     if (result.exitCode !== 0) throw commandFailure("Apple container inspect", result);
     let rows: unknown;
     try {
@@ -362,8 +368,12 @@ export class AppleContainerFarmBackend implements FarmBackend {
     directAddress(state, target.container);
   }
 
-  async browserAccess(target: Target, suppliedState?: ContainerState): Promise<BrowserAccess> {
-    const state = suppliedState ?? (await this.inspectContainer(target.container));
+  async browserAccess(
+    target: Target,
+    suppliedState?: ContainerState,
+    signal?: AbortSignal,
+  ): Promise<BrowserAccess> {
+    const state = suppliedState ?? (await this.inspectContainer(target.container, signal));
     if (state === undefined) {
       throw new CliError("browser_missing", `${target.container} is absent from Apple container`);
     }

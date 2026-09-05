@@ -89,7 +89,11 @@ export interface FarmBackend {
   listManagedContainers(signal?: AbortSignal): Promise<readonly ManagedContainerRecord[]>;
   inspectContainer(container: string): Promise<ContainerState | undefined>;
   verifyContainer(state: ContainerState, target: Target, image: string): Promise<void>;
-  browserAccess(target: Target, state?: ContainerState): Promise<BrowserAccess>;
+  browserAccess(
+    target: Target,
+    state?: ContainerState,
+    signal?: AbortSignal,
+  ): Promise<BrowserAccess>;
   runBrowser(input: RunBrowserInput): Promise<void>;
   startContainer(container: string): Promise<void>;
   waitReady(target: Target, timeoutSeconds?: number): Promise<void>;
@@ -303,6 +307,7 @@ export class DockerFarmBackend implements FarmBackend {
   readonly context: string;
   readonly remoteHost: string;
   private readonly runCommand: BackendCommand;
+  private networkAddressLookup: Promise<string> | null = null;
 
   constructor(
     readonly backendConfig: DockerBackendConfig,
@@ -361,6 +366,19 @@ export class DockerFarmBackend implements FarmBackend {
       }
       return this.backendConfig.networkAddress;
     }
+    // The command is an SSH round trip, and one invocation asks for the
+    // address several times: `list` once per target, `create` for
+    // verification, launch, and access. A backend instance lives for one
+    // command, so the first successful answer is the answer; a failure is not
+    // retained, so a retry within the same command can still succeed.
+    this.networkAddressLookup ??= this.lookupNetworkAddress(signal).catch((error: unknown) => {
+      this.networkAddressLookup = null;
+      throw error;
+    });
+    return await this.networkAddressLookup;
+  }
+
+  private async lookupNetworkAddress(signal?: AbortSignal): Promise<string> {
     const result = await this.discoveryCommand(
       ["ssh", "-o", "BatchMode=yes", this.remoteHost, this.backendConfig.networkAddressCommand!],
       signal,
@@ -672,8 +690,12 @@ export class DockerFarmBackend implements FarmBackend {
     }
   }
 
-  async browserAccess(target: Target): Promise<BrowserAccess> {
-    const networkAddress = await this.resolveNetworkAddress();
+  async browserAccess(
+    target: Target,
+    _state?: ContainerState,
+    signal?: AbortSignal,
+  ): Promise<BrowserAccess> {
+    const networkAddress = await this.resolveNetworkAddress(signal);
     return {
       cdpUrl: `http://${networkAddress}:${target.cdpPort}`,
       liveViewUrl: `http://127.0.0.1:${target.httpPort}`,

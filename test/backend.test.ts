@@ -347,3 +347,54 @@ test("managed profile discovery parses only exact labeled volumes", async () => 
     { name: "signed-in", volume: "agentbrowse-profile-signed-in" },
   ]);
 });
+
+test("the network address lookup runs once per backend instance", async () => {
+  const seen: string[][] = [];
+  const docker = backend(async (args) => {
+    seen.push([...args]);
+    return args[0] === "ssh" ? ok("192.0.2.10") : ok("container-id");
+  });
+  const target = targetFor("testing-deadbeef", 3, {
+    profile: "testing",
+    backend: "remote-browser",
+  });
+
+  await docker.runBrowser({
+    target,
+    image: "agentbrowse/kernel-headful:test",
+    nekoLogLevel: "info",
+  });
+  const [first, second] = await Promise.all([
+    docker.browserAccess(target),
+    docker.browserAccess(target),
+  ]);
+
+  expect(first.cdpUrl).toBe("http://192.0.2.10:9225");
+  expect(second).toEqual(first);
+  expect(seen.filter((args) => args[0] === "ssh")).toHaveLength(1);
+});
+
+test("a failed network address lookup is not retained for the next call", async () => {
+  let attempts = 0;
+  const docker = backend(async (args) => {
+    if (args[0] !== "ssh") return ok("container-id");
+    attempts += 1;
+    return attempts === 1
+      ? {
+          exitCode: 255,
+          stdout: "",
+          stderr: "ssh: connect to host remote-browser port 22: Connection refused",
+        }
+      : ok("192.0.2.10");
+  });
+  const target = targetFor("testing-deadbeef", 3, {
+    profile: "testing",
+    backend: "remote-browser",
+  });
+
+  await expect(docker.browserAccess(target)).rejects.toMatchObject({
+    code: "browser_host_not_accepting_connections",
+  });
+  expect((await docker.browserAccess(target)).cdpUrl).toBe("http://192.0.2.10:9225");
+  expect(attempts).toBe(2);
+});
