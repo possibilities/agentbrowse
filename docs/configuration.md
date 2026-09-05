@@ -6,14 +6,14 @@ absolute path for tests or an isolated installation. The file contains an
 ordered `backends` array. Array order is provisioning priority, while each
 backend `id` is stable identity recorded in target receipts and cleanup data.
 
-The two backend shapes are deliberately separate:
+Docker, Apple container, and Hypeman have separate backend shapes. [Hypeman configuration and demo instructions](hypeman.md) describe its API credentials, resources, and network forwarding.
 
 | Type | Required fields | Optional fields |
 |---|---|---|
 | `docker` | `id`, `context`, `remoteHost`, and exactly one of `networkAddress` or `networkAddressCommand` | `expectedEndpoint`, `expectedEngine`, partial `video` override |
-| `apple-container` | `id` | `command` (`/usr/local/bin/container`), `applicationRoot` (the conventional agentbrowse-infra runtime root), `maxTargets` (1), `cpus` (2), `memory` (`6G`), partial `video` override |
+| `apple-container` | `id` | `command` (`/usr/local/bin/container`), `applicationRoot` (the conventional agentbrowse-infra runtime root), `accessMode` (`direct` or explicit `loopback` relay), `maxTargets` (1000), `cpus` (2), `memory` (`6G`), partial `video` override |
 
-Apple's safe local shape is fixed to one 2-CPU, 6-GiB target. The application
+Apple defaults to 2 CPUs and 6 GiB per target with the same 1000-slot range as Docker. These allocations and the target cap are configurable. The application
 root and command, when overridden, must be absolute paths. Duplicate or invalid
 backend ids and version 1 files fail before any backend command runs.
 

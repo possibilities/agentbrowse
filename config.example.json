@@ -19,7 +19,7 @@
       "id": "apple-container-local",
       "type": "apple-container",
       "command": "/usr/local/bin/container",
-      "maxTargets": 1,
+      "maxTargets": 1000,
       "cpus": 2,
       "memory": "6G"
     }

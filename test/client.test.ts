@@ -167,3 +167,12 @@ test("direct Live View access returns the Apple URL without spawning SSH", async
   expect(spawned).toBe(false);
   await access.close();
 });
+
+test("SSH Live View can forward to a private VM address on its host", () => {
+  expect(sshArguments("artbird", 49152, 8080, "10.211.0.42")).toContain(
+    "127.0.0.1:49152:10.211.0.42:8080",
+  );
+  expect(() => sshArguments("artbird", 49152, 8080, "foreign:80:host")).toThrow(
+    "invalid SSH forward destination",
+  );
+});

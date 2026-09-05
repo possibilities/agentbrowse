@@ -98,7 +98,7 @@ test("version 2 preserves backend order and applies safe Apple defaults", () => 
   ]);
   expect(config.backends[1]).toMatchObject({
     command: "/usr/local/bin/container",
-    maxTargets: 1,
+    maxTargets: 1000,
     cpus: 2,
     memory: "6G",
   });
@@ -203,11 +203,65 @@ test("invalid versions, duplicate ids, and unsafe Apple capacity fail locally", 
     path,
     JSON.stringify({
       version: 2,
-      backends: [{ id: "local", type: "apple-container", maxTargets: 2 }],
+      backends: [{ id: "local", type: "apple-container", maxTargets: 1001 }],
     }),
   );
-  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow("maxTargets must be 1");
+  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow(
+    "maxTargets must be between 1 and 1000",
+  );
   expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: "relative.json" })).toThrow(
     "must be an absolute path",
   );
+});
+
+test("Apple resource allocations are configurable and share the fleet slot range", () => {
+  const path = configPath();
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 2,
+      backends: [{ id: "local", type: "apple-container", cpus: 4, memory: "12G" }],
+    }),
+  );
+  expect(loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path }).backends[0]).toMatchObject({
+    maxTargets: 1000,
+    cpus: 4,
+    memory: "12G",
+  });
+});
+
+test("Hypeman connection configuration validates credentials, routing and port ranges", () => {
+  const path = configPath();
+  const base = {
+    id: "hypeman",
+    type: "hypeman",
+    baseUrl: "http://127.0.0.1:4973",
+    tokenFile: "/tmp/hypeman-token",
+  };
+  const read = (overrides: Record<string, unknown> = {}) => {
+    writeFileSync(path, JSON.stringify({ version: 2, backends: [{ ...base, ...overrides }] }));
+    return loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path }).backends[0];
+  };
+  expect(read()).toMatchObject({
+    type: "hypeman",
+    cpus: 2,
+    memory: "6G",
+    portOffset: 2000,
+    profileSizeGb: 10,
+  });
+  expect(
+    read({ baseUrl: "http://192.0.2.1:4973", remoteHost: "artbird", networkAddress: "192.0.2.1" }),
+  ).toMatchObject({ remoteHost: "artbird" });
+  for (const overrides of [
+    { baseUrl: "http://secret@localhost:4973" },
+    { tokenFile: "relative" },
+    { baseUrl: "http://192.0.2.1:4973" },
+    { remoteHost: "artbird" },
+    { remoteHost: "-option", networkAddress: "192.0.2.1" },
+    { remoteHost: "artbird", networkAddress: "999.1.1.1" },
+    { portOffset: 8537 },
+    { cpus: 0 },
+    { memory: "0G" },
+  ])
+    expect(() => read(overrides)).toThrow();
 });

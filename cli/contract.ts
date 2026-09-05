@@ -251,6 +251,33 @@ const ERROR_CODES: readonly ContractErrorCode[] = [
     recovery: "Prepare the locked image on that backend, then retry.",
   },
   {
+    code: "hypeman_credentials_missing",
+    meaning: "The configured Hypeman token file is absent, unreadable, or empty.",
+    recovery: "Prepare the private token file for this exact backend.",
+  },
+  {
+    code: "hypeman_request_failed",
+    meaning: "The Hypeman API refused or failed an operation.",
+    recovery:
+      "Inspect the exact instance and server logs before retrying; mutations never fall through to another backend.",
+  },
+  {
+    code: "hypeman_network_failed",
+    meaning: "The remote Hypeman forwarding table could not be reconciled.",
+    recovery:
+      "Run the repository-managed Hypeman host setup and inspect the exact target before retrying.",
+  },
+  {
+    code: "invalid_hypeman_response",
+    meaning: "The Hypeman API returned malformed or incomplete data.",
+    recovery: "Verify the pinned Hypeman runtime and backend configuration.",
+  },
+  {
+    code: "profile_missing",
+    meaning: "The profile volume disappeared before instance creation.",
+    recovery: "Inspect this backend's exact profile and its durable binding before retrying.",
+  },
+  {
     code: "invalid_apple_response",
     meaning: "The Apple container service returned malformed, incomplete, or ambiguous data.",
   },

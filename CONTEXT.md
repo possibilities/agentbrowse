@@ -5,7 +5,7 @@ including cookies, local storage, IndexedDB, and authentication. At most one Bro
 target may mount a Browser profile for writable use at a time.
 _Avoid: browser session, user profile, target._
 
-**Browser target** — One named Kernel headful container on the configured host, exposing
+**Browser target** — One named Kernel headful container or Hypeman VM on the configured host, exposing
 both a Chrome DevTools Protocol endpoint and the services needed for Live View.
 Its numeric slot deterministically assigns its host ports.
 _Avoid: browser session, Docker target._

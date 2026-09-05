@@ -125,7 +125,20 @@ test("Apple targets use unique names and Direct access from inspect JSON", async
   });
 });
 
-test("Apple launch is bounded to 2 CPUs, 6G, exact labels, and no publish or privilege", async () => {
+test("stopped Apple targets can be verified before their network is assigned", async () => {
+  const rows = JSON.parse(inspectDocument());
+  rows[0].status = "stopped";
+  rows[0].networks = [];
+  const local = backend(async () => ok(JSON.stringify(rows)));
+  const target = targetFor("testing", 0, {
+    backend: local.id,
+    container: "agentbrowse-browser-testing-generation1",
+  });
+  const state = await local.inspectContainer(target.container);
+  await local.verifyContainer(state!, target, "browser@test");
+});
+
+test("Apple launch uses configured resources, exact labels, and no publish or privilege", async () => {
   let call: readonly string[] = [];
   const local = backend(async (args) => {
     call = args;

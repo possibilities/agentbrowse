@@ -73,7 +73,7 @@ interface.
 Apple targets expose the container's Direct `192.168.64.x` address instead:
 CDP is port 9222, Live View HTTP is port 8080, and Neko's UDP mux is the
 slot-derived port inside the container. Apple publishes no host ports and is
-bounded to one 2-CPU, 6-GiB target.
+configured with independent CPU, memory, and target-cap settings.
 
 These bindings assume trusted backend networking. Docker Live View HTTP is
 reachable only through the managed SSH forward, and Apple targets use Apple's
