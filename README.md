@@ -341,7 +341,7 @@ duration and main-thread round trip with exact build provenance.
 
 On macOS arm64, this checkout pins both OpenTUI packages to the
 `possibilities/opentui` `carry/pixel-mouse-shared-memory` build, stacked on the
-earlier `carry/kitty-image-replacement`. OpenTUI 0.5.8 otherwise deletes the
+earlier `carry/kitty-image-replacement`. OpenTUI 0.5.10 otherwise deletes the
 visible Kitty image before transmitting every video-frame replacement, briefly
 exposing the terminal background; the carry keeps a stable image identity and
 replaces its pixels without that destructive delete. The carry also transmits

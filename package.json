@@ -42,13 +42,13 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
-    "@opentui/core": "0.5.8",
+    "@opentui/core": "0.5.10",
     "@types/bun": "1.3.14",
     "bun-types": "1.3.14",
     "typescript": "5.9.3"
   },
   "overrides": {
-    "@opentui/core": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-0.5.8-agentbrowse.2.tgz",
-    "@opentui/core-darwin-arm64": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-darwin-arm64-0.5.8-agentbrowse.2.tgz"
+    "@opentui/core": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.10.1/opentui-core-0.5.10-agentbrowse.1.tgz",
+    "@opentui/core-darwin-arm64": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.10.1/opentui-core-darwin-arm64-0.5.10-agentbrowse.1.tgz"
   }
 }

@@ -3,38 +3,38 @@
   "source": {
     "repository": "https://github.com/possibilities/opentui",
     "branch": "carry/pixel-mouse-shared-memory",
-    "commit": "245e2f91fe3bcaa6e1e95e16ada6a11d81152670",
-    "baseCarryCommit": "468989cfa4c975f1c1b0c1a7f64c6739c277824d",
-    "upstreamVersion": "0.5.8",
-    "upstreamCommit": "21b002174255ca2236ed3115e2bb2294642f2cf5"
+    "commit": "f7a4d536823f47b15ccc52adf5580988b802c69f",
+    "baseCarryCommit": "24b015999bd9ce529a81f5740c5f717622de0049",
+    "upstreamVersion": "0.5.10",
+    "upstreamCommit": "7581976f4d2c917fd5ae5266c8bc61f0e44fc933"
   },
   "release": {
-    "tag": "agentbrowse-v0.5.8.2",
-    "url": "https://github.com/possibilities/opentui/releases/tag/agentbrowse-v0.5.8.2"
+    "tag": "agentbrowse-v0.5.10.1",
+    "url": "https://github.com/possibilities/opentui/releases/tag/agentbrowse-v0.5.10.1"
   },
   "packages": [
     {
       "name": "@opentui/core",
-      "version": "0.5.8",
+      "version": "0.5.10",
       "asset": {
-        "name": "opentui-core-0.5.8-agentbrowse.2.tgz",
-        "url": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-0.5.8-agentbrowse.2.tgz",
-        "sha256": "f8336b370a01d3ae0e24a588d29b237c2c01869c31e00ed4dfc6eeda21cdaf24",
-        "bunIntegrity": "sha512-kKF/LdCAPr3ljIYMpD5S8+7/M5zbe4A4xtADckDeWg8zKeB7c+LDkuJPYBNe/ObeZuxkEE+1+rfH4gRQfouDvg=="
+        "name": "opentui-core-0.5.10-agentbrowse.1.tgz",
+        "url": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.10.1/opentui-core-0.5.10-agentbrowse.1.tgz",
+        "sha256": "2e326da6d2a6eca620efeb55eab2fa95a7b3af494f739c24b294ef97a58f068e",
+        "bunIntegrity": "sha512-/0gKV31QIQEknnkEzBQRnqdOInD7gk0hPHIRpZwTGjFw7gAvOwZITtQbmZuLr572oSDk3WaIPkj6CyFtWCh6tw=="
       }
     },
     {
       "name": "@opentui/core-darwin-arm64",
-      "version": "0.5.8",
+      "version": "0.5.10",
       "asset": {
-        "name": "opentui-core-darwin-arm64-0.5.8-agentbrowse.2.tgz",
-        "url": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.8.2/opentui-core-darwin-arm64-0.5.8-agentbrowse.2.tgz",
-        "sha256": "b8bf66d30a37eb814b5aff126211cbaac6dd81e82c23d3e8454216cf370b3fb4",
-        "bunIntegrity": "sha512-sXdQjbNUTOjzhtID7gougkUH9m4nXl2o3CE5GdN4hp/2EUP++JindUTaZ9Tg0F9i5tEGz/xEgBHR5rV4SLOJdQ=="
+        "name": "opentui-core-darwin-arm64-0.5.10-agentbrowse.1.tgz",
+        "url": "https://github.com/possibilities/opentui/releases/download/agentbrowse-v0.5.10.1/opentui-core-darwin-arm64-0.5.10-agentbrowse.1.tgz",
+        "sha256": "d524d102ca78f431bfbd91439a1505f66c5ca1f0f9e64aa32bf5779bd94388a8",
+        "bunIntegrity": "sha512-9PocQYhwUhYxnvGNdoveBdOCrcqwr1mBI6JqcNou8zmkhrJTYjWpd8B/X1xZE9jbxENwe6ku6pgkm30+62DodA=="
       },
       "nativeLibrary": {
         "file": "libopentui.dylib",
-        "sha256": "ace9fe8b414abb92477a5115eb1171862dc4497aeb0c62b7d0fd844c4111a54e"
+        "sha256": "7b59989129c796d76256d52968ace567238ff89680800ca62583adfc5f46d714"
       }
     }
   ]
