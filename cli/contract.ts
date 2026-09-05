@@ -231,8 +231,8 @@ const ERROR_CODES: readonly ContractErrorCode[] = [
   {
     code: "cleanup_backend_unavailable",
     meaning:
-      "A target with no backend-bound receipt cannot be destroyed safely because some configured backend is unavailable.",
-    recovery: "Restore every configured backend, then destroy the target.",
+      "A target with no backend-bound receipt, or a profile with no binding receipt, cannot be removed safely because some configured backend is unavailable.",
+    recovery: "Restore every configured backend, then retry the removal.",
   },
   {
     code: "command_failed",

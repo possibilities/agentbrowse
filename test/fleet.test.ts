@@ -15,7 +15,7 @@ import { CliError } from "../cli/errors.ts";
 import { BrowserFarm } from "../cli/farm.ts";
 import { BrowserFleet } from "../cli/fleet.ts";
 import type { BrowserAccess, BrowserProfile } from "../cli/model.ts";
-import { PROFILE_MOUNT_PATH, PROFILE_SCHEMA_VERSION } from "../cli/model.ts";
+import { PROFILE_MOUNT_PATH, PROFILE_SCHEMA_VERSION, profileFor } from "../cli/model.ts";
 import { ProfileBindingStore } from "../cli/profile-binding.ts";
 
 const temporaryDirectories: string[] = [];
@@ -37,6 +37,7 @@ class FleetBackend implements FarmBackend {
   readonly events: string[] = [];
   readonly probeSignals: Array<AbortSignal | undefined> = [];
   probeError: CliError | null = null;
+  probeDelayMs = 0;
   verifyError: CliError | null = null;
   runError: CliError | null = null;
   imagePresent = true;
@@ -55,6 +56,7 @@ class FleetBackend implements FarmBackend {
   async verifyHost(signal?: AbortSignal): Promise<void> {
     this.events.push("probe");
     this.probeSignals.push(signal);
+    if (this.probeDelayMs > 0) await Bun.sleep(this.probeDelayMs);
     if (this.probeError !== null) throw this.probeError;
   }
 
@@ -429,4 +431,44 @@ test("concurrent first bindings choose exactly one profile home", async () => {
   const binding = await store.read("research");
   expect(binding).toBeDefined();
   expect(["remote-docker", "apple-container-local"]).toContain(binding!.backend);
+});
+
+test("receiptless profile deletion fails closed while any backend is unavailable", async () => {
+  const apple = new FleetBackend("apple-container-local");
+  // The profile exists on the backend with no binding receipt naming a home.
+  await apple.createProfile(profileFor("testing"));
+  const remoteDocker = new FleetBackend("remote-docker");
+  remoteDocker.probeError = new CliError("browser_host_unreachable", "Remote Docker is offline");
+
+  await expect(fleet([remoteDocker, apple]).deleteProfile("testing")).rejects.toMatchObject({
+    code: "cleanup_backend_unavailable",
+    message: expect.stringContaining("without a profile binding receipt"),
+  });
+
+  expect(apple.profiles.has("testing")).toBe(true);
+  expect(remoteDocker.events).toEqual(["probe"]);
+  expect(apple.events).toEqual(["probe"]);
+
+  remoteDocker.probeError = null;
+  const result = await fleet([remoteDocker, apple]).deleteProfile("testing");
+  expect(result).toMatchObject({ backend: "apple-container-local", deleted: true });
+  expect(apple.profiles.has("testing")).toBe(false);
+});
+
+test("inventory merges every reachable backend even when probes finish out of order", async () => {
+  const remoteDocker = new FleetBackend("remote-docker");
+  const apple = new FleetBackend("apple-container-local");
+  const directory = runtimeDir();
+  const remote = await fleet([remoteDocker], directory).provisionProfile({ profile: "remote" });
+  const local = await fleet([apple], directory).provisionProfile({ profile: "local" });
+  remoteDocker.probeDelayMs = 30;
+
+  const listed = await fleet([remoteDocker, apple], directory).list();
+
+  // Both targets hold slot 0 on their own backend, so the sorted inventory
+  // orders them by backend id; the slow Docker probe must not drop or reorder.
+  expect(listed.map((entry) => `${entry.backend}/${entry.name}`)).toEqual([
+    `apple-container-local/${local.name}`,
+    `remote-docker/${remote.name}`,
+  ]);
 });

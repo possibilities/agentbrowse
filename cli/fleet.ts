@@ -29,6 +29,11 @@ interface AvailabilityOutcome {
   readonly error: CliError;
 }
 
+interface Collected<T> {
+  readonly outcome: AvailabilityOutcome | null;
+  readonly rows: readonly T[];
+}
+
 export class BrowserFleet {
   private readonly farmById: ReadonlyMap<string, BrowserFarm>;
   readonly bindings: ProfileBindingStore;
@@ -76,22 +81,7 @@ export class BrowserFleet {
   }
 
   async list(signal?: AbortSignal): Promise<readonly BrowserListEntry[]> {
-    const outcomes: AvailabilityOutcome[] = [];
-    const rows: BrowserListEntry[] = [];
-    let available = 0;
-    for (const farm of this.farms) {
-      signal?.throwIfAborted();
-      try {
-        await farm.probeAvailability(signal);
-      } catch (error) {
-        if (!isAvailabilityFailure(error)) throw error;
-        outcomes.push({ backend: farm.backend.id, error });
-        continue;
-      }
-      available += 1;
-      rows.push(...(await farm.list(signal, true)));
-    }
-    if (available === 0 && this.farms.length > 0) throw unavailableSet(outcomes);
+    const rows = await this.collectFromAvailable(signal, (farm) => farm.list(signal, true));
     return rows.sort(
       (left, right) =>
         left.slot - right.slot ||
@@ -128,22 +118,7 @@ export class BrowserFleet {
   }
 
   async listProfiles(signal?: AbortSignal): Promise<readonly ProfileListEntry[]> {
-    const outcomes: AvailabilityOutcome[] = [];
-    const rows: ProfileListEntry[] = [];
-    let available = 0;
-    for (const farm of this.farms) {
-      signal?.throwIfAborted();
-      try {
-        await farm.probeAvailability(signal);
-      } catch (error) {
-        if (!isAvailabilityFailure(error)) throw error;
-        outcomes.push({ backend: farm.backend.id, error });
-        continue;
-      }
-      available += 1;
-      rows.push(...(await farm.listProfiles(signal, true)));
-    }
-    if (available === 0 && this.farms.length > 0) throw unavailableSet(outcomes);
+    const rows = await this.collectFromAvailable(signal, (farm) => farm.listProfiles(signal, true));
     return rows.sort(
       (left, right) =>
         left.name.localeCompare(right.name) || left.backend.localeCompare(right.backend),
@@ -161,7 +136,19 @@ export class BrowserFleet {
       return result;
     }
 
-    const matches = (await this.listProfiles()).filter((profile) => profile.name === name);
+    if (this.farms.length === 0) throw noBackendsConfigured();
+    // Without a binding receipt the profile could live on any configured
+    // backend, so an unreachable one makes "already absent" an unsafe answer.
+    // Fail closed the way receiptless target cleanup does.
+    const outcomes = await this.probeEveryBackend();
+    if (outcomes.length > 0) {
+      throw unavailableCleanup(`delete Browser profile ${name}`, "profile binding", outcomes);
+    }
+    const matches: ProfileListEntry[] = [];
+    for (const farm of this.farms) {
+      const profiles = await farm.listProfiles(undefined, true);
+      matches.push(...profiles.filter((profile) => profile.name === name));
+    }
     if (matches.length > 1) {
       throw new CliError(
         "profile_backend_conflict",
@@ -169,11 +156,9 @@ export class BrowserFleet {
         "inspect each backend and delete only the stale profile",
       );
     }
-    if (matches.length === 1) {
-      const farm = this.requireFarm(matches[0]!.backend);
-      return await farm.deleteProfile(name, true);
-    }
-    return await this.selectForMutation(async (farm) => await farm.deleteProfile(name, true));
+    const match = matches[0];
+    const farm = match === undefined ? this.farms[0]! : this.requireFarm(match.backend);
+    return await farm.deleteProfile(name, true);
   }
 
   async destroy(name: string, backendId?: string, profileHint?: string): Promise<DestroyResult> {
@@ -193,16 +178,10 @@ export class BrowserFleet {
       return result;
     }
 
-    const outcomes: AvailabilityOutcome[] = [];
-    for (const farm of this.farms) {
-      try {
-        await farm.probeAvailability();
-      } catch (error) {
-        if (!isAvailabilityFailure(error)) throw error;
-        outcomes.push({ backend: farm.backend.id, error });
-      }
+    const outcomes = await this.probeEveryBackend();
+    if (outcomes.length > 0) {
+      throw unavailableCleanup(`destroy Browser target ${name}`, "backend-bound", outcomes);
     }
-    if (outcomes.length > 0) throw unavailableCleanup(name, outcomes);
 
     for (const farm of this.farms) {
       const match = (await farm.list(undefined, true)).find((target) => target.name === name);
@@ -267,6 +246,11 @@ export class BrowserFleet {
     await this.bindings.clearTarget({ ...result, profile });
   }
 
+  /**
+   * Ordered selection for provisioning. Backends are tried one at a time in
+   * configured order, because the first one that answers becomes the profile's
+   * durable home and no later backend may be touched once one has.
+   */
   private async selectForMutation<T>(operation: (farm: BrowserFarm) => Promise<T>): Promise<T> {
     if (this.farms.length === 0) throw noBackendsConfigured();
     const outcomes: AvailabilityOutcome[] = [];
@@ -283,6 +267,51 @@ export class BrowserFleet {
       return await operation(farm);
     }
     throw unavailableSet(outcomes);
+  }
+
+  /**
+   * Read-only inventory across every reachable backend. Nothing here selects
+   * or mutates, so the backends are probed concurrently and their rows are
+   * merged in configured order; an unreachable backend is skipped, and only a
+   * set with no reachable backend at all is an error.
+   */
+  private async collectFromAvailable<T>(
+    signal: AbortSignal | undefined,
+    collect: (farm: BrowserFarm) => Promise<readonly T[]>,
+  ): Promise<T[]> {
+    const results = await Promise.all(
+      this.farms.map(async (farm): Promise<Collected<T>> => {
+        signal?.throwIfAborted();
+        try {
+          await farm.probeAvailability(signal);
+        } catch (error) {
+          if (!isAvailabilityFailure(error)) throw error;
+          return { outcome: { backend: farm.backend.id, error }, rows: [] };
+        }
+        return { outcome: null, rows: await collect(farm) };
+      }),
+    );
+    const outcomes = results.flatMap((result) => (result.outcome === null ? [] : [result.outcome]));
+    if (this.farms.length > 0 && outcomes.length === this.farms.length) {
+      throw unavailableSet(outcomes);
+    }
+    return results.flatMap((result) => result.rows);
+  }
+
+  /** Every backend that failed availability, in configured order. */
+  private async probeEveryBackend(): Promise<AvailabilityOutcome[]> {
+    const outcomes = await Promise.all(
+      this.farms.map(async (farm): Promise<AvailabilityOutcome | null> => {
+        try {
+          await farm.probeAvailability();
+        } catch (error) {
+          if (!isAvailabilityFailure(error)) throw error;
+          return { backend: farm.backend.id, error };
+        }
+        return null;
+      }),
+    );
+    return outcomes.flatMap((outcome) => (outcome === null ? [] : [outcome]));
   }
 
   private async boundFarmForTarget(name: string): Promise<BrowserFarm | undefined> {
@@ -321,7 +350,11 @@ function unavailableSet(outcomes: readonly AvailabilityOutcome[]): CliError {
   );
 }
 
-function unavailableCleanup(name: string, outcomes: readonly AvailabilityOutcome[]): CliError {
+function unavailableCleanup(
+  action: string,
+  receipt: string,
+  outcomes: readonly AvailabilityOutcome[],
+): CliError {
   const summary = outcomes.map(({ backend, error }) => `${backend}: ${error.message}`).join("; ");
   const backendRecovery = outcomes
     .map(({ backend, error }) =>
@@ -334,7 +367,7 @@ function unavailableCleanup(name: string, outcomes: readonly AvailabilityOutcome
   }`;
   return new CliError(
     "cleanup_backend_unavailable",
-    `cannot safely destroy Browser target ${name} without a backend-bound receipt because not every configured backend is available (${summary})`,
+    `cannot safely ${action} without a ${receipt} receipt because not every configured backend is available (${summary})`,
     recovery,
   );
 }
