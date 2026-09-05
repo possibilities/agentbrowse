@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import {
@@ -10,6 +10,7 @@ import {
   targetFromLabels,
   verifyDestroyOwnership,
 } from "./backend.ts";
+import { withDirectoryLock } from "./directory-lock.ts";
 import { CliError } from "./errors.ts";
 import {
   type BrowserDescription,
@@ -82,24 +83,6 @@ export type TargetTokenFactory = () => string;
 
 function defaultTargetToken(): string {
   return randomBytes(8).toString("hex");
-}
-
-async function allocationLockOwnerIsAlive(path: string): Promise<boolean> {
-  let source: string;
-  try {
-    source = await readFile(join(path, "owner"), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-  if (!/^[1-9][0-9]*\n$/.test(source)) return false;
-  try {
-    process.kill(Number(source.trim()), 0);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-    return true;
-  }
 }
 
 function verifyManagedProfile(state: ProfileState, profile: BrowserProfile, backend: string): void {
@@ -550,54 +533,19 @@ export class BrowserFarm {
   }
 
   private async withAllocationLock<T>(operation: () => Promise<T>): Promise<T> {
-    await mkdir(this.runtimeDir, { recursive: true, mode: 0o700 });
-    await chmod(this.runtimeDir, 0o700);
-    const path = join(this.runtimeDir, ".allocation.lock");
-    const deadline = Date.now() + ALLOCATION_LOCK_WAIT_MS;
-
-    while (true) {
-      try {
-        await mkdir(path, { mode: 0o700 });
-        try {
-          await writeFile(join(path, "owner"), `${process.pid}\n`, {
-            flag: "wx",
-            mode: 0o600,
-          });
-        } catch (error) {
-          await rm(path, { recursive: true, force: true });
-          throw error;
-        }
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        try {
-          const details = await stat(path);
-          if (
-            Date.now() - details.mtimeMs > ALLOCATION_LOCK_STALE_MS &&
-            !(await allocationLockOwnerIsAlive(path))
-          ) {
-            await rm(path, { recursive: true, force: true });
-            continue;
-          }
-        } catch (lockError) {
-          if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw lockError;
-        }
-        if (Date.now() >= deadline) {
-          throw new CliError(
+    return await withDirectoryLock(
+      join(this.runtimeDir, ".allocation.lock"),
+      {
+        waitMs: ALLOCATION_LOCK_WAIT_MS,
+        staleMs: ALLOCATION_LOCK_STALE_MS,
+        busy: () =>
+          new CliError(
             "allocation_busy",
             "another Browser target or profile lifecycle operation is still running",
             "retry the agentbrowse or agent-browser command",
-          );
-        }
-        await Bun.sleep(50);
-      }
-    }
-
-    try {
-      return await operation();
-    } finally {
-      await rm(path, { recursive: true, force: true });
-    }
+          ),
+      },
+      operation,
+    );
   }
 }

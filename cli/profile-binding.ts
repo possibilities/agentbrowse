@@ -1,6 +1,7 @@
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { withDirectoryLock } from "./directory-lock.ts";
 import { CliError } from "./errors.ts";
 import { type Target, targetFor, validateBackendId, validateName } from "./model.ts";
 
@@ -116,74 +117,20 @@ export class ProfileBindingStore {
 
   private async withProfileLock<T>(profile: string, operation: () => Promise<T>): Promise<T> {
     validateName(profile);
-    const directory = join(this.stateDir, "profile-locks");
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    await chmod(directory, 0o700);
-    const path = join(directory, `${profile}.lock`);
-    const deadline = Date.now() + PROFILE_LOCK_WAIT_MS;
-
-    while (true) {
-      try {
-        await mkdir(path, { mode: 0o700 });
-        try {
-          await writeFile(join(path, "owner"), `${process.pid}\n`, {
-            flag: "wx",
-            mode: 0o600,
-          });
-        } catch (error) {
-          await rm(path, { recursive: true, force: true });
-          throw error;
-        }
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        try {
-          const details = await stat(path);
-          if (
-            Date.now() - details.mtimeMs > PROFILE_LOCK_STALE_MS &&
-            !(await profileBindingLockOwnerIsAlive(path))
-          ) {
-            await rm(path, { recursive: true, force: true });
-            continue;
-          }
-        } catch (lockError) {
-          if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw lockError;
-        }
-        if (Date.now() >= deadline) {
-          throw new CliError(
+    return await withDirectoryLock(
+      join(this.stateDir, "profile-locks", `${profile}.lock`),
+      {
+        waitMs: PROFILE_LOCK_WAIT_MS,
+        staleMs: PROFILE_LOCK_STALE_MS,
+        busy: () =>
+          new CliError(
             "profile_binding_busy",
             `another Browser lifecycle operation is updating profile ${profile}`,
             "retry the agentbrowse or agent-browser command",
-          );
-        }
-        await Bun.sleep(50);
-      }
-    }
-
-    try {
-      return await operation();
-    } finally {
-      await rm(path, { recursive: true, force: true });
-    }
-  }
-}
-
-async function profileBindingLockOwnerIsAlive(path: string): Promise<boolean> {
-  let source: string;
-  try {
-    source = await readFile(join(path, "owner"), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-  if (!/^[1-9][0-9]*\n$/.test(source)) return false;
-  try {
-    process.kill(Number(source.trim()), 0);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-    return true;
+          ),
+      },
+      operation,
+    );
   }
 }
 
