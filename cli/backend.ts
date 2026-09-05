@@ -72,7 +72,7 @@ export interface ProfileConsumerRecord {
 
 export interface FarmBackend {
   readonly id: string;
-  readonly type: "docker" | "apple-container";
+  readonly type: "docker" | "apple-container" | "hypeman";
   readonly maxTargets: number;
   newContainerName(name: string): string;
   verifyHost(signal?: AbortSignal): Promise<void>;

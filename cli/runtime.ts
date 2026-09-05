@@ -5,6 +5,7 @@ import { AppleContainerFarmBackend } from "./apple-backend.ts";
 import { DockerFarmBackend } from "./backend.ts";
 import { BrowserFarm } from "./farm.ts";
 import { BrowserFleet } from "./fleet.ts";
+import { HypemanFarmBackend } from "./hypeman-backend.ts";
 
 export function runtimeDir(env: Readonly<Record<string, string | undefined>>): string {
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
@@ -31,7 +32,9 @@ export function browserFarm(
         new BrowserFarm(
           backend.type === "docker"
             ? new DockerFarmBackend(backend, config)
-            : new AppleContainerFarmBackend(backend, config),
+            : backend.type === "hypeman"
+              ? new HypemanFarmBackend(backend, config)
+              : new AppleContainerFarmBackend(backend, config),
           directory,
           config.browser.nekoLogLevel,
         ),

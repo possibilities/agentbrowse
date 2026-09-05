@@ -33,7 +33,7 @@ import {
 
 const INFRA_MARKER = "agentbrowse-infra-owned-v1";
 export const APPLE_NAT_WRAPPER =
-  "set -- $(hostname -I); export NEKO_WEBRTC_NAT1TO1=$1; exec /wrapper";
+  "rm -f /var/run/supervisor.sock /var/run/supervisord.pid /run/dbus/system_bus_socket /tmp/pulse/native; set -- $(hostname -I); export NEKO_WEBRTC_NAT1TO1=$1; exec /wrapper";
 
 export interface AppleContainerBackendDependencies {
   readonly command?: BackendCommand;
@@ -359,13 +359,20 @@ export class AppleContainerFarmBackend implements FarmBackend {
     if (!state.command.includes(APPLE_NAT_WRAPPER)) {
       drift(`${target.container} does not discover its Direct address for Neko`);
     }
-    directAddress(state, target.container);
+    if (state.running) directAddress(state, target.container);
   }
 
   async browserAccess(target: Target, suppliedState?: ContainerState): Promise<BrowserAccess> {
     const state = suppliedState ?? (await this.inspectContainer(target.container));
     if (state === undefined) {
       throw new CliError("browser_missing", `${target.container} is absent from Apple container`);
+    }
+    if (this.backendConfig.accessMode === "loopback") {
+      return {
+        cdpUrl: `http://127.0.0.1:${target.cdpPort}`,
+        liveViewUrl: `http://127.0.0.1:${target.httpPort}`,
+        liveViewAccess: { mode: "direct", baseUrl: `http://127.0.0.1:${target.httpPort}` },
+      };
     }
     const address = directAddress(state, target.container);
     return {

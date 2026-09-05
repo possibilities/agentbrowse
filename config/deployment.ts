@@ -23,13 +23,31 @@ export interface AppleContainerBackendConfig {
   readonly type: "apple-container";
   readonly command: string;
   readonly applicationRoot: string;
-  readonly maxTargets: 1;
-  readonly cpus: 2;
-  readonly memory: "6G";
+  readonly accessMode?: "direct" | "loopback";
+  readonly maxTargets: number;
+  readonly cpus: number;
+  readonly memory: string;
   readonly video?: BrowserVideoConfig;
 }
 
-export type BackendConfig = DockerBackendConfig | AppleContainerBackendConfig;
+export interface HypemanBackendConfig {
+  readonly id: string;
+  readonly type: "hypeman";
+  readonly baseUrl: string;
+  readonly tokenFile: string;
+  readonly remoteHost: string | null;
+  readonly networkAddress: string | null;
+  readonly portOffset: number;
+  readonly cpus: number;
+  readonly memory: string;
+  readonly profileSizeGb: number;
+  readonly video?: BrowserVideoConfig;
+}
+
+export type BackendConfig =
+  | DockerBackendConfig
+  | AppleContainerBackendConfig
+  | HypemanBackendConfig;
 
 export interface BrowserVideoConfig {
   readonly screenRefreshRate: number;
@@ -299,6 +317,7 @@ function parseBackends(
           );
 
     if (entry.type === "docker") return parseDockerBackend(entry, id, path, index, video);
+    if (entry.type === "hypeman") return parseHypemanBackend(entry, id, path, index, video);
     if (entry.type === "apple-container") return parseAppleBackend(entry, id, path, index, video);
     throw invalidConfiguration(`${path}: backends[${index}].type is unsupported`);
   });
@@ -348,19 +367,25 @@ function parseAppleBackend(
   if (!isAbsolute(applicationRoot)) {
     throw invalidConfiguration(`${location}.applicationRoot must be absolute`);
   }
-  const maxTargets = optionalInteger(entry, "maxTargets", 1, location);
+  const maxTargets = optionalInteger(entry, "maxTargets", 1000, location);
   const cpus = optionalInteger(entry, "cpus", 2, location);
   const memory = optionalString(entry, "memory", location) ?? "6G";
-  if (maxTargets !== 1) throw invalidConfiguration(`${location}.maxTargets must be 1`);
-  if (cpus !== 2) throw invalidConfiguration(`${location}.cpus must be 2`);
-  if (memory !== "6G") throw invalidConfiguration(`${location}.memory must be 6G`);
+  const accessMode = optionalString(entry, "accessMode", location) ?? "direct";
+  if (accessMode !== "direct" && accessMode !== "loopback")
+    throw invalidConfiguration(`${location}.accessMode must be direct or loopback`);
+  if (maxTargets < 1 || maxTargets > 1000)
+    throw invalidConfiguration(`${location}.maxTargets must be between 1 and 1000`);
+  if (cpus < 1) throw invalidConfiguration(`${location}.cpus must be positive`);
+  if (!/^[1-9][0-9]*(M|G|MB|GB|MiB|GiB)$/.test(memory))
+    throw invalidConfiguration(`${location}.memory must be a positive memory size`);
   return {
     id,
     type: "apple-container",
     command,
     applicationRoot,
-    maxTargets: 1,
-    cpus: 2,
+    accessMode,
+    maxTargets,
+    cpus,
     memory,
     ...(video === undefined ? {} : { video }),
   };
@@ -487,4 +512,75 @@ function hasControlCharacter(value: string): boolean {
 
 function invalidConfiguration(message: string): CliError {
   return new CliError("invalid_configuration", message);
+}
+
+function parseHypemanBackend(
+  entry: JsonObject,
+  id: string,
+  path: string,
+  index: number,
+  video: BrowserVideoConfig | undefined,
+): HypemanBackendConfig {
+  const location = `${path}: backends[${index}]`;
+  const baseUrl = requiredString(entry, "baseUrl", location).replace(/\/$/, "");
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw invalidConfiguration(`${location}.baseUrl is invalid`);
+  }
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== "/"
+  )
+    throw invalidConfiguration(`${location}.baseUrl must be an HTTP origin without credentials`);
+  const tokenFile = requiredString(entry, "tokenFile", location);
+  if (!isAbsolute(tokenFile)) throw invalidConfiguration(`${location}.tokenFile must be absolute`);
+  const remoteHost = optionalString(entry, "remoteHost", location);
+  const networkAddress = optionalString(entry, "networkAddress", location);
+  if ((remoteHost === null) !== (networkAddress === null))
+    throw invalidConfiguration(
+      `${location} remoteHost and networkAddress must be supplied together`,
+    );
+  if (remoteHost !== null && !/^[a-zA-Z0-9][a-zA-Z0-9_.@-]*$/.test(remoteHost))
+    throw invalidConfiguration(`${location}.remoteHost is invalid`);
+  if (
+    networkAddress !== null &&
+    (!/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(networkAddress) ||
+      networkAddress.split(".").some((part) => Number(part) > 255))
+  )
+    throw invalidConfiguration(`${location}.networkAddress must be IPv4`);
+  if (remoteHost === null && !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))
+    throw invalidConfiguration(
+      `${location} requires remoteHost and networkAddress for a remote API`,
+    );
+  const portOffset = optionalInteger(entry, "portOffset", 2000, location);
+  const cpus = optionalInteger(entry, "cpus", 2, location);
+  const memory = optionalString(entry, "memory", location) ?? "6G";
+  const profileSizeGb = optionalInteger(entry, "profileSizeGb", 10, location);
+  if (
+    portOffset < 0 ||
+    portOffset > 8536 ||
+    cpus < 1 ||
+    profileSizeGb < 1 ||
+    !/^[1-9][0-9]*(M|G|MB|GB|MiB|GiB)$/.test(memory)
+  )
+    throw invalidConfiguration(`${location} has invalid resource or port settings`);
+  return {
+    id,
+    type: "hypeman",
+    baseUrl,
+    tokenFile,
+    remoteHost,
+    networkAddress,
+    portOffset,
+    cpus,
+    memory,
+    profileSizeGb,
+    ...(video === undefined ? {} : { video }),
+  };
 }

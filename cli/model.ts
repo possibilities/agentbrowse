@@ -18,7 +18,12 @@ export interface BrowserProfile {
 }
 
 export type LiveViewAccess =
-  | { readonly mode: "ssh"; readonly remoteHost: string; readonly remotePort: number }
+  | {
+      readonly mode: "ssh";
+      readonly remoteHost: string;
+      readonly remotePort: number;
+      readonly remoteAddress?: string;
+    }
   | { readonly mode: "direct"; readonly baseUrl: string };
 
 export interface BrowserAccess {

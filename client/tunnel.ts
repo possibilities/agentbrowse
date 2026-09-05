@@ -92,6 +92,7 @@ export class LiveViewTunnel {
       target.liveViewAccess.remoteHost,
       localPort,
       target.liveViewAccess.remotePort,
+      target.liveViewAccess.remoteAddress,
     );
     const child = dependencies.spawn(args);
     const stderrPromise = captureStderr(child.stderr, STDERR_LIMIT);
@@ -189,7 +190,10 @@ export function sshArguments(
   remoteHost: string,
   localPort: number,
   remotePort: number,
+  remoteAddress = "127.0.0.1",
 ): readonly string[] {
+  if (!/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(remoteAddress))
+    throw new Error("invalid SSH forward destination");
   return [
     "ssh",
     "-N",
@@ -203,7 +207,7 @@ export function sshArguments(
     "-o",
     "ServerAliveCountMax=3",
     "-L",
-    `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`,
+    `127.0.0.1:${localPort}:${remoteAddress}:${remotePort}`,
     remoteHost,
   ];
 }

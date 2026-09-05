@@ -18,6 +18,10 @@ and `--agent-teaser` are renders of that one document in `cli/contract.ts`, not
 separate copies of it, so a command or a refusal code is described in exactly
 one place.
 
+## Hypeman and backend comparison
+
+Hypeman is supported locally and on artbird. See [the setup and demo guide](docs/hypeman.md) for isolated comparison configurations, profile-persistence checks, concurrent browsers, and Live View.
+
 ## Create a browser target
 
 Install the Bun dependencies and expose the checkout's CLI:
@@ -72,7 +76,7 @@ more than one target records the same slot on that backend. `create` refuses a
 slot already recorded by another managed target before it asks the selected
 backend to start a container. It also refuses to mount a profile already
 consumed by any other container, including a stopped or foreign container.
-Apple is additionally bounded to one 2-CPU, 6-GiB target.
+Apple uses the same 0–999 slot range as Docker; CPU, memory, and an optional target cap are configurable.
 
 Profile creation is normally implicit. Use the profile commands to inspect or
 manage the durable state directly:
