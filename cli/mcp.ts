@@ -18,14 +18,21 @@ export async function serveAgentbrowseMcp(options: ServerOptions): Promise<void>
   // connect() returns as soon as the transport is listening. The process stays
   // alive on stdin, and this resolves when the host closes it.
   //
-  // The SDK's stdio transport watches stdin for `data` and `error` only. A
-  // host that closes the pipe instead of signalling would otherwise leave this
-  // process parked forever, so end-of-input closes the transport, which is
-  // what fires `onclose`.
+  // The SDK's stdio transport watches stdin for `data` and `error` only, and
+  // its error handler reports without closing. A host that closes the pipe
+  // instead of signalling, or a pipe that fails, would otherwise leave this
+  // process parked forever. End-of-input emits `end`; a failed stream emits
+  // `error` then `close` and never `end`; either closes the transport once,
+  // which is what fires `onclose`.
   await new Promise<void>((resolve) => {
     server.server.onclose = resolve;
-    process.stdin.once("end", () => {
+    let closing = false;
+    const closeTransport = () => {
+      if (closing) return;
+      closing = true;
       void transport.close();
-    });
+    };
+    process.stdin.once("end", closeTransport);
+    process.stdin.once("close", closeTransport);
   });
 }
