@@ -9,6 +9,7 @@ import {
   DockerFarmBackend,
   verifyBrowserVideoEnvironment,
 } from "../cli/backend.ts";
+import { CliError } from "../cli/errors.ts";
 import { CHROMIUM_FLAGS, profileFor, targetFor } from "../cli/model.ts";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
 
@@ -397,4 +398,56 @@ test("a failed network address lookup is not retained for the next call", async 
   });
   expect((await docker.browserAccess(target)).cdpUrl).toBe("http://192.0.2.10:9225");
   expect(attempts).toBe(2);
+});
+
+test("in-flight lookups are shared only among callers bound to the same signal", async () => {
+  let sshCalls = 0;
+  let openGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  const docker = backend(async (args, signal) => {
+    if (args[0] !== "ssh") return ok("container-id");
+    sshCalls += 1;
+    await new Promise<void>((resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      void gate.then(resolve);
+    });
+    return ok("192.0.2.10");
+  });
+  const target = targetFor("testing-deadbeef", 3, {
+    profile: "testing",
+    backend: "remote-browser",
+  });
+
+  const bounded = new AbortController();
+  const first = docker.browserAccess(target, undefined, bounded.signal);
+  const second = docker.browserAccess(target, undefined, bounded.signal);
+  const unbounded = docker.browserAccess(target);
+  await Bun.sleep(10);
+  // One lookup for the two callers sharing a signal, another for the caller
+  // that asked for no cancellation at all.
+  expect(sshCalls).toBe(2);
+
+  // Settle handlers are attached before the abort, which rejects synchronously.
+  const firstSettled = first.then(
+    () => null,
+    (error: unknown) => error,
+  );
+  const secondSettled = second.then(
+    () => null,
+    (error: unknown) => error,
+  );
+  bounded.abort(new CliError("browser_target_resolve_timeout", "took too long"));
+  expect(await firstSettled).toMatchObject({ code: "browser_target_resolve_timeout" });
+  expect(await secondSettled).toMatchObject({ code: "browser_target_resolve_timeout" });
+
+  // The unbounded caller was never coupled to that abort.
+  openGate();
+  expect((await unbounded).cdpUrl).toBe("http://192.0.2.10:9225");
+
+  // Once resolved, the address serves every later caller without a lookup.
+  const later = await docker.browserAccess(target, undefined, new AbortController().signal);
+  expect(later.cdpUrl).toBe("http://192.0.2.10:9225");
+  expect(sshCalls).toBe(2);
 });

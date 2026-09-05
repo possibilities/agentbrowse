@@ -307,7 +307,8 @@ export class DockerFarmBackend implements FarmBackend {
   readonly context: string;
   readonly remoteHost: string;
   private readonly runCommand: BackendCommand;
-  private networkAddressLookup: Promise<string> | null = null;
+  private networkAddress: string | null = null;
+  private readonly networkAddressLookups = new Map<AbortSignal | undefined, Promise<string>>();
 
   constructor(
     readonly backendConfig: DockerBackendConfig,
@@ -369,13 +370,26 @@ export class DockerFarmBackend implements FarmBackend {
     // The command is an SSH round trip, and one invocation asks for the
     // address several times: `list` once per target, `create` for
     // verification, launch, and access. A backend instance lives for one
-    // command, so the first successful answer is the answer; a failure is not
-    // retained, so a retry within the same command can still succeed.
-    this.networkAddressLookup ??= this.lookupNetworkAddress(signal).catch((error: unknown) => {
-      this.networkAddressLookup = null;
-      throw error;
-    });
-    return await this.networkAddressLookup;
+    // command, so the first successful answer is the answer. An in-flight
+    // lookup is shared only among callers bound to the same cancellation:
+    // sharing across signals would let one caller's abort or discovery
+    // deadline reject another, or let an unbounded caller's lookup outlive a
+    // bounded caller's deadline. A failure is not retained, so a retry within
+    // the same command can still succeed.
+    if (this.networkAddress !== null) return this.networkAddress;
+    let lookup = this.networkAddressLookups.get(signal);
+    if (lookup === undefined) {
+      lookup = this.lookupNetworkAddress(signal)
+        .then((address) => {
+          this.networkAddress = address;
+          return address;
+        })
+        .finally(() => {
+          this.networkAddressLookups.delete(signal);
+        });
+      this.networkAddressLookups.set(signal, lookup);
+    }
+    return await lookup;
   }
 
   private async lookupNetworkAddress(signal?: AbortSignal): Promise<string> {
