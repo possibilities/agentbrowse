@@ -7,6 +7,7 @@ import { browserFarm } from "../cli/runtime.ts";
 import { connectionDescriptor } from "../client/connection.ts";
 import { liveViewBuildPrefix } from "../client/live-view-build.ts";
 import { LiveViewTunnel } from "../client/tunnel.ts";
+import { writeStdout } from "../cli/stdout.ts";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
 
 const buildPrefix = liveViewBuildPrefix(join(import.meta.dir, "..", "zig-out"));
@@ -64,14 +65,14 @@ async function main(argv: readonly string[]): Promise<number> {
 
   if (command === "status") {
     const target = await targetNamed(name);
-    process.stdout.write(
+    await writeStdout(
       `${target.name}\t${target.backend}\t${target.container}\t${target.state}\t${target.liveViewUrl}\n`,
     );
     return 0;
   }
   if (command === "descriptor") {
     return await withAccess(name, async (descriptor) => {
-      process.stdout.write(`${JSON.stringify(descriptor)}\n`);
+      await writeStdout(`${JSON.stringify(descriptor)}\n`);
       return 0;
     });
   }

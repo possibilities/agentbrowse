@@ -16,6 +16,7 @@ import { parseSlot } from "./model.ts";
 import { runProvider } from "./provider.ts";
 import { type ResolvedProviderTarget, resolveProviderTarget } from "./resolve.ts";
 import { browserFarm } from "./runtime.ts";
+import { writeStdout } from "./stdout.ts";
 import { runView } from "./view.ts";
 
 const TARGET_RESOLVE_TIMEOUT_MS = 15_000;
@@ -372,7 +373,11 @@ export async function resolveWithTimeout(
   }
 }
 
-export async function run(argv: readonly string[], env = process.env): Promise<number> {
+export async function run(
+  argv: readonly string[],
+  env = process.env,
+  output: (text: string) => Promise<void> = writeStdout,
+): Promise<number> {
   const json = argv.includes("--json");
   let parsed: Parsed;
   try {
@@ -382,19 +387,19 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
     return 2;
   }
   if (parsed.command === "help") {
-    process.stdout.write(renderHelp());
+    await output(renderHelp());
     return 0;
   }
   if (parsed.command === "agent-teaser") {
-    process.stdout.write(renderTeaser());
+    await output(renderTeaser());
     return 0;
   }
   if (parsed.command === "agent-help") {
-    process.stdout.write(renderAgentHelp());
+    await output(renderAgentHelp());
     return 0;
   }
   if (parsed.command === "guide") {
-    process.stdout.write(parsed.json ? success(CONTRACT) : renderAgentHelp());
+    await output(parsed.json ? success(CONTRACT) : renderAgentHelp());
     return 0;
   }
   if (parsed.command === "provider") return await runProvider(env);
@@ -425,29 +430,27 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
         slot: parsed.slot,
         ...(parsed.image === undefined ? {} : { image: parsed.image }),
       });
-      process.stdout.write(parsed.json ? success(createPayload(result)) : humanCreate(result));
+      await output(parsed.json ? success(createPayload(result)) : humanCreate(result));
     } else if (parsed.command === "list") {
       const result = await farm.list();
-      process.stdout.write(parsed.json ? success(listPayload(result)) : humanList(result));
+      await output(parsed.json ? success(listPayload(result)) : humanList(result));
     } else if (parsed.command === "resolve") {
       const result = await resolveWithTimeout(parsed.session, farm);
-      process.stdout.write(parsed.json ? success(resolvePayload(result)) : humanResolve(result));
+      await output(parsed.json ? success(resolvePayload(result)) : humanResolve(result));
     } else if (parsed.command === "profile") {
       if (parsed.action === "create") {
         const result = await farm.createProfile(parsed.name);
-        process.stdout.write(parsed.json ? success(result) : humanProfileCreate(result));
+        await output(parsed.json ? success(result) : humanProfileCreate(result));
       } else if (parsed.action === "list") {
         const result = await farm.listProfiles();
-        process.stdout.write(
-          parsed.json ? success(profileListPayload(result)) : humanProfileList(result),
-        );
+        await output(parsed.json ? success(profileListPayload(result)) : humanProfileList(result));
       } else {
         const result = await farm.deleteProfile(parsed.name);
-        process.stdout.write(parsed.json ? success(result) : humanProfileDelete(result));
+        await output(parsed.json ? success(result) : humanProfileDelete(result));
       }
     } else {
       const result = await farm.destroy(parsed.name);
-      process.stdout.write(parsed.json ? success(result) : humanDestroy(result));
+      await output(parsed.json ? success(result) : humanDestroy(result));
     }
     return 0;
   } catch (error) {
@@ -455,7 +458,7 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
       error instanceof CliError
         ? error
         : new CliError("unexpected_error", (error as Error).message || String(error));
-    if (json) process.stdout.write(failure(cliError));
+    if (json) await output(failure(cliError));
     else {
       process.stderr.write(`agentbrowse: ${cliError.message}\n`);
       if (cliError.recovery !== undefined) process.stderr.write(`Next: ${cliError.recovery}\n`);

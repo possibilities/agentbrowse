@@ -3,6 +3,7 @@ import type { CreateResult, DestroyResult } from "./farm.ts";
 import type { BrowserFleet } from "./fleet.ts";
 import { providerProfileName } from "./model.ts";
 import { browserFarm } from "./runtime.ts";
+import { writeStdout } from "./stdout.ts";
 
 const PROTOCOL = "agent-browser.plugin.v1";
 const CAPABILITY = "browser.provider";
@@ -179,9 +180,9 @@ export async function runProvider(
   const source = await Bun.stdin.text();
   try {
     const config = loadAgentbrowseConfig(env);
-    process.stdout.write(await handleProviderRequest(source, browserFarm(env), config.provider));
+    await writeStdout(await handleProviderRequest(source, browserFarm(env), config.provider));
   } catch (error) {
-    process.stdout.write(failure(error));
+    await writeStdout(failure(error));
   }
   return 0;
 }

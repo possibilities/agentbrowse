@@ -60,18 +60,12 @@ test("every rendered surface is a render of the contract", () => {
 
 test("the agent surfaces are reachable from argv", async () => {
   const written: string[] = [];
-  const original = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string) => {
-    written.push(String(chunk));
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    expect(await run(["--agent-teaser"])).toBe(0);
-    expect(await run(["--agent-help"])).toBe(0);
-    expect(await run(["guide"])).toBe(0);
-  } finally {
-    process.stdout.write = original;
-  }
+  const capture = async (chunk: string): Promise<void> => {
+    written.push(chunk);
+  };
+  expect(await run(["--agent-teaser"], process.env, capture)).toBe(0);
+  expect(await run(["--agent-help"], process.env, capture)).toBe(0);
+  expect(await run(["guide"], process.env, capture)).toBe(0);
   expect(written[0]).toBe(renderTeaser());
   expect(written[1]).toBe(renderAgentHelp());
   expect(written[2]).toBe(renderAgentHelp());
