@@ -195,7 +195,10 @@ export class AsyncFrameConverterPool {
         if (this.shuttingDown) {
           this.finishShutdown();
         } else {
-          this.failWorker(`conversion worker closed unexpectedly (code ${event.code})`);
+          const code = (event as Event & { code?: unknown }).code;
+          this.failWorker(
+            `conversion worker closed unexpectedly (code ${typeof code === "number" ? code : "unknown"})`,
+          );
           this.worker = null;
         }
       });
