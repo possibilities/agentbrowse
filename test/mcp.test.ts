@@ -229,6 +229,7 @@ describe("a live stdio server", () => {
     };
     expect(result.isError ?? false).toBe(false);
     const envelope = JSON.parse(result.content[0]!.text);
+    expect(result).toHaveProperty("structuredContent", envelope);
     expect(envelope).toMatchObject({ schema_version: 1, ok: true, error: null });
     expect(envelope.data).toMatchObject({ browsers: [], count: 0 });
   });
@@ -251,8 +252,9 @@ describe("a live stdio server", () => {
     })) as { isError?: boolean; content: { text: string }[] };
     expect(result.isError).toBe(true);
     const text = result.content[0]!.text;
+    expect(result).toHaveProperty("structuredContent", JSON.parse(result.content[1]!.text));
     expect(text).toContain("recovery: ");
-    expect(JSON.parse(text.slice(text.indexOf("{")))).toMatchObject({ ok: false });
+    expect(JSON.parse(result.content[1]!.text)).toMatchObject({ ok: false });
   });
 
   test("a call missing a required argument is refused by the SDK's own schema validation", async () => {
