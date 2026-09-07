@@ -21,7 +21,6 @@ const AVAILABILITY_CODES = new Set([
   "browser_host_unreachable",
   "browser_host_not_accepting_connections",
   "browser_service_unavailable",
-  "apple_service_stopped",
 ]);
 
 interface AvailabilityOutcome {

@@ -54,7 +54,7 @@ test("deployment defaults retain shared policy but require installed backends", 
   });
 });
 
-test("version 2 preserves backend order and applies safe Apple defaults", () => {
+test("version 2 preserves backend order and applies Hypeman defaults", () => {
   const path = configPath();
   writeFileSync(
     path,
@@ -63,14 +63,21 @@ test("version 2 preserves backend order and applies safe Apple defaults", () => 
       backends: [
         {
           id: "remote-docker",
-          type: "docker",
+          type: "hypeman",
+          baseUrl: "http://192.0.2.10:4973",
+          tokenFile: "/tmp/token",
           context: "remote-browser",
           expectedEndpoint: "ssh://browser-host",
           expectedEngine: "browser-host",
           remoteHost: "browser-host",
           networkAddress: "192.0.2.10",
         },
-        { id: "apple-container-local", type: "apple-container" },
+        {
+          id: "apple-container-local",
+          type: "hypeman",
+          baseUrl: "http://127.0.0.1:4973",
+          tokenFile: "/tmp/token",
+        },
       ],
       images: { defaultImage: "browser@test" },
       browser: { nekoLogLevel: "debug", timezone: "UTC" },
@@ -93,12 +100,10 @@ test("version 2 preserves backend order and applies safe Apple defaults", () => 
   });
 
   expect(config.backends.map((backend) => [backend.id, backend.type])).toEqual([
-    ["remote-docker", "docker"],
-    ["apple-container-local", "apple-container"],
+    ["remote-docker", "hypeman"],
+    ["apple-container-local", "hypeman"],
   ]);
   expect(config.backends[1]).toMatchObject({
-    command: "/usr/local/bin/container",
-    maxTargets: 1000,
     cpus: 2,
     memory: "6G",
   });
@@ -123,13 +128,20 @@ test("backend video policy merges over shared defaults and under environment ove
       backends: [
         {
           id: "remote-docker",
-          type: "docker",
+          type: "hypeman",
+          baseUrl: "http://192.0.2.10:4973",
+          tokenFile: "/tmp/token",
           context: "remote-browser",
           remoteHost: "browser-host",
           networkAddress: "192.0.2.10",
           video: { fps: 60, targetBitrateBps: 4_792_320, keyframeMaxDistance: 60 },
         },
-        { id: "apple-container-local", type: "apple-container" },
+        {
+          id: "apple-container-local",
+          type: "hypeman",
+          baseUrl: "http://127.0.0.1:4973",
+          tokenFile: "/tmp/token",
+        },
       ],
     }),
   );
@@ -169,7 +181,7 @@ test("video policy rejects duplicated capture frames and non-realtime encoder ef
   );
 });
 
-test("invalid versions, duplicate ids, and unsafe Apple capacity fail locally", () => {
+test("invalid versions, duplicate ids, and retired runtimes fail locally", () => {
   const path = configPath();
   writeFileSync(path, JSON.stringify({ docker: { context: "legacy" } }));
   expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow(
@@ -188,12 +200,14 @@ test("invalid versions, duplicate ids, and unsafe Apple capacity fail locally", 
       backends: [
         {
           id: "same",
-          type: "docker",
+          type: "hypeman",
+          baseUrl: "http://192.0.2.10:4973",
+          tokenFile: "/tmp/token",
           context: "one",
           remoteHost: "one",
           networkAddress: "192.0.2.1",
         },
-        { id: "same", type: "apple-container" },
+        { id: "same", type: "hypeman", baseUrl: "http://127.0.0.1:4973", tokenFile: "/tmp/token" },
       ],
     }),
   );
@@ -203,28 +217,44 @@ test("invalid versions, duplicate ids, and unsafe Apple capacity fail locally", 
     path,
     JSON.stringify({
       version: 2,
-      backends: [{ id: "local", type: "apple-container", maxTargets: 1001 }],
+      backends: [
+        {
+          id: "local",
+          type: "hypeman",
+          baseUrl: "http://127.0.0.1:4973",
+          tokenFile: "/tmp/token",
+          portOffset: 8537,
+        },
+      ],
     }),
   );
   expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow(
-    "maxTargets must be between 1 and 1000",
+    "invalid resource or port settings",
   );
   expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: "relative.json" })).toThrow(
     "must be an absolute path",
   );
 });
 
-test("Apple resource allocations are configurable and share the fleet slot range", () => {
+test("Hypeman resource allocations are configurable and share the fleet slot range", () => {
   const path = configPath();
   writeFileSync(
     path,
     JSON.stringify({
       version: 2,
-      backends: [{ id: "local", type: "apple-container", cpus: 4, memory: "12G" }],
+      backends: [
+        {
+          id: "local",
+          type: "hypeman",
+          baseUrl: "http://127.0.0.1:4973",
+          tokenFile: "/tmp/token",
+          cpus: 4,
+          memory: "12G",
+        },
+      ],
     }),
   );
   expect(loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path }).backends[0]).toMatchObject({
-    maxTargets: 1000,
     cpus: 4,
     memory: "12G",
   });
@@ -247,7 +277,7 @@ test("Hypeman connection configuration validates credentials, routing and port r
     cpus: 2,
     memory: "6G",
     portOffset: 2000,
-    profileSizeGb: 10,
+    profileSizeGb: 1,
   });
   expect(
     read({ baseUrl: "http://192.0.2.1:4973", remoteHost: "artbird", networkAddress: "192.0.2.1" }),
@@ -264,4 +294,41 @@ test("Hypeman connection configuration validates credentials, routing and port r
     { memory: "0G" },
   ])
     expect(() => read(overrides)).toThrow();
+});
+
+test("retired Docker and Apple configurations fail before contacting a host", () => {
+  const path = configPath();
+  for (const type of ["docker", "apple-container"]) {
+    writeFileSync(path, JSON.stringify({ version: 2, backends: [{ id: "old", type }] }));
+    expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow(
+      "type is unsupported",
+    );
+  }
+});
+
+test("host connection files supply only machine-local connection fields", () => {
+  const path = configPath();
+  const connection = `${path}.host`;
+  writeFileSync(
+    connection,
+    JSON.stringify({ baseUrl: "http://localhost:4973", tokenFile: "/tmp/token" }),
+  );
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 2,
+      backends: [{ id: "local", type: "hypeman", connectionFile: connection, cpus: 4 }],
+    }),
+  );
+  expect(loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path }).backends[0]).toMatchObject({
+    cpus: 4,
+    baseUrl: "http://localhost:4973",
+  });
+  writeFileSync(
+    connection,
+    JSON.stringify({ baseUrl: "http://localhost:4973", tokenFile: "/tmp/token", cpus: 100 }),
+  );
+  expect(() => loadAgentbrowseConfig({ AGENTBROWSE_CONFIG: path })).toThrow(
+    "unexpected host connection field",
+  );
 });

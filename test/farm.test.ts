@@ -51,7 +51,7 @@ function managedState(
     labels: {
       "dev.agentbrowse.managed": "true",
       "dev.agentbrowse.role": "kernel-browser",
-      "dev.agentbrowse.backend": "docker",
+      "dev.agentbrowse.backend": "hypeman",
       "dev.agentbrowse.target": name,
       "dev.agentbrowse.profile": profile,
       "dev.agentbrowse.slot": String(slot),
@@ -88,7 +88,7 @@ function profileState(profile: BrowserProfile): ProfileState {
     labels: {
       "dev.agentbrowse.managed": "true",
       "dev.agentbrowse.role": "browser-profile",
-      "dev.agentbrowse.backend": "docker",
+      "dev.agentbrowse.backend": "hypeman",
       "dev.agentbrowse.profile": profile.name,
       "dev.agentbrowse.profile.schema": String(PROFILE_SCHEMA_VERSION),
     },
@@ -96,8 +96,8 @@ function profileState(profile: BrowserProfile): ProfileState {
 }
 
 class FakeBackend implements FarmBackend {
-  readonly id = "docker";
-  readonly type = "docker" as const;
+  readonly id = "hypeman";
+  readonly type = "hypeman" as const;
   readonly maxTargets = 1_000;
   readonly ip = "192.0.2.10";
   readonly image = "agentbrowse/kernel-headful:test";
@@ -236,7 +236,7 @@ test("create launches a combined CDP and Live View target and records it", async
   expect(result).toMatchObject({
     name: "testing",
     profile: "testing",
-    backend: "docker",
+    backend: "hypeman",
     slot: 3,
     container: "agentbrowse-browser-testing",
     image: backend.image,
@@ -251,7 +251,7 @@ test("create launches a combined CDP and Live View target and records it", async
   });
   expect(JSON.parse(readFileSync(configPath(directory, "testing"), "utf8"))).toMatchObject({
     version: 2,
-    backend: "docker",
+    backend: "hypeman",
     container: "agentbrowse-browser-testing",
     target: "testing",
     profile: "testing",
@@ -472,7 +472,7 @@ test("manual create can bind a target name to a separate durable Browser profile
   expect(backend.runs[0]?.target.profile).toBe("signed-in");
   expect(JSON.parse(readFileSync(configPath(directory, "one-run"), "utf8"))).toMatchObject({
     profile: "signed-in",
-    backend: "docker",
+    backend: "hypeman",
   });
 });
 
@@ -522,7 +522,7 @@ test("profile lifecycle is explicit and deletion refuses every mounted consumer"
   expect(await farm.createProfile("testing")).toEqual({
     name: "testing",
     volume: "agentbrowse-profile-testing",
-    backend: "docker",
+    backend: "hypeman",
     created: true,
   });
   expect((await farm.createProfile("testing")).created).toBe(false);
@@ -534,7 +534,7 @@ test("profile lifecycle is explicit and deletion refuses every mounted consumer"
     {
       name: "testing",
       volume: "agentbrowse-profile-testing",
-      backend: "docker",
+      backend: "hypeman",
       consumers: ["agentbrowse-browser-testing-deadbeef"],
     },
   ]);
@@ -546,7 +546,7 @@ test("profile lifecycle is explicit and deletion refuses every mounted consumer"
   expect(await farm.deleteProfile("testing")).toEqual({
     name: "testing",
     volume: "agentbrowse-profile-testing",
-    backend: "docker",
+    backend: "hypeman",
     deleted: true,
   });
   expect(backend.removedProfiles).toEqual(["testing"]);
@@ -587,7 +587,7 @@ test("relaunch gives one durable profile a fresh exact target identity", async (
   expect(await farm.destroy(first.name)).toEqual({
     name: "testing-1111111111111111",
     profile: null,
-    backend: "docker",
+    backend: "hypeman",
     container: "agentbrowse-browser-testing-1111111111111111",
     destroyed: false,
   });
@@ -606,7 +606,7 @@ test("destroy verifies ownership before removing the exact container", async () 
   expect(result).toEqual({
     name: "testing",
     profile: "testing",
-    backend: "docker",
+    backend: "hypeman",
     container: "agentbrowse-browser-testing",
     destroyed: true,
   });
@@ -636,7 +636,7 @@ test("destroy is idempotent when both metadata and container are absent", async 
   expect(await farm.destroy("missing")).toEqual({
     name: "missing",
     profile: null,
-    backend: "docker",
+    backend: "hypeman",
     container: "agentbrowse-browser-missing",
     destroyed: false,
   });
@@ -651,7 +651,7 @@ test("destroy recovers ownership from labels when local metadata is absent", asy
   expect(await farm.destroy("testing")).toEqual({
     name: "testing",
     profile: "testing",
-    backend: "docker",
+    backend: "hypeman",
     container: "agentbrowse-browser-testing",
     destroyed: true,
   });

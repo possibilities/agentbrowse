@@ -61,7 +61,7 @@ export function profileFor(name: string): BrowserProfile {
 export function targetFor(name: string, slot: number, identity: TargetIdentity = {}): Target {
   validateName(name);
   const profile = identity.profile ?? name;
-  const backend = identity.backend ?? "docker";
+  const backend = identity.backend ?? "hypeman";
   const container = identity.container ?? `agentbrowse-browser-${name}`;
   validateName(profile);
   validateSlot(slot);

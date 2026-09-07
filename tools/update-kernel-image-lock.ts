@@ -10,16 +10,8 @@ import {
   validateKernelImageLock,
 } from "../config/kernel-image-lock.ts";
 
-interface CommandResult {
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
-}
-
-export type LockCommand = (args: readonly string[]) => Promise<CommandResult>;
-
 export interface UpdateKernelImageLockOptions {
-  readonly command?: LockCommand;
+  readonly fetch?: typeof fetch;
   readonly now?: () => Date;
   readonly outputPath?: string;
 }
@@ -41,16 +33,6 @@ const defaultLockPath = fileURLToPath(
 const commitPattern = /^[0-9a-f]{40}$/;
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
 const ociImageIndexMediaType = "application/vnd.oci.image.index.v1+json";
-
-async function defaultCommand(args: readonly string[]): Promise<CommandResult> {
-  const child = Bun.spawn([...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  return { exitCode, stdout, stderr };
-}
 
 export function lockFromRegistryIndex(
   sourceCommit: string,
@@ -108,29 +90,34 @@ export async function updateKernelImageLock(
   sourceCommit: string,
   options: UpdateKernelImageLockOptions = {},
 ): Promise<KernelImageLock> {
-  const command = options.command ?? defaultCommand;
-  const upstreamTag = sourceCommit.slice(0, 7);
-  if (!commitPattern.test(sourceCommit)) {
+  if (!commitPattern.test(sourceCommit))
     throw new Error("Kernel source commit must be exactly 40 lowercase hexadecimal characters");
-  }
-  const tagReference = `${KERNEL_IMAGE_REPOSITORY}:${upstreamTag}`;
-  const inspection = await command([
-    "docker",
-    "buildx",
-    "imagetools",
-    "inspect",
-    tagReference,
-    "--raw",
-  ]);
-  if (inspection.exitCode !== 0) throw commandFailure("registry inspection", inspection);
-  const version = await command(["docker", "buildx", "version"]);
-  if (version.exitCode !== 0) throw commandFailure("Buildx version inspection", version);
+  const request = options.fetch ?? fetch;
+  const auth = await request(
+    "https://auth.docker.io/token?service=registry.docker.io&scope=repository:onkernel/chromium-headful:pull",
+    { signal: AbortSignal.timeout(15000), redirect: "error" },
+  );
+  if (!auth.ok) throw new Error(`registry authentication failed: HTTP ${auth.status}`);
+  const credentials = (await auth.json()) as { token?: string };
+  if (!credentials.token) throw new Error("registry authentication returned no token");
+  const response = await request(
+    `https://registry-1.docker.io/v2/onkernel/chromium-headful/manifests/${sourceCommit.slice(0, 7)}`,
+    {
+      headers: { Authorization: `Bearer ${credentials.token}`, Accept: ociImageIndexMediaType },
+      signal: AbortSignal.timeout(15000),
+      redirect: "error",
+    },
+  );
+  if (!response.ok) throw new Error(`registry inspection failed: HTTP ${response.status}`);
   const lock = lockFromRegistryIndex(
     sourceCommit,
-    inspection.stdout,
+    await response.text(),
     options.now?.() ?? new Date(),
-    version.stdout.trim(),
+    "OCI Distribution API",
   );
+  const digest = response.headers.get("docker-content-digest");
+  if (digest !== null && digest !== lock.ociIndexDigest)
+    throw new Error("registry content digest mismatch");
   writeLockAtomically(options.outputPath ?? defaultLockPath, lock);
   return lock;
 }
@@ -149,12 +136,6 @@ function writeLockAtomically(path: string, lock: KernelImageLock): void {
   } finally {
     rmSync(temporary, { force: true });
   }
-}
-
-function commandFailure(label: string, result: CommandResult): Error {
-  return new Error(
-    `${label} failed: ${result.stderr.trim() || result.stdout.trim() || result.exitCode}`,
-  );
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

@@ -6,30 +6,6 @@ import { CliError } from "../cli/errors.ts";
 
 export type AgentbrowseEnvironment = Readonly<Record<string, string | undefined>>;
 
-export interface DockerBackendConfig {
-  readonly id: string;
-  readonly type: "docker";
-  readonly context: string;
-  readonly expectedEndpoint: string | null;
-  readonly expectedEngine: string | null;
-  readonly remoteHost: string;
-  readonly networkAddress: string | null;
-  readonly networkAddressCommand: string | null;
-  readonly video?: BrowserVideoConfig;
-}
-
-export interface AppleContainerBackendConfig {
-  readonly id: string;
-  readonly type: "apple-container";
-  readonly command: string;
-  readonly applicationRoot: string;
-  readonly accessMode?: "direct" | "loopback";
-  readonly maxTargets: number;
-  readonly cpus: number;
-  readonly memory: string;
-  readonly video?: BrowserVideoConfig;
-}
-
 export interface HypemanBackendConfig {
   readonly id: string;
   readonly type: "hypeman";
@@ -44,10 +20,7 @@ export interface HypemanBackendConfig {
   readonly video?: BrowserVideoConfig;
 }
 
-export type BackendConfig =
-  | DockerBackendConfig
-  | AppleContainerBackendConfig
-  | HypemanBackendConfig;
+export type BackendConfig = HypemanBackendConfig;
 
 export interface BrowserVideoConfig {
   readonly screenRefreshRate: number;
@@ -316,79 +289,9 @@ function parseBackends(
             sharedVideo,
           );
 
-    if (entry.type === "docker") return parseDockerBackend(entry, id, path, index, video);
     if (entry.type === "hypeman") return parseHypemanBackend(entry, id, path, index, video);
-    if (entry.type === "apple-container") return parseAppleBackend(entry, id, path, index, video);
     throw invalidConfiguration(`${path}: backends[${index}].type is unsupported`);
   });
-}
-
-function parseDockerBackend(
-  entry: JsonObject,
-  id: string,
-  path: string,
-  index: number,
-  video: BrowserVideoConfig | undefined,
-): DockerBackendConfig {
-  const location = `${path}: backends[${index}]`;
-  const networkAddress = optionalString(entry, "networkAddress", location);
-  const networkAddressCommand = optionalString(entry, "networkAddressCommand", location);
-  if ((networkAddress === null) === (networkAddressCommand === null)) {
-    throw invalidConfiguration(
-      `${location} must set exactly one of networkAddress and networkAddressCommand`,
-    );
-  }
-  return {
-    id,
-    type: "docker",
-    context: requiredString(entry, "context", location),
-    expectedEndpoint: optionalString(entry, "expectedEndpoint", location),
-    expectedEngine: optionalString(entry, "expectedEngine", location),
-    remoteHost: requiredString(entry, "remoteHost", location),
-    networkAddress,
-    networkAddressCommand,
-    ...(video === undefined ? {} : { video }),
-  };
-}
-
-function parseAppleBackend(
-  entry: JsonObject,
-  id: string,
-  path: string,
-  index: number,
-  video: BrowserVideoConfig | undefined,
-): AppleContainerBackendConfig {
-  const location = `${path}: backends[${index}]`;
-  const command = optionalString(entry, "command", location) ?? "/usr/local/bin/container";
-  const applicationRoot =
-    optionalString(entry, "applicationRoot", location) ??
-    join(homedir(), "Library", "Application Support", "agentbrowse-infra", "runtime");
-  if (!isAbsolute(command)) throw invalidConfiguration(`${location}.command must be absolute`);
-  if (!isAbsolute(applicationRoot)) {
-    throw invalidConfiguration(`${location}.applicationRoot must be absolute`);
-  }
-  const maxTargets = optionalInteger(entry, "maxTargets", 1000, location);
-  const cpus = optionalInteger(entry, "cpus", 2, location);
-  const memory = optionalString(entry, "memory", location) ?? "6G";
-  const accessMode = optionalString(entry, "accessMode", location) ?? "direct";
-  if (accessMode !== "direct" && accessMode !== "loopback")
-    throw invalidConfiguration(`${location}.accessMode must be direct or loopback`);
-  if (maxTargets < 1 || maxTargets > 1000)
-    throw invalidConfiguration(`${location}.maxTargets must be between 1 and 1000`);
-  if (cpus < 1) throw invalidConfiguration(`${location}.cpus must be positive`);
-  if (!/^[1-9][0-9]*(M|G|MB|GB|MiB|GiB)$/.test(memory))
-    throw invalidConfiguration(`${location}.memory must be a positive memory size`);
-  return {
-    id,
-    type: "apple-container",
-    command,
-    applicationRoot,
-    accessMode,
-    maxTargets,
-    cpus,
-    memory,
-    ...(video === undefined ? {} : { video }),
-  };
 }
 
 function readConfigFile(path: string): JsonObject {
@@ -522,6 +425,26 @@ function parseHypemanBackend(
   video: BrowserVideoConfig | undefined,
 ): HypemanBackendConfig {
   const location = `${path}: backends[${index}]`;
+  const connectionFile = optionalString(entry, "connectionFile", location);
+  if (connectionFile !== null) {
+    const connectionPath = connectionFile.startsWith("~/")
+      ? join(homedir(), connectionFile.slice(2))
+      : connectionFile;
+    if (!isAbsolute(connectionPath))
+      throw invalidConfiguration(`${location}.connectionFile must be absolute or start with ~/`);
+    if (!existsSync(connectionPath))
+      throw invalidConfiguration(
+        `${location}: host connection is missing; run scripts/install-host${id === "local" ? "" : ` --remote ${id}`}`,
+      );
+    const connection = readConfigFile(connectionPath);
+    if (
+      Object.keys(connection).some(
+        (key) => !["baseUrl", "tokenFile", "remoteHost", "networkAddress"].includes(key),
+      )
+    )
+      throw invalidConfiguration(`${location}: unexpected host connection field`);
+    entry = { ...connection, ...entry };
+  }
   const baseUrl = requiredString(entry, "baseUrl", location).replace(/\/$/, "");
   let url: URL;
   try {
@@ -561,7 +484,7 @@ function parseHypemanBackend(
   const portOffset = optionalInteger(entry, "portOffset", 2000, location);
   const cpus = optionalInteger(entry, "cpus", 2, location);
   const memory = optionalString(entry, "memory", location) ?? "6G";
-  const profileSizeGb = optionalInteger(entry, "profileSizeGb", 10, location);
+  const profileSizeGb = optionalInteger(entry, "profileSizeGb", 1, location);
   if (
     portOffset < 0 ||
     portOffset > 8536 ||

@@ -33,7 +33,7 @@ function runtimeDir(): string {
 }
 
 class FleetBackend implements FarmBackend {
-  readonly type = "docker" as const;
+  readonly type = "hypeman" as const;
   readonly events: string[] = [];
   readonly probeSignals: Array<AbortSignal | undefined> = [];
   probeError: CliError | null = null;
@@ -220,9 +220,9 @@ test("two unavailable backends produce one bounded recovery and never start Appl
   remoteDocker.probeError = new CliError("browser_host_unreachable", "Remote Docker is offline");
   const apple = new FleetBackend("apple-container-local");
   apple.probeError = new CliError(
-    "apple_service_stopped",
-    "local Apple container service is disabled",
-    "run agentbrowse-infra enable",
+    "browser_host_unreachable",
+    "local Hypeman service is disabled",
+    "run scripts/install-host",
   );
 
   await expect(
@@ -230,7 +230,7 @@ test("two unavailable backends produce one bounded recovery and never start Appl
   ).rejects.toMatchObject({
     code: "no_backend_available",
     message: expect.stringContaining("remote-docker: Remote Docker is offline"),
-    recovery: "apple-container-local: run agentbrowse-infra enable",
+    recovery: "apple-container-local: run scripts/install-host",
   });
   expect(apple.events).toEqual(["probe"]);
 });

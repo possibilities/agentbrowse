@@ -3,15 +3,11 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DockerFarmBackend } from "../cli/backend.ts";
+import { HypemanFarmBackend } from "../cli/hypeman-backend.ts";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
 import { KERNEL_HEADFUL_IMAGE_LOCK } from "../config/kernel-headful-image.ts";
 import { validateKernelImageLock } from "../config/kernel-image-lock.ts";
-import {
-  type LockCommand,
-  lockFromRegistryIndex,
-  updateKernelImageLock,
-} from "../tools/update-kernel-image-lock.ts";
+import { lockFromRegistryIndex, updateKernelImageLock } from "../tools/update-kernel-image-lock.ts";
 
 const sourceCommit = "57858c774681c646c238043d5cb75a9ff61797c6";
 const platformDigest = "sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3";
@@ -82,22 +78,22 @@ test("ordinary runtime selection never follows a mutable registry tag", async ()
   const config = loadAgentbrowseConfig({
     AGENTBROWSE_CONFIG: "/tmp/agentbrowse-lock-test-does-not-exist.json",
   });
-  const backend = new DockerFarmBackend(
+  const backend = new HypemanFarmBackend(
     {
-      id: "remote-docker",
-      type: "docker",
-      context: "remote-browser",
-      expectedEndpoint: null,
-      expectedEngine: null,
-      remoteHost: "browser-host",
-      networkAddress: "192.0.2.1",
-      networkAddressCommand: null,
+      id: "remote",
+      type: "hypeman",
+      baseUrl: "http://localhost:4973",
+      tokenFile: "/tmp/token",
+      remoteHost: null,
+      networkAddress: null,
+      portOffset: 2000,
+      cpus: 2,
+      memory: "3G",
+      profileSizeGb: 10,
     },
     config,
-    {
-      command: async () => {
-        throw new Error("runtime must not inspect Git or the registry");
-      },
+    async () => {
+      throw new Error("runtime must not inspect the registry");
     },
   );
   expect(await backend.resolveImage()).toBe(KERNEL_HEADFUL_IMAGE_LOCK.runtimeReference);
@@ -108,29 +104,20 @@ test("maintainer update is explicit and writes one validated lock document", asy
   const directory = mkdtempSync(join(tmpdir(), "agentbrowse-image-lock-"));
   temporaryDirectories.push(directory);
   const outputPath = join(directory, "kernel-headful.lock.json");
-  const calls: string[][] = [];
-  const command: LockCommand = async (args) => {
-    calls.push([...args]);
-    if (args.at(-1) === "--raw") return { exitCode: 0, stdout: fixture, stderr: "" };
-    return { exitCode: 0, stdout: "buildx test\n", stderr: "" };
-  };
-
+  const calls: string[] = [];
+  const request = (async (url: string | URL | Request) => {
+    calls.push(String(url));
+    return calls.length === 1 ? Response.json({ token: "test-token" }) : new Response(fixture);
+  }) as typeof fetch;
   const lock = await updateKernelImageLock(sourceCommit, {
-    command,
+    fetch: request,
     now: () => new Date("2026-08-29T00:16:00.000Z"),
     outputPath,
   });
 
   expect(calls).toEqual([
-    [
-      "docker",
-      "buildx",
-      "imagetools",
-      "inspect",
-      "docker.io/onkernel/chromium-headful:57858c7",
-      "--raw",
-    ],
-    ["docker", "buildx", "version"],
+    "https://auth.docker.io/token?service=registry.docker.io&scope=repository:onkernel/chromium-headful:pull",
+    "https://registry-1.docker.io/v2/onkernel/chromium-headful/manifests/57858c7",
   ]);
   expect(validateKernelImageLock(JSON.parse(readFileSync(outputPath, "utf8")))).toEqual(lock);
 });

@@ -6,38 +6,20 @@ absolute path for tests or an isolated installation. The file contains an
 ordered `backends` array. Array order is provisioning priority, while each
 backend `id` is stable identity recorded in target receipts and cleanup data.
 
-Docker, Apple container, and Hypeman have separate backend shapes. [Hypeman configuration and demo instructions](hypeman.md) describe its API credentials, resources, and network forwarding.
+Every backend has type `hypeman`. Supply an `id` and either a private
+`connectionFile` (absolute or starting with `~/`) or inline `baseUrl` and
+absolute `tokenFile`. Remote hosts additionally require `remoteHost` and a private
+IPv4 `networkAddress`. The host installer generates these machine-local fields;
+credentials never enter the tracked deployment file.
 
-| Type | Required fields | Optional fields |
-|---|---|---|
-| `docker` | `id`, `context`, `remoteHost`, and exactly one of `networkAddress` or `networkAddressCommand` | `expectedEndpoint`, `expectedEngine`, partial `video` override |
-| `apple-container` | `id` | `command` (`/usr/local/bin/container`), `applicationRoot` (the conventional agentbrowse-infra runtime root), `accessMode` (`direct` or explicit `loopback` relay), `maxTargets` (1000), `cpus` (2), `memory` (`6G`), partial `video` override |
+Resources: `cpus` defaults to 2, `memory` to `6G`, `profileSizeGb` to 1 and
+`portOffset` to 2000. The 0–999 slot range is shared across hosts. Each backend
+may override shared `video` settings. See `config.example.json` and
+[Hypeman setup](hypeman.md).
 
-Apple defaults to 2 CPUs and 6 GiB per target with the same 1000-slot range as Docker. These allocations and the target cap are configurable. The application
-root and command, when overridden, must be absolute paths. Duplicate or invalid
-backend ids and version 1 files fail before any backend command runs.
-
-The example configuration keeps a remote Docker backend first and Apple second.
-Replace its documentation-only `192.0.2.10` address, Docker context, SSH host,
-and engine identity with values for the deployment. Provisioning an unbound
-Browser profile advances only when a backend's host or container service has a
-classified availability failure. Before the first backend mutation, agentbrowse
-durably reserves that backend as the profile's home so an interrupted creation
-cannot retry against a different backend. Later launches keep the same cookies
-and authentication even after the target is deleted. A bound profile never falls
-through to a same-named empty volume elsewhere. Authentication, context/engine
-identity, malformed output, image absence, ownership drift, and capacity errors
-surface without trying another backend. Backend-bound target receipts route
-reuse and deletion to exact container incarnations; the profile binding
-separately persists the backend home.
-
-Backend networking is a trust boundary. Docker Live View HTTP stays on the
-browser host's loopback interface and is reached through SSH; Apple Live View
-uses Apple's private container bridge. CDP and WebRTC trust the configured
-private network. In particular, Agentbrowse adds no authentication in front of
-CDP, so do not bind or route it onto an untrusted network. The `kernel`/`admin`
-Live View values in `config.example.json` are public upstream compatibility
-defaults and are not a security boundary.
+Backend networking is a trust boundary. Remote Live View uses SSH to the
+private VM, local Live View uses a loopback relay, and remote CDP/WebRTC use
+owned forwards reachable only through Tailscale.
 
 When `images.defaultImage` is omitted, agentbrowse uses the exact `linux/amd64`
 digest in the checked-in Kernel image lock. `AGENTBROWSE_IMAGE` and `--image`
@@ -71,8 +53,8 @@ capturing 30 VP8 frames per second with `cpu-used=4`, four encoder threads,
 2,396,160 bits/s, and a 30-frame keyframe interval. Keeping display refresh and
 capture cadence separate avoids constraining Chromium paint to the capture
 clock. Each backend may merge a partial `video` object over that shared policy;
-the example gives the measured Docker backend 60 fps, 4,792,320 bits/s, and a
-60-frame keyframe interval while Apple remains at the conservative default.
+the example gives the remote Hypeman backend 60 fps, 4,792,320 bits/s, and a
+60-frame keyframe interval while the Mac remains at the conservative default.
 Environment overrides have highest precedence and apply process-wide, so use
 them for controlled tests rather than heterogeneous fleet policy. Capture fps
 must not exceed screen refresh, `cpuUsed` is at least 1, and keyframe distance is
@@ -95,7 +77,6 @@ directory, also nests the durable-state fixture beneath that runtime directory.
 availability probes when the caller supplies cancellation; ordinary lifecycle
 operations retain their normal transport timing.
 
-Apple lifecycle and image preparation remain manual. If the local service is
-stopped, run `agentbrowse-infra enable`; then use `agentbrowse-infra pull` or
-`agentbrowse-infra load` intentionally. No agentbrowse provider or discovery
-path invokes those commands, starts Apple services, or publishes a host port.
+Host installation, image preparation and service enable/disable are explicit
+administrator operations; browser launch never performs them. The host installer
+configures service recovery, so an enabled service returns after login/reboot.

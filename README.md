@@ -1,103 +1,37 @@
-# agentbrowse
+# AgentBrowse
 
-`agentbrowse` is a flat, polyglot home for browser-facing applications. Each
-language keeps its normal build files at the repository root. It currently
-contains:
+AgentBrowse runs persistent Kernel browsers in Hypeman VMs on Apple silicon
+and Linux, with CDP automation and native Live View. Hypeman is the only runtime.
+Browser profiles retain cookies and authentication independently of VM lifetime.
 
-- a Bun/TypeScript CLI that creates Kernel browser targets backed by durable
-  Browser profiles on a configured host;
-- a Zig Live View core with AppKit and OpenTUI frontend adapters for
-  interacting with those targets through Kernel/Neko.
+## Install
 
-## The CLI describes itself
+```sh
+scripts/install.sh --install
+scripts/install-host
+scripts/install-host --remote artbird
+```
 
-`agentbrowse guide --json` publishes the fleet agent contract, version 1: every
-command with its audience, whether it mutates durable state, its typed
-arguments, and every `error.code` the CLI can return. `--help`, `--agent-help`,
-and `--agent-teaser` are renders of that one document in `cli/contract.ts`, not
-separate copies of it, so a command or a refusal code is described in exactly
-one place.
-
-## Hypeman and backend comparison
-
-Hypeman is supported locally and on artbird. See [the setup and demo guide](docs/hypeman.md) for isolated comparison configurations, profile-persistence checks, concurrent browsers, and Live View.
+The host installer owns pinned Hypeman, host prerequisites, private connection
+files and automatic service recovery. AgentStart installs the CLI and selects
+Artbird first, then the local Mac for new profiles when Artbird is unavailable.
+See [host installation and migration](docs/hypeman.md).
 
 ## Create a browser target
 
-Install the Bun dependencies and expose the checkout's CLI:
-
 ```sh
-bun install
-bun link
+agentbrowse create testing --slot 7 --json
+agentbrowse view testing
+agentbrowse destroy testing --json
 ```
 
-The fleet installer owns `~/.config/agentbrowse/config.json`; for development,
-copy [`config.example.json`](config.example.json) there and replace its example
-deployment values. Its version 2 `backends` array is ordered: the Docker-backed
-remote host is first and an already-enabled Apple `container` session is second.
-Agentbrowse falls through only for classified host/service availability failures
-while a profile has no backend home yet. It never starts Apple services, pulls or
-builds an image, or publishes an Apple host port. `AGENTBROWSE_CONFIG` selects
-another absolute path for isolated tests. Replace the documentation-only
-`192.0.2.10` address and other placeholders before use. See
-[`docs/configuration.md`](docs/configuration.md).
+Destroying a Browser target preserves its Browser profile. Only explicit
+`agentbrowse profile delete testing` removes that profile's authentication.
+The provider never installs infrastructure or pulls images during browser launch.
 
-Browser profiles and Browser targets have separate lifetimes. A Browser profile
-is a durable backend-owned volume containing Chromium cookies, local storage,
-IndexedDB, and authentication state. A Browser target is one Kernel container
-incarnation that mounts that profile. The profile stays bound to its home backend
-after target deletion so a later launch cannot silently substitute a same-named,
-empty volume elsewhere. Deleting a profile is always an explicit operation.
-
-Each named Browser target uses a numeric slot. The slot selects its CDP,
-loopback Live View HTTP, and WebRTC UDP ports. By default, manual creation uses
-the target name as its profile name; `--profile` binds an independently named
-profile instead:
-
-```sh
-agentbrowse create testing --slot 1
-agentbrowse create one-run --profile signed-in --slot 2
-```
-
-Chromium starts in ordinary browser fullscreen so the page fills the remote
-desktop. Normal shortcuts such as F11, Ctrl+1, and Ctrl+Tab still work. The
-non-interactive Chrome for Testing banner is also hidden.
-
-List every browser target carrying agentbrowse ownership labels:
-
-```sh
-agentbrowse list
-agentbrowse list --json
-```
-
-The list includes each target's profile and backend, plus stopped and
-failed-created containers as well as running ones. A `!` beside the state means
-more than one target records the same slot on that backend. `create` refuses a
-slot already recorded by another managed target before it asks the selected
-backend to start a container. It also refuses to mount a profile already
-consumed by any other container, including a stopped or foreign container.
-Apple uses the same 0–999 slot range as Docker; CPU, memory, and an optional target cap are configurable.
-
-Profile creation is normally implicit. Use the profile commands to inspect or
-manage the durable state directly:
-
-```sh
-agentbrowse profile create signed-in
-agentbrowse profile list
-agentbrowse profile list --json
-agentbrowse profile delete signed-in
-```
-
-Deletion fails while any container still mounts the profile. It permanently
-removes that profile's browser state and backend binding and cannot be undone.
-
-The command prints the target's configured network CDP endpoint. Use it directly
-with `agent-browser`:
-
-```sh
-agent-browser --cdp http://BROWSER_HOST_ADDRESS:9223 open https://example.com
-agent-browser --cdp http://BROWSER_HOST_ADDRESS:9223 snapshot -i
-```
+`agentbrowse guide --json` describes the CLI and its ownership rules.
+`AGENTBROWSE_CONFIG` selects an alternate absolute deployment configuration path.
+See [configuration](docs/configuration.md) for resources, routing and video policy.
 
 ## Use agentbrowse as an agent-browser provider
 
@@ -206,8 +140,8 @@ tools/live-view launch testing
 ```
 
 `launch` opens the target's access descriptor and closes it when the application
-exits. Docker targets use a managed SSH forward; Apple targets connect directly
-to their `192.168.64.x` address without spawning SSH.
+exits. Remote Hypeman targets use a managed SSH forward to the guest; local
+targets use AgentBrowse's loopback relay.
 
 For a descriptor supplied by another integration:
 
@@ -222,9 +156,8 @@ The observed signaling contract is in `docs/protocol.md`; reusable frontend
 boundaries and initial measurements are in `docs/architecture.md` and
 `docs/performance.md`.
 
-Treat every backend network as trusted infrastructure. Docker Live View HTTP is
-kept on the browser host's loopback interface and reached through the managed SSH
-forward; Apple targets use Apple's private container bridge. CDP and WebRTC trust
+Treat every backend network as trusted infrastructure. Remote Live View uses
+an SSH tunnel; local Live View uses loopback. CDP and WebRTC trust
 the configured private network, and CDP has no additional Agentbrowse
 authentication, so never expose either endpoint to an untrusted network. The
 example `kernel`/`admin` Live View credentials are public upstream compatibility

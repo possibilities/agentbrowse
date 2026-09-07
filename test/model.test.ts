@@ -22,7 +22,7 @@ test("slot deterministically assigns all browser ports", () => {
     name: "testing",
     profile: "testing",
     slot: 7,
-    backend: "docker",
+    backend: "hypeman",
     container: "agentbrowse-browser-testing",
     httpPort: 18087,
     webrtcPort: 56007,

@@ -1,139 +1,109 @@
-# Hypeman browser backends and comparison demo
+# Hypeman host installation
 
-Agentbrowse supports Docker, Apple container, and Hypeman in the same ordered
-backend configuration. Hypeman runs the pinned Kernel headful OCI image inside a
-VM: Virtualization.framework with Rosetta on the Mac, Cloud Hypervisor on artbird.
-Profiles remain bound to the backend that owns their cookies. Switching the
-backend order does not migrate an existing profile.
+AgentBrowse uses Hypeman 0.3.0 on Apple silicon (Virtualization.framework and
+Rosetta) and Linux x86_64 (Cloud Hypervisor). No Docker engine or CLI is required.
+The browser and generic builder are pulled as published, digest-pinned OCI images.
+The registry hostname `docker.io` does not imply a Docker runtime dependency.
 
-## Run the prepared comparison
+## Install and operate
 
-From this checkout:
+From the AgentBrowse checkout:
+
+```sh
+scripts/install.sh --install
+scripts/install-host
+scripts/install-host --remote artbird
+```
+
+The Mac requires Homebrew; the installer acquires missing caddy/e2fsprogs.
+The Linux host requires working SSH, passwordless sudo for installation and
+lifecycle, Debian APT, Tailscale and hardware virtualization (`/dev/kvm`).
+Artbird provides generic host setup; AgentBrowse owns these workload prerequisites.
+The installer stages Linux code into a root-owned directory before execution.
+
+Installation preserves the existing Hypeman data roots, credentials, VM IDs
+and volumes. Reinstallation detects changed helper bytes, stops owned VMs,
+replaces the service, and restarts those same VMs. Foreign VMs block replacement.
+Unchanged installations leave running VMs alone. Private client connection
+files are written under `~/.config/agentbrowse/hosts/`; tracked backend policy
+references them with `connectionFile`.
+
+The Mac helper lives at `~/.local/share/ab-hypeman/host/agentbrowse-hypeman`.
+The Linux helper is `/usr/local/bin/agentbrowse-hypeman`, linked to root-owned
+`/usr/local/lib/agentbrowse/agentbrowse-hypeman`. Both support `setup`, `enable`,
+`disable`, `status`, `pull IMAGE` and an authenticated `api` operation. `status`
+can include connection details; do not publish raw output. Browser launch never
+starts infrastructure or pulls images.
+
+The host uses bounded 2x sparse-disk reservation overcommit; memory is not
+overcommitted. New profiles default to 1 GiB (configurable); migrated Apple
+filesystems retain enough space for their existing inode tables. Source images
+are retained. Compaction operates only on detached migration-owned volumes and
+checks the resized filesystem before replacement.
+
+Mac launchd service `io.arthack.agentbrowse.serve-hypeman` starts at user login
+and restarts after failure. Linux `agentbrowse-hypeman.service` is enabled at
+boot with automatic restart. `disable` preserves all volumes and stops owned
+VMs. On Linux the supervisor refreshes owned Tailscale CDP/WebRTC forwards when
+VM addresses change; Mac uses a bounded loopback TCP/UDP relay. Remote Live View
+HTTP uses SSH directly to the private VM. Keep these networks private.
+
+The host installer pins a prebuilt generic builder in `build.builder_image`;
+this bypasses Hypeman's default embedded Dockerfile bootstrap. Source-build
+features are outside AgentBrowse's browser acceptance tests.
+
+## Migrate existing profiles
+
+Run host installation first, then the explicit transfer on each source host:
+
+```sh
+python3 host/migrate-profiles.py --backend local
+ssh artbird sudo -n python3 /usr/local/lib/agentbrowse/migrate-profiles.py --backend artbird
+python3 host/migrate-profiles.py --backend local --compact
+ssh artbird sudo -n python3 /usr/local/lib/agentbrowse/migrate-profiles.py --backend artbird --compact
+scripts/install-host
+scripts/install-host --remote artbird
+scripts/migrate-profile-bindings
+scripts/migrate-profile-bindings --apply
+```
+
+Migration validates all source ownership tags before stopping source browsers.
+It retains source storage and records each exact destination volume in a
+private `migration/` receipt. It refuses attached or unreceipted destination
+volumes. Docker directories become ext4 volumes verified with a read-only mount
+and file comparison. Apple ext4 images are cloned, compared by sparse extents,
+and checked with e2fsck before installation. The final compaction reduces
+declared disk reservations; rerun the host installer afterward to refresh
+Hypeman resource accounting. Completed receipts permit a safe
+rerun without overwriting destinations subsequently used by a browser.
+
+The client binding migration clears old target identities and moves verified
+Apple profile homes to `local`; changing backend order alone never migrates data.
+Use `--backend local` or `--backend artbird` to rebind one host independently.
+Old bindings and target records are archived under
+`~/.local/state/agentbrowse/retired-bindings`; bindings with previously absent
+source storage are reported explicitly.
+Retire Docker only after successful browser acceptance using Artbird's explicit
+`ansible/playbooks/retire-docker.yml`. It retains original volume data. Funk's
+explicit `libexec/retire-browser-runtimes` removes its old Docker CLI packages;
+Apple's package removal requires its administrator uninstaller with `-k` to
+retain data. The separate agentbrowse-infra project is retired after service
+ownership and commands have moved. No cleanup removes authenticated source data.
+
+## Browser acceptance
 
 ```sh
 bun tools/browser-demo.ts configure
-bun tools/browser-demo.ts up hypeman-local
+bun tools/browser-demo.ts check hypeman-artbird
+bun tools/browser-demo.ts check hypeman-local
 bun tools/browser-demo.ts view hypeman-local
 ```
 
-The choices are `artbird-docker`, `apple-local`, `hypeman-artbird`, and
-`hypeman-local`. `configure` writes separate files under
-`~/.config/agentbrowse/demos/` and reads artbird's Hypeman token through SSH into a
-mode-0600 local file. It does not change the normal backend order. The demo uses
-separate durable binding state under `~/.local/state/agentbrowse-demo` and named
-`demo-*` profiles. It opens a page with a text field and a working counter.
-
-`check` verifies browser JavaScript, persists a cookie across target destruction
-and recreation, and launches a second independent browser simultaneously. It
-cleans up the second browser and leaves the first ready for `view`:
-
-```sh
-bun tools/browser-demo.ts check hypeman-local
-bun tools/browser-demo.ts check hypeman-artbird
-bun tools/browser-demo.ts check apple-local
-bun tools/browser-demo.ts check artbird-docker
-```
-
-The demo explicitly allocates 2 CPUs and 3 GiB to Apple and Hypeman targets to
-allow a two-browser test on this 16-GiB Mac. These are demo allocations, not Mac
-limits. Docker currently allocates 8 GiB per target. All demo backends use the
-shared capture settings; inspect the generated configuration before drawing
-performance conclusions. Prefer running one comparison at a time.
-
-Measure actual keyboard/pointer input to decoded WebRTC frames:
-
-```sh
-AGENTBROWSE_CONFIG="$HOME/.config/agentbrowse/demos/hypeman-local.json" \
-  bun tools/live-view-latency.ts demo-hypeman-local \
-  --samples 10 --warmup 2 --scenario hypeman-local --json
-```
-
-Change the configuration and target name together for another backend. Small
-samples prove the transport works; they are not a stable performance benchmark.
-`bun run native:build:app` builds both the native viewer and the headless library.
-
-Remove only one demo's browsers and authentication state:
-
-```sh
-bun tools/browser-demo.ts down hypeman-local
-```
-
-## Infrastructure preparation
-
-The `agentbrowse-infra` repository owns the Hypeman lifecycle helper. On the Mac:
-
-```sh
-brew install caddy e2fsprogs
-agentbrowse-infra hypeman setup
-agentbrowse-infra hypeman enable
-agentbrowse-infra hypeman pull docker.io/onkernel/chromium-headful@sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3
-agentbrowse-infra hypeman status
-```
-
-Setup pins Hypeman 0.3.0 and verifies the platform archive SHA-256. It uses the
-short owned root `~/.local/share/ab-hypeman` because macOS Unix socket paths have a
-small length limit. Services are explicitly started with launchd. A system-Python
-supervisor owns the API process and loopback relays for CDP, Live View HTTP, and
-WebRTC UDP. The relay discovers exact, ownership-tagged instances through the
-API, does not start VMs, and closes obsolete forwards on reconciliation.
-
-Apple container reserves `192.168.64.0/24` on this Mac; VZ consequently uses
-`192.168.65.0/24`. Setup detects the active Apple network when choosing its
-initial subnet. A different vmnet environment can require an explicit
-`setup --subnet CIDR`, followed by disable/enable and target recreation. Inspect
-`ifconfig` to confirm the actual VZ gateway (bridge100 or bridge101). This runtime pins a release
-that honors the configured subnet; do not upgrade it without repeating the
-Mac coexistence check. Direct VM addresses are infrastructure details; clients
-use loopback endpoints and do not require Local Network permission changes.
-
-On artbird, the host repository owns installation and service configuration:
-
-```sh
-cd ~/code/artbird
-.venv/bin/ansible-playbook ansible/playbooks/hypeman.yml
-ssh artbird sudo -n agentbrowse-hypeman pull docker.io/onkernel/chromium-headful@sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3
-```
-
-That playbook installs the helper from the adjacent `agentbrowse-infra` checkout,
-Linux image-conversion tools and the pinned server, then starts the service. The
-existing artbird firewall admits API access only through its trusted interfaces.
-Agentbrowse refreshes an owned nftables table through SSH after lifecycle changes.
-CDP and UDP bind logically to artbird's Tailscale address; Live View HTTP is
-forwarded by SSH directly to the VM. Hypeman ports have an offset of 2000 by
-default so they can coexist with the original Docker browsers using the same slot.
-Choose distinct offsets when configuring multiple Hypeman services on one host.
-
-`agentbrowse-infra hypeman disable` stops owned instances and the local service
-while preserving images, profiles and receipts. Foreign instances block shutdown.
-On artbird, use `ssh artbird sudo -n agentbrowse-hypeman disable`.
-
-## Configure a backend
-
-Add either shape to the existing version-2 `backends` array:
-
-```json
-{
-  "id": "hypeman-local",
-  "type": "hypeman",
-  "baseUrl": "http://127.0.0.1:4973",
-  "tokenFile": "/Users/YOU/.local/share/ab-hypeman/token",
-  "cpus": 2,
-  "memory": "6G",
-  "profileSizeGb": 10,
-  "portOffset": 2000
-}
-```
-
-For a remote server, use its private API URL and add `remoteHost` (SSH alias) and
-`networkAddress` (private IPv4). `tokenFile` is always an absolute path on the
-client. The API uses bearer authentication; token contents never belong in argv
-or a checked-in configuration. Launch does not pull images, enable services,
-change default Docker contexts, or move profiles between runtimes.
-
-The same provider, `resolve`, profile commands, `view`, MCP tools, AppKit viewer,
-and OpenTUI frontend work with Hypeman targets. API operations use immutable
-instance/volume IDs for deletion and recheck ownership and incarnation before
-removing resources. Capacity and authentication failures do not trigger fallback.
+`check` uses dedicated demo profiles, verifies browser JavaScript, a cookie
+across target destruction/recreation, and two concurrent browsers. It removes
+the second target/profile and leaves the first available for native viewing.
+`down` deletes only that demo's targets and profiles. Native input/video probes
+use `tools/live-view-latency.ts` with the matching demo configuration.
 
 ## Kernel image compatibility
 
@@ -151,23 +121,3 @@ For an exact owned instance, troubleshooting can use the authenticated exec API:
 AGENTBROWSE_CONFIG="$HOME/.config/agentbrowse/demos/hypeman-local.json" \
   bun tools/hypeman-exec.ts INSTANCE_NAME /bin/sh -c 'df -h /dev/shm; ps aux'
 ```
-
-The Apple comparison uses the optional loopback TCP relay too. Before its first
-launch (and after restarting its infrastructure), run
-`agentbrowse-infra relay enable`. This keeps Bun CDP requests independent of
-private-network access permissions; native WebRTC still reaches Apple's guest
-address. `agentbrowse-infra stop` preserves Apple profiles and stops its relay.
-
-The pinned Kernel wrapper checks for supervisor socket existence before issuing
-its first service starts. Both local launch wrappers remove stale runtime
-sockets before boot so stopping and starting the same VM does not skip those
-services. Existing Apple targets created with the older wrapper must be destroyed
-and recreated once; their profiles are preserved.
-
-Run local runtime lifecycle operations sequentially. During validation, overlapping
-shutdown/recreation of Apple and Hypeman caused macOS vmnet bridges to disappear.
-Recovery is explicit: `agentbrowse-infra hypeman disable`,
-`agentbrowse-infra stop`, `agentbrowse-infra enable`,
-`agentbrowse-infra relay enable`, then `agentbrowse-infra hypeman enable`.
-Restart the existing demo targets with `up`; their profiles survive. Concurrent
-browsers within each runtime and leaving both local runtimes active are tested.

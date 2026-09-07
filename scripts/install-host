@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Converge a local Mac or remote Linux Hypeman host and its private client connection."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+import ipaddress
+
+root = Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--remote", help="SSH alias of the Linux host; omit for this Mac")
+args = parser.parse_args()
+if args.remote and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", args.remote):
+    parser.error("remote must be a plain SSH host alias")
+
+
+def run(command, **kwargs):
+    return subprocess.run([str(a) for a in command], check=True, **kwargs)
+
+
+def write_private(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.is_symlink():
+        raise RuntimeError("refusing symlinked connection file")
+    temporary = path.with_name(path.name + ".new")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(data)
+    temporary.replace(path)
+
+
+try:
+    host = args.remote or "local"
+    config_dir = Path.home() / ".config/agentbrowse/hosts"
+    if args.remote:
+        ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", args.remote]
+        # Stage in a private directory, then copy into a root-owned directory before execution.
+        remote = run(ssh + ["mktemp -d /tmp/agentbrowse-install.XXXXXXXX"], capture_output=True, text=True).stdout.strip()
+        if not re.fullmatch(r"/tmp/agentbrowse-install\.[A-Za-z0-9]+", remote):
+            raise RuntimeError("invalid remote staging path")
+        try:
+            with tempfile.TemporaryFile() as archive:
+                with tarfile.open(fileobj=archive, mode="w") as bundle:
+                    for name in ("install.py", "agentbrowse-hypeman", "hypeman-relay.py", "migrate-profiles.py"):
+                        bundle.add(root / "host" / name, arcname=name)
+                archive.seek(0)
+                run(ssh + ["tar -xf - -C " + remote], stdin=archive)
+            run(ssh + ["sudo -n install -d -m 700 /var/lib/agentbrowse-host-stage && sudo -n cp " + remote + "/* /var/lib/agentbrowse-host-stage/ && sudo -n chown -R root:root /var/lib/agentbrowse-host-stage && sudo -n python3 /var/lib/agentbrowse-host-stage/install.py"])
+            address = run(ssh + ["tailscale ip -4"], capture_output=True, text=True).stdout.strip()
+            ipaddress.IPv4Address(address)
+            token = run(ssh + ["sudo -n cat /var/lib/agentbrowse-hypeman/token"], capture_output=True, text=True).stdout.strip()
+            token_file = config_dir / (host + ".token")
+            write_private(token_file, token + "\n")
+            connection = {"baseUrl": "http://%s:4973" % address, "remoteHost": host, "networkAddress": address, "tokenFile": str(token_file)}
+        finally:
+            run(ssh + ["rm -rf -- " + remote])
+    else:
+        run([sys.executable, root / "host/install.py"])
+        connection = {"baseUrl": "http://127.0.0.1:4973", "tokenFile": str(Path.home() / ".local/share/ab-hypeman/token")}
+    write_private(config_dir / (host + ".json"), json.dumps(connection, indent=2) + "\n")
+    print("Hypeman host installed and private connection recorded: " + host)
+except (OSError, RuntimeError, subprocess.CalledProcessError, ValueError) as error:
+    print(str(error), file=sys.stderr)
+    sys.exit(1)

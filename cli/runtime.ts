@@ -1,8 +1,6 @@
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadAgentbrowseConfig } from "../config/deployment.ts";
-import { AppleContainerFarmBackend } from "./apple-backend.ts";
-import { DockerFarmBackend } from "./backend.ts";
 import { BrowserFarm } from "./farm.ts";
 import { BrowserFleet } from "./fleet.ts";
 import { HypemanFarmBackend } from "./hypeman-backend.ts";
@@ -30,11 +28,7 @@ export function browserFarm(
     config.backends.map(
       (backend) =>
         new BrowserFarm(
-          backend.type === "docker"
-            ? new DockerFarmBackend(backend, config)
-            : backend.type === "hypeman"
-              ? new HypemanFarmBackend(backend, config)
-              : new AppleContainerFarmBackend(backend, config),
+          new HypemanFarmBackend(backend, config),
           directory,
           config.browser.nekoLogLevel,
         ),

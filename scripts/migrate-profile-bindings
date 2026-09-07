@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Rebind retired browser homes after verified host-side profile transfer."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--apply", action="store_true")
+parser.add_argument("--backend", choices=("local", "artbird"), help="rebind one verified host; default is both")
+args = parser.parse_args()
+home = Path.home()
+receipts = {}
+if args.backend != "artbird":
+    receipts["apple-container-local"] = [json.loads(p.read_text()) for p in (home / ".local/share/ab-hypeman/migration").glob("*.json")]
+if args.backend != "local":
+    remote = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3", "artbird", "sudo -n python3 -c 'import json,pathlib; print(json.dumps([json.loads(p.read_text()) for p in pathlib.Path(\"/var/lib/agentbrowse-hypeman/migration\").glob(\"*.json\")]))'"], check=True, capture_output=True, text=True)
+    receipts["artbird"] = json.loads(remote.stdout)
+for backend, entries in receipts.items():
+    if not entries or not all(r["complete"] and r.get("compacted") for r in entries):
+        raise RuntimeError(backend + " must finish verified migration and compaction first")
+known = {backend: {r["source"]["profile"] for r in entries} for backend, entries in receipts.items()}
+changes = []
+for state in (home / ".local/state/agentbrowse", home / ".local/state/agentbrowse-demo"):
+    for path in (state / "profiles").glob("*.json"):
+        binding = json.loads(path.read_text())
+        if binding["backend"] not in known:
+            continue
+        if path.is_symlink() or binding.get("version") != 1 or path.stem != binding["profile"]:
+            raise RuntimeError("unrecognized profile binding")
+        target = {**binding, "backend": "local" if binding["backend"] == "apple-container-local" else "artbird", "target": None}
+        if binding == target:
+            continue
+        changes.append((path, binding, target, binding["profile"] not in known[binding["backend"]]))
+print(json.dumps({"bindingsToUpdate": len(changes), "staleBindingsWithoutSourceData": sum(c[3] for c in changes), "apply": args.apply}))
+if args.apply:
+    backup = home / ".local/state/agentbrowse/retired-bindings"
+    backup.mkdir(parents=True, exist_ok=True, mode=0o700)
+    runtime = Path(tempfile.gettempdir()) / ("agentbrowse-live-view-%d" % os.getuid())
+    for path, original, target, missing in changes:
+        if json.loads(path.read_text()) != original:
+            raise RuntimeError("profile binding changed during migration")
+        receipt = backup / (path.parent.parent.name + "-" + path.name)
+        if not receipt.exists():
+            fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump({"original": original, "sourceWasAbsent": missing}, f)
+        old_target = original.get("target")
+        if old_target:
+            old_path = runtime / (old_target["name"] + ".json")
+            if old_path.exists():
+                existing = json.loads(old_path.read_text())
+                if existing.get("profile") != original["profile"] or existing.get("container") != old_target["container"] or existing.get("backend") != original["backend"]:
+                    raise RuntimeError("target receipt changed; refusing retirement")
+                old_path.replace(backup / ("target-" + old_path.name))
+        temporary = path.with_name(path.name + ".migration")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(target, f, indent=2)
+            f.write("\n")
+        temporary.replace(path)

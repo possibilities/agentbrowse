@@ -135,34 +135,6 @@ const ERROR_CODES: readonly ContractErrorCode[] = [
     recovery: "Retry the command; the lock is held only for the length of one operation.",
   },
   {
-    code: "apple_application_root_mismatch",
-    meaning:
-      "The Apple container service is using a different application-data root than the deployment configuration names.",
-    recovery: "Reconcile the machine's agentbrowse-infra deployment before creating targets.",
-  },
-  {
-    code: "apple_foreign_container",
-    meaning: "A container on the Apple backend is not an agentbrowse-owned browser target.",
-    recovery:
-      "Resolve the foreign resource by hand; agentbrowse refuses to touch what it does not own.",
-  },
-  {
-    code: "apple_ownership_missing",
-    meaning: "The Apple container application root carries no agentbrowse-infra ownership marker.",
-    recovery: "Run the agentbrowse-infra installation before using the Apple backend.",
-  },
-  {
-    code: "apple_ownership_mismatch",
-    meaning:
-      "The Apple container application root carries an invalid agentbrowse-infra ownership marker.",
-    recovery: "Run the agentbrowse-infra installation before using the Apple backend.",
-  },
-  {
-    code: "apple_service_stopped",
-    meaning: "The local Apple container service is disabled.",
-    recovery: "Run agentbrowse-infra enable, then prepare the locked image explicitly.",
-  },
-  {
     code: "backend_capacity_exhausted",
     meaning: "The backend already holds its maximum number of browser targets.",
     recovery: "Destroy or close a finished browser target before launching another.",
@@ -278,17 +250,9 @@ const ERROR_CODES: readonly ContractErrorCode[] = [
     recovery: "Inspect this backend's exact profile and its durable binding before retrying.",
   },
   {
-    code: "invalid_apple_response",
-    meaning: "The Apple container service returned malformed, incomplete, or ambiguous data.",
-  },
-  {
     code: "invalid_configuration",
     meaning: "The agentbrowse deployment configuration is missing, unreadable, or invalid.",
     recovery: "Repair the deployment configuration; agentbrowse does not fall back to defaults.",
-  },
-  {
-    code: "invalid_docker_response",
-    meaning: "Docker returned malformed or incomplete data.",
   },
   {
     code: "invalid_network_address",
@@ -408,15 +372,6 @@ const ERROR_CODES: readonly ContractErrorCode[] = [
     code: "unknown_backend",
     meaning: "A receipt names a backend that is not configured on this machine.",
   },
-  {
-    code: "wrong_docker_context",
-    meaning: "The configured Docker context does not target its configured endpoint.",
-  },
-  {
-    code: "wrong_docker_engine",
-    meaning:
-      "The configured Docker context reached a different engine than the configuration names.",
-  },
 ];
 
 /**
@@ -486,7 +441,7 @@ export const CONTRACT: Contract = {
         "One live container incarnation of a profile: the only name that addresses a running browser, and the exact object handed to a human.",
       slot: "A port slot from 0 to 999 fixing a target's CDP, Live View HTTP, and WebRTC ports. One target per slot.",
       backend:
-        "A configured container host — docker or Apple container — tried in configured order. A profile binds to the backend that first created it.",
+        "A configured Hypeman host tried in configured order. A profile binds to the backend that first created it.",
     },
     output_contract: {
       envelope: {

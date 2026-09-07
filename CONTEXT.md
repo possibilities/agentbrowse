@@ -27,7 +27,7 @@ when the current backend reports a classified availability failure.
 _Avoid: failover list, provider chain._
 
 **Availability classification** — A pre-mutation result that says a backend's
-host or container service cannot currently be reached. It is the only failure
+host or VM service cannot currently be reached. It is the only failure
 class that permits provisioning to continue to the next configured backend.
 _Avoid: retryable error, generic fallback error._
 

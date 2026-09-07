@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""Explicit Hypeman infrastructure lifecycle. Uses only Python's standard library."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import plistlib
+import secrets
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+VERSION = "0.3.0"
+DIGESTS = {
+    "darwin_arm64": "85d3e51bab7c75df045ccbbab4b21da0c026fd1f87ecc97058fdec33c87c6d1d",
+    "linux_amd64": "0e704787082e2f5744f55e59b6858085c952f695b5e3cf3d5ea081b1d655c15b",
+}
+LABEL = "io.arthack.agentbrowse.serve-hypeman"
+LEGACY_LABELS = ("io.arthack.agentbrowse-infra.serve-hypeman", "dev.agentbrowse.hypeman")
+BUILDER_IMAGE = "docker.io/onkernel/builder-generic@sha256:b24344e48c46ff9efe4b5497533bdb1be790490ea890c51f3546ae96371ba572"
+MARKER = "agentbrowse-hypeman-v1"
+MAC = sys.platform == "darwin"
+DEFAULT_ROOT = Path.home() / ".local/share/ab-hypeman" if MAC else Path("/var/lib/agentbrowse-hypeman")
+
+
+def run(args, **kwargs):
+    return subprocess.run([str(x) for x in args], check=True, **kwargs)
+
+
+def owned(root):
+    if root.is_symlink() or not root.is_dir() or root.stat().st_uid != os.geteuid():
+        raise RuntimeError("Hypeman root has unsafe ownership")
+    for name in ("OWNED", "token", "config.yaml", "connection.json", "release.json", "service.plist", "host-install.json", "pending-host-install.json"):
+        path = root / name
+        if path.is_symlink() or (path.exists() and (not path.is_file() or path.stat().st_uid != os.geteuid())):
+            raise RuntimeError("unsafe Hypeman state file: " + name)
+    if not (root / "OWNED").is_file() or (root / "OWNED").read_text().strip() != MARKER:
+        raise RuntimeError("Hypeman root has no matching ownership marker")
+
+
+def write_private(path, content):
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+    os.chmod(path, 0o600)
+
+
+def publish_private_bytes(path, content):
+    temporary = path.with_name(".%s.%d.tmp" % (path.name, os.getpid()))
+    try:
+        temporary.write_bytes(content)
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def request(root, method, path, body=None, timeout=60):
+    owned(root)
+    config = json.loads((root / "connection.json").read_text())
+    token = (root / "token").read_text().strip()
+    req = urllib.request.Request(config["baseUrl"] + path,
+        data=None if body is None else json.dumps(body).encode(), method=method,
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = response.read()
+            return json.loads(data) if data else None
+    except urllib.error.HTTPError as error:
+        raise RuntimeError("Hypeman HTTP %d: %s" % (error.code, error.read().decode()[:1000])) from None
+
+
+def setup(root, port, subnet=None):
+    if not 1024 <= port <= 65530:
+        raise RuntimeError("API port must be between 1024 and 65530")
+    requested_subnet = subnet
+    import ipaddress
+    if subnet is not None:
+        subnet = str(ipaddress.IPv4Network(subnet))
+    if subnet is None and MAC:
+        subnet = "192.168.64.0/24"
+    if subnet is None:
+        subnet = "10.211.0.0/24"
+    if root.exists():
+        owned(root)
+    else:
+        root.mkdir(parents=True, mode=0o700)
+        write_private(root / "OWNED", MARKER + "\n")
+    key = ("darwin" if MAC else "linux") + "_" + {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64"}[platform.machine()]
+    if key not in DIGESTS:
+        raise RuntimeError("unsupported Hypeman host: " + key)
+    bindir = root / "bin"
+    bindir.mkdir(exist_ok=True)
+    if not (bindir / "hypeman-api").exists():
+        with tempfile.TemporaryDirectory(prefix="agentbrowse-hypeman-") as tmp:
+            archive = Path(tmp) / "release.tar.gz"
+            url = "https://github.com/kernel/hypeman/releases/download/v%s/hypeman_%s_%s.tar.gz" % (VERSION, VERSION, key)
+            run(["curl", "--fail", "--location", "--retry", "2", "--output", archive, url])
+            if hashlib.sha256(archive.read_bytes()).hexdigest() != DIGESTS[key]:
+                raise RuntimeError("Hypeman release checksum mismatch")
+            with tarfile.open(archive) as bundle:
+                for member in bundle.getmembers():
+                    name = Path(member.name).name
+                    if name in ("hypeman-api", "hypeman-token", "hypeman-uffd-pager") and member.isfile():
+                        with bundle.extractfile(member) as source, (bindir / name).open("wb") as dest:
+                            shutil.copyfileobj(source, dest)
+                        (bindir / name).chmod(0o755)
+        write_private(root / "release.json", json.dumps({"version": VERSION, "sha256": DIGESTS[key]}))
+    elif json.loads((root / "release.json").read_text()) != {"version": VERSION, "sha256": DIGESTS[key]}:
+        raise RuntimeError("installed Hypeman release differs from the pinned release")
+    configpath = root / "config.yaml"
+    if not configpath.exists():
+        cfg = {"jwt_secret": secrets.token_hex(32), "data_dir": str(root / "data"), "port": str(port),
+               "hypervisor": {"default": "vz" if MAC else "cloud-hypervisor"},
+               "caddy": {"listen_address": "127.0.0.1", "admin_port": port + 1, "http_port": port + 2, "https_port": port + 3},
+               "metrics": {"port": port + 4, "listen_address": "127.0.0.1"},
+               "network": {"dns_server": "1.1.1.1", "subnet_cidr": subnet, "bridge_name": "nat" if MAC else "abhype0"},
+               "logging": {"level": "info"}}
+        if not MAC:
+            route = run(["ip", "-json", "route", "get", "1.1.1.1"], capture_output=True, text=True)
+            cfg["network"]["uplink_interface"] = json.loads(route.stdout)[0]["dev"]
+        write_private(configpath, json.dumps(cfg, indent=2))
+    cfg = json.loads(configpath.read_text())
+    cfg.setdefault("build", {})["builder_image"] = BUILDER_IMAGE
+    # Profiles are sparse ext4 volumes. Allow bounded 2x disk reservations;
+    # CPU and RAM retain Hypeman's defaults. This is not memory overcommit.
+    cfg.setdefault("oversubscription", {})["disk"] = 2.0
+    write_private(configpath, json.dumps(cfg, indent=2))
+    if requested_subnet is not None:
+        cfg["network"]["subnet_cidr"] = subnet
+        write_private(configpath, json.dumps(cfg, indent=2))
+    env = dict(os.environ, JWT_SECRET=cfg["jwt_secret"])
+    if not (root / "token").exists():
+        token = run([bindir / "hypeman-token", "-user-id", "agentbrowse", "-duration", "8760h"], env=env, capture_output=True, text=True)
+        write_private(root / "token", token.stdout.strip() + "\n")
+    write_private(root / "connection.json", json.dumps({"baseUrl": "http://127.0.0.1:" + cfg["port"], "tokenFile": str(root / "token")}))
+    (root / "logs").mkdir(exist_ok=True)
+    if MAC:
+        entitlements = root / "entitlements.plist"
+        entitlements.write_bytes(plistlib.dumps({"com.apple.security.virtualization": True, "com.apple.security.network.server": True, "com.apple.security.network.client": True}))
+        run(["codesign", "--force", "--sign", "-", "--entitlements", entitlements, bindir / "hypeman-api"])
+        service = {"Label": LABEL, "ProgramArguments": ["/usr/bin/python3", str(Path(__file__).resolve()), "--root", str(root), "serve"], "WorkingDirectory": str(root),
+                   "EnvironmentVariables": {"CONFIG_PATH": str(configpath), "PATH": "/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(Path.home())},
+                   "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10, "ExitTimeOut": 120,
+                   "AgentbrowseOwner": MARKER,
+                   "StandardOutPath": str(root / "logs/server.log"), "StandardErrorPath": str(root / "logs/server.log")}
+        publish_private_bytes(root / "service.plist", plistlib.dumps(service))
+    else:
+        unit = "[Unit]\nDescription=Agentbrowse Hypeman runtime\nAfter=network-online.target\n[Service]\nType=simple\nEnvironment=CONFIG_PATH=%s\nExecStart=/usr/bin/python3 %s --root %s serve\nRestart=always\nRestartSec=5\nWorkingDirectory=%s\nKillMode=mixed\nTimeoutStopSec=120\n[Install]\nWantedBy=multi-user.target\n" % (configpath, Path(__file__).resolve(), root, root)
+        Path("/etc/systemd/system/agentbrowse-hypeman.service").write_text(unit)
+        run(["systemctl", "daemon-reload"])
+    print(json.dumps({"installed": True, "root": str(root), "version": VERSION}))
+
+
+def enable(root):
+    owned(root)
+    if MAC:
+        domain = "gui/" + str(os.getuid())
+        plist = Path.home() / "Library/LaunchAgents" / (LABEL + ".plist")
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        if plist.exists() and (plist.is_symlink() or plistlib.loads(plist.read_bytes()).get("AgentbrowseOwner") != MARKER):
+            raise RuntimeError("refusing foreign Hypeman LaunchAgent")
+        publish_private_bytes(plist, (root / "service.plist").read_bytes())
+        probe = subprocess.run(["launchctl", "print", domain + "/" + LABEL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if probe.returncode:
+            run(["launchctl", "bootstrap", domain, plist])
+    else:
+        run(["systemctl", "enable", "--now", "agentbrowse-hypeman"])
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        try:
+            request(root, "GET", "/instances", timeout=3)
+            print('{"running":true}')
+            return
+        except (RuntimeError, OSError):
+            time.sleep(1)
+    raise RuntimeError("Hypeman did not become ready; inspect " + str(root / "logs/server.log"))
+
+
+def network_sync(root):
+    """Atomically refresh only this runtime's private-network DNAT rules."""
+    if MAC or os.geteuid() != 0:
+        raise RuntimeError("network-sync requires the Linux host administrator")
+    import fcntl
+    import ipaddress
+    owned(root)
+    with (root / "network.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        address = run(["tailscale", "ip", "-4"], capture_output=True, text=True).stdout.strip()
+        ipaddress.IPv4Address(address)
+        config = json.loads((root / "config.yaml").read_text())
+        subnet = ipaddress.IPv4Network(config["network"]["subnet_cidr"])
+        bridge = config["network"]["bridge_name"]
+        commands = ["add table ip agentbrowse_hypeman", "flush table ip agentbrowse_hypeman",
+            "add chain ip agentbrowse_hypeman incoming { type nat hook prerouting priority -101; policy accept; }",
+            "add chain ip agentbrowse_hypeman local { type nat hook output priority -101; policy accept; }",
+            "add chain ip agentbrowse_hypeman outgoing { type nat hook postrouting priority 99; policy accept; }"]
+        ports = set()
+        for instance in request(root, "GET", "/instances"):
+            tags = instance.get("tags") or {}
+            if tags.get("dev.agentbrowse.managed") != "true" or tags.get("dev.agentbrowse.role") != "kernel-browser":
+                continue
+            if tags.get("dev.agentbrowse.hypeman.spec") != "1" or instance["state"] not in ("Running", "Initializing"):
+                continue
+            slot = int(tags["dev.agentbrowse.slot"])
+            offset = int(tags["dev.agentbrowse.port-offset"])
+            if not 0 <= slot <= 999 or not 0 <= offset <= 8536:
+                raise RuntimeError("invalid forwarding ownership metadata")
+            ip = ipaddress.IPv4Address(instance["network"]["ip"])
+            if ip not in subnet:
+                raise RuntimeError("instance address is outside the configured Hypeman network")
+            for proto, port, guest, local in [("tcp", 9222+slot+offset, 9222, False), ("udp", 56000+slot+offset, 56000+slot+offset, False)]:
+                if (proto, port) in ports:
+                    raise RuntimeError("conflicting Hypeman forwarding ports")
+                ports.add((proto, port))
+                if local:
+                    commands.append("add rule ip agentbrowse_hypeman local ip daddr 127.0.0.1 tcp dport %d dnat to %s:%d" % (port, ip, guest))
+                else:
+                    commands.append('add rule ip agentbrowse_hypeman incoming iifname "tailscale0" ip daddr %s %s dport %d dnat to %s:%d' % (address, proto, port, ip, guest))
+        commands.append('add rule ip agentbrowse_hypeman outgoing oifname "%s" ip daddr %s masquerade' % (bridge, subnet))
+        run(["nft", "-f", "-"], input="\n".join(commands) + "\n", text=True)
+        print(json.dumps({"forwardedPorts": len(ports), "address": address}))
+
+
+def orphan_caddy_pids(root, processes):
+    """Match only this user's orphaned Caddy children for this exact data root."""
+    command = "/opt/homebrew/bin/caddy run --config " + str(root / "data/caddy/config.json")
+    matches = []
+    for row in processes.splitlines():
+        fields = row.strip().split(None, 3)
+        if len(fields) == 4 and all(f.isdigit() for f in fields[:3]):
+            pid, parent, uid = map(int, fields[:3])
+            if parent == 1 and uid == os.geteuid() and fields[3] == command:
+                matches.append(pid)
+    return matches
+
+
+def reap_orphan_caddy(root):
+    # Hypeman 0.3.0 starts Caddy in its own process group on macOS. launchd
+    # therefore cannot reap it with the API process on a service replacement.
+    if not MAC:
+        return
+    import signal
+    processes = run(["ps", "-axo", "pid=,ppid=,uid=,command="], capture_output=True, text=True).stdout
+    for pid in orphan_caddy_pids(root, processes):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+def serve(root):
+    import importlib.util
+    import signal
+    import threading
+    owned(root)
+    reap_orphan_caddy(root)
+    spec = importlib.util.spec_from_file_location("hypeman_relay", Path(__file__).with_name("hypeman-relay.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    relay = module.Relay(root) if MAC else None
+    previous_network = None
+    stopped = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stopped.set())
+    signal.signal(signal.SIGINT, lambda *_: stopped.set())
+    child = subprocess.Popen([str(root / "bin/hypeman-api")])
+    try:
+        while child.poll() is None and not stopped.wait(1):
+            try:
+                if relay:
+                    relay.sync()
+                else:
+                    current = json.dumps([{key: i.get(key) for key in ("id", "state", "network", "tags")}
+                        for i in request(root, "GET", "/instances", timeout=2)], sort_keys=True)
+                    if current != previous_network:
+                        network_sync(root)
+                        previous_network = current
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+                if relay:
+                    relay.close()
+                print("Hypeman relay: " + str(error), file=sys.stderr, flush=True)
+    finally:
+        if relay:
+            relay.close()
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=90)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+        reap_orphan_caddy(root)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    sub = parser.add_subparsers(dest="command", required=True)
+    s = sub.add_parser("setup", help="install the pinned server and generate private credentials; does not start it")
+    s.add_argument("--port", type=int, default=4973)
+    s.add_argument("--subnet", help="VM network CIDR; preserves an existing configured subnet")
+    for cmd in ("enable", "disable", "status", "network-sync", "serve"):
+        sub.add_parser(cmd)
+    s = sub.add_parser("pull", help="explicitly acquire the browser image")
+    s.add_argument("image")
+    s = sub.add_parser("api", help="authenticated JSON request on stdin, response on stdout (for SSH clients)")
+    args = parser.parse_args()
+    root = args.root.expanduser().resolve()
+    if args.command == "setup":
+        setup(root, args.port, args.subnet)
+    elif args.command == "serve":
+        serve(root)
+    elif args.command == "network-sync":
+        network_sync(root)
+    elif args.command == "enable":
+        enable(root)
+    elif args.command == "disable":
+        owned(root)
+        if MAC:
+            domain = "gui/" + str(os.getuid())
+            active_labels = [label for label in (LABEL, *LEGACY_LABELS)
+                if subprocess.run(["launchctl", "print", domain + "/" + label], capture_output=True).returncode == 0]
+            active = bool(active_labels)
+        else:
+            active = subprocess.run(["systemctl", "is-active", "--quiet", "agentbrowse-hypeman"]).returncode == 0
+        if not active:
+            print('{"stopped":true,"dataPreserved":true}')
+            return
+        instances = request(root, "GET", "/instances")
+        if any((i.get("tags") or {}).get("dev.agentbrowse.managed") != "true" for i in instances):
+            raise RuntimeError("foreign instances prevent disabling this Hypeman service")
+        for instance in instances:
+            if instance["state"] not in ("Stopped", "Shutdown"):
+                request(root, "POST", "/instances/" + instance["id"] + "/stop", {})
+        if not MAC:
+            network_sync(root)
+        if MAC:
+            for active_label in active_labels:
+                run(["launchctl", "bootout", domain + "/" + active_label])
+            # bootout returns before launchd has finished removing the job.
+            # A subsequent enable must not mistake that dying job/API for
+            # the new installation, then lose its only service moments later.
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                loaded = any(subprocess.run(["launchctl", "print", domain + "/" + label], capture_output=True).returncode == 0
+                             for label in active_labels)
+                try:
+                    request(root, "GET", "/instances", timeout=2)
+                    api_alive = True
+                except (OSError, RuntimeError):
+                    api_alive = False
+                if not loaded and not api_alive:
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("Hypeman job did not finish unloading")
+            reap_orphan_caddy(root)
+        else:
+            run(["systemctl", "disable", "--now", "agentbrowse-hypeman"])
+        if MAC:
+            plist = Path.home() / "Library/LaunchAgents" / (LABEL + ".plist")
+            if plist.exists() and not plist.is_symlink() and plistlib.loads(plist.read_bytes()).get("AgentbrowseOwner") == MARKER:
+                plist.unlink()
+        print('{"stopped":true,"dataPreserved":true}')
+    elif args.command == "status":
+        print(json.dumps({"instances": request(root, "GET", "/instances"), "images": request(root, "GET", "/images")}))
+    elif args.command == "api":
+        body = json.load(sys.stdin)
+        print(json.dumps(request(root, body["method"], body["path"], body.get("body"))))
+    elif args.command == "pull":
+        from urllib.parse import quote
+        images = request(root, "GET", "/images")
+        existing = next((i for i in images if i["name"] == args.image), None)
+        if existing and existing["status"] == "ready":
+            print(json.dumps({"image": args.image, "status": "ready"}))
+            return
+        request(root, "POST", "/images", {"name": args.image, "platform": "linux/amd64"})
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline:
+            image = request(root, "GET", "/images/" + quote(args.image, safe=""))
+            if image["status"] == "ready":
+                print(json.dumps(image))
+                return
+            if image["status"] == "failed":
+                raise RuntimeError(image.get("error", "image conversion failed"))
+            time.sleep(2)
+        raise RuntimeError("image preparation exceeded 15 minutes")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)

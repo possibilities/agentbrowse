@@ -5,3 +5,6 @@ node_modules/
 zig-out/
 *.xcframework.zip
 *.dSYM/
+
+__pycache__/
+*.pyc

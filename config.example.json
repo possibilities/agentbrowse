@@ -2,13 +2,12 @@
   "version": 2,
   "backends": [
     {
-      "id": "remote-docker",
-      "type": "docker",
-      "context": "remote-browser",
-      "expectedEndpoint": "ssh://browser-host",
-      "expectedEngine": "browser-host",
-      "remoteHost": "browser-host",
-      "networkAddress": "192.0.2.10",
+      "id": "artbird",
+      "type": "hypeman",
+      "connectionFile": "~/.config/agentbrowse/hosts/artbird.json",
+      "cpus": 2,
+      "memory": "3G",
+      "portOffset": 2000,
       "video": {
         "fps": 60,
         "targetBitrateBps": 4792320,
@@ -16,12 +15,12 @@
       }
     },
     {
-      "id": "apple-container-local",
-      "type": "apple-container",
-      "command": "/usr/local/bin/container",
-      "maxTargets": 1000,
+      "id": "local",
+      "type": "hypeman",
+      "connectionFile": "~/.config/agentbrowse/hosts/local.json",
       "cpus": 2,
-      "memory": "6G"
+      "memory": "3G",
+      "portOffset": 2000
     }
   ],
   "images": {
@@ -29,7 +28,7 @@
   },
   "browser": {
     "nekoLogLevel": "info",
-    "timezone": "UTC",
+    "timezone": "America/New_York",
     "video": {
       "screenRefreshRate": 60,
       "fps": 30,

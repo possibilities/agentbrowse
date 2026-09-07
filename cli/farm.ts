@@ -128,7 +128,7 @@ export class BrowserFarm {
   ) {}
 
   async probeAvailability(signal?: AbortSignal): Promise<void> {
-    // Docker discovery applies its short backend deadline whenever it receives a
+    // Backend discovery applies its short backend deadline whenever it receives a
     // signal. Supply an inert signal when the fleet caller did not provide one
     // so ordinary create/provision selection is bounded too.
     await this.backend.verifyHost(signal ?? new AbortController().signal);

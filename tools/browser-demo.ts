@@ -7,7 +7,7 @@ import { browserFarm } from "../cli/runtime.ts";
 import { runView } from "../cli/view.ts";
 import { CdpConnection, normalizeDebuggerUrl, TemporaryCdpPage } from "../client/cdp.ts";
 
-const names = ["artbird-docker", "apple-local", "hypeman-artbird", "hypeman-local"] as const;
+const names = ["hypeman-artbird", "hypeman-local"] as const;
 const directory = join(homedir(), ".config", "agentbrowse", "demos");
 const [action, selected] = process.argv.slice(2);
 if (
@@ -44,20 +44,7 @@ if (action === "configure") {
     await ssh(["sudo", "-n", "cat", "/var/lib/agentbrowse-hypeman/token"]),
     { mode: 0o600 },
   );
-  const docker = base.backends.find((b: { type: string }) => b.type === "docker");
-  const apple = base.backends.find((b: { type: string }) => b.type === "apple-container");
-  if (!docker || !apple)
-    throw new Error("installed deployment must describe the existing Docker and Apple backends");
   const backends = {
-    "artbird-docker": { ...docker, video: base.browser.video },
-    "apple-local": {
-      ...apple,
-      accessMode: "loopback",
-      maxTargets: 1000,
-      cpus: 2,
-      memory: "3G",
-      video: base.browser.video,
-    },
     "hypeman-artbird": {
       id: "hypeman-artbird",
       type: "hypeman",
@@ -117,17 +104,39 @@ if (action === "configure") {
       ).json()) as { webSocketDebuggerUrl: string };
       return CdpConnection.connect(normalizeDebuggerUrl(cdpUrl, version.webSocketDebuggerUrl));
     }
+    async function showDemo(cdp: CdpConnection) {
+      const { targetId } = await cdp.command<{ targetId: string }>("Target.createTarget", { url });
+      const { windowId } = await cdp.command<{ windowId: number }>("Browser.getWindowForTarget", {
+        targetId,
+      });
+      await cdp.command("Browser.setWindowBounds", {
+        windowId,
+        bounds: { windowState: "fullscreen" },
+      });
+    }
     const cdp = await connection(target.cdpUrl);
     try {
-      await cdp.command("Target.createTarget", { url });
+      await showDemo(cdp);
     } finally {
       cdp.close();
     }
     if (action === "check") {
       const page = await TemporaryCdpPage.open(target.cdpUrl, url);
       try {
+        // Navigation may replace the initial execution context. Poll from the
+        // client so a timer in that discarded context cannot hang the probe.
+        const deadline = Date.now() + 20_000;
+        let ready = false;
+        while (Date.now() < deadline) {
+          ready = await page.evaluate<boolean>(
+            "document.readyState === 'complete' && !!document.querySelector('button') && typeof window.count === 'number'",
+          );
+          if (ready) break;
+          await Bun.sleep(200);
+        }
+        if (!ready) throw new Error("demo page did not load");
         const result = await page.evaluate<number>(
-          "new Promise((resolve, reject) => { const deadline = Date.now() + 10000; const timer = setInterval(() => { const button = document.querySelector('button'); if (document.readyState === 'complete' && button && typeof window.count === 'number') { clearInterval(timer); button.click(); resolve(window.count); } else if (Date.now() > deadline) { clearInterval(timer); reject(new Error('demo page did not load')); } }, 20); })",
+          "document.querySelector('button').click(); window.count",
         );
         if (result !== 1) throw new Error("browser JavaScript/input check failed");
       } finally {
@@ -166,7 +175,7 @@ if (action === "configure") {
         );
         if (!result.cookies.some((c) => c.name === cookieName && c.value === cookieValue))
           throw new Error("profile cookie did not survive recreation");
-        await after.command("Target.createTarget", { url });
+        await showDemo(after);
       } finally {
         after.close();
       }
