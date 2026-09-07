@@ -1,6 +1,9 @@
 ---
 name: browser
-description: Drive the shared durable Agentbrowse browser through agent-browser, including signed-in interaction and live Agentattention handoff. Reach for it when a task needs clicking, forms, multi-step browser work, authentication, MFA, or a human challenge. For public page content without interaction use scrape; for finding pages use search.
+description: >-
+  Operate a durable AgentBrowse browser through agent-browser for clicking,
+  forms, multi-step browsing, signed-in page state, and human sign-in handoff.
+  Use scrape for public page extraction and search to discover URLs.
 ---
 
 # Browser — durable agent and human interaction
