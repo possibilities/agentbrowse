@@ -130,6 +130,41 @@ wants to look now.`;
 
 const ERROR_CODES: readonly ContractErrorCode[] = [
   {
+    code: "profile_exists",
+    meaning: "An import would replace an existing Browser profile.",
+    recovery: "Import into a new profile name.",
+  },
+  {
+    code: "profile_archive_exists",
+    meaning: "The requested export file already exists.",
+    recovery: "Choose a new archive path.",
+  },
+  { code: "invalid_profile_archive", meaning: "The file is not a Kernel tar.zst profile archive." },
+  {
+    code: "profile_import_pending",
+    meaning: "An import has not completed; launches cannot use this profile.",
+    recovery:
+      "Destroy its temporary target if present, then retry the import or delete the new profile.",
+  },
+  {
+    code: "profile_not_quiescent",
+    meaning: "Kernel could not confirm Chromium stopped and its filesystem synced.",
+  },
+  {
+    code: "profile_shutdown_failed",
+    meaning: "The Browser target was retained because its profile could not be stopped and synced.",
+    recovery: "Retry destroy; --force explicitly abandons unflushed browser writes.",
+  },
+  {
+    code: "kernel_request_failed",
+    meaning: "Kernel's native browser API failed or returned an invalid response.",
+  },
+  {
+    code: "profile_cleanup_failed",
+    meaning: "An archive operation could not remove its temporary Browser target.",
+    recovery: "Inspect and destroy the named temporary target before retrying.",
+  },
+  {
     code: "allocation_busy",
     meaning: "Another browser target or profile lifecycle operation holds the allocation lock.",
     recovery: "Retry the command; the lock is held only for the length of one operation.",
@@ -527,13 +562,78 @@ export const CONTRACT: Contract = {
       mutates: true,
       guidance:
         "Destroys the container only. Cookies, storage, and authentication stay in the Browser profile and are there for the next launch. Refuses any container whose ownership labels do not match the named target.",
-      arguments: [NAME_ARGUMENT],
+      arguments: [
+        NAME_ARGUMENT,
+        {
+          name: "--force",
+          type: "boolean",
+          description:
+            "Delete an unresponsive VM without stopping Chromium; may lose unflushed writes",
+        },
+      ],
     },
     {
       name: "profile",
-      summary: "Create, list, or explicitly delete durable Browser profiles",
+      summary: "Manage durable Browser profiles and native Kernel archives",
       audience: "agent",
       subcommands: [
+        {
+          name: "export",
+          summary: "Export an idle Browser profile as Kernel's native tar.zst archive",
+          audience: "agent",
+          mutates: true,
+          guidance:
+            "Close the profile's current target first. A temporary target lets Kernel stop Chromium, sync the filesystem, and stream its native archive. The temporary target is removed. The destination is private and never overwritten. Archives contain authentication state.",
+          arguments: [
+            {
+              name: "name",
+              type: "string",
+              description: "Browser profile name",
+              positional: true,
+              required: true,
+            },
+            {
+              name: "path",
+              type: "string",
+              format: "path",
+              direction: "out",
+              description: "New local tar.zst file",
+              positional: true,
+              required: true,
+            },
+          ],
+        },
+        {
+          name: "import",
+          summary: "Import a Kernel profile archive into a new durable Browser profile",
+          audience: "agent",
+          mutates: true,
+          guidance:
+            "Kernel owns archive extraction and its stop/apply/start lifecycle. Existing profiles are refused. An interrupted import remains reserved and cannot launch; after removing any temporary target, repeat import with the intended archive to finish it. The source archive is retained. Optional --backend selects the new profile's home explicitly.",
+          arguments: [
+            {
+              name: "name",
+              type: "string",
+              description: "New Browser profile name",
+              positional: true,
+              required: true,
+            },
+            {
+              name: "path",
+              type: "string",
+              format: "path",
+              direction: "in",
+              description: "Local Kernel tar.zst archive",
+              positional: true,
+              required: true,
+            },
+            {
+              name: "--backend",
+              type: "string",
+              description: "Configured backend ID; defaults to the first available backend",
+            },
+          ],
+        },
         {
           name: "create",
           summary: "Create one durable Browser profile",

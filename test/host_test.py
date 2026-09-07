@@ -2,6 +2,8 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 import tempfile
+import json
+import io
 import os
 import unittest
 from unittest.mock import patch
@@ -20,9 +22,32 @@ def load(name, path):
 host = load("host", ROOT / "host/agentbrowse-hypeman")
 migration = load("migration", ROOT / "host/migrate-profiles.py")
 installer = load("installer", ROOT / "host/install.py")
+relay = load("relay", ROOT / "host/hypeman-relay.py")
 
 
 class HostSafetyTests(unittest.TestCase):
+    def test_kernel_api_relay_tracks_exact_guest_incarnation_and_slot(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "connection.json").write_text(json.dumps({"baseUrl": "http://127.0.0.1:4973"}))
+            (root / "token").write_text("synthetic")
+            instance = {"id": "original", "state": "Running", "network": {"ip": "192.168.64.42"}, "tags": {
+                "dev.agentbrowse.managed": "true", "dev.agentbrowse.role": "kernel-browser",
+                "dev.agentbrowse.hypeman.spec": "1", "dev.agentbrowse.slot": "7",
+                "dev.agentbrowse.port-offset": "2000"}}
+            with patch.object(relay, "Forward") as forward, patch.object(relay.urllib.request, "urlopen",
+                    side_effect=lambda *_args, **_kwargs: io.BytesIO(json.dumps([instance]).encode())):
+                service = relay.Relay(root)
+                service.sync()
+                self.assertIn(("192.168.64.42", 10001, "original"), [s for s, _f in service.forwards.values()])
+                forward.assert_any_call(30087, "192.168.64.42", 10001, False)
+                old = service.forwards[(30087, False)][1]
+                instance["id"] = "replacement"
+                service.sync()
+                old.close.assert_called()
+                self.assertEqual(service.forwards[(30087, False)][0][2], "replacement")
+                service.close()
+
     def test_linux_forwarding_is_persistent_and_refuses_foreign_files(self):
         from types import SimpleNamespace
         with tempfile.TemporaryDirectory() as d:

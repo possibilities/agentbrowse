@@ -3,6 +3,38 @@ import { expect, test } from "bun:test";
 import { UsageError } from "../cli/errors.ts";
 import { parseArgs } from "../cli/main.ts";
 
+test("profile archive commands and explicit forced cleanup keep their complete arguments", () => {
+  expect(
+    parseArgs(["profile", "export", "research", "/tmp/private archive.tar.zst", "--json"]),
+  ).toEqual({
+    command: "profile",
+    action: "export",
+    name: "research",
+    path: "/tmp/private archive.tar.zst",
+    json: true,
+  });
+  expect(
+    parseArgs(["profile", "import", "copy", "/tmp/profile.tar.zst", "--backend", "local"]),
+  ).toEqual({
+    command: "profile",
+    action: "import",
+    name: "copy",
+    path: "/tmp/profile.tar.zst",
+    backend: "local",
+    json: false,
+  });
+  expect(parseArgs(["destroy", "stuck", "--force"])).toEqual({
+    command: "destroy",
+    name: "stuck",
+    force: true,
+    json: false,
+  });
+  expect(() => parseArgs(["profile", "import", "copy"])).toThrow(UsageError);
+  expect(() =>
+    parseArgs(["profile", "export", "research", "/tmp/a", "--backend", "local"]),
+  ).toThrow(UsageError);
+});
+
 test("parse target, profile, provider, resolve, and view commands", () => {
   expect(
     parseArgs([

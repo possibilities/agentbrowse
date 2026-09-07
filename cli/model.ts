@@ -10,7 +10,8 @@ export const WEBRTC_BASE_PORT = 56000;
 export const CDP_BASE_PORT = 9222;
 export const CHROMIUM_FLAGS = "--start-fullscreen --disable-infobars";
 export const PROFILE_SCHEMA_VERSION = 1;
-export const PROFILE_MOUNT_PATH = "/home/kernel/user-data";
+export const PROFILE_MOUNT_PATH = "/home/kernel";
+export const PROFILE_DATA_PATH = "/home/kernel/user-data";
 
 export interface BrowserProfile {
   readonly name: string;

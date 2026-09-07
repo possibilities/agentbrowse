@@ -13,8 +13,9 @@ import type {
   ProfileListEntry,
   ProvisionOptions,
 } from "./farm.ts";
+import { type ProfileArchiveResult, validateProfileArchive } from "./kernel.ts";
 import { validateName } from "./model.ts";
-import { ProfileBindingStore } from "./profile-binding.ts";
+import { ProfileBindingStore, requireReadyProfile } from "./profile-binding.ts";
 
 const AVAILABILITY_CODES = new Set([
   "browser_host_unresolved",
@@ -48,6 +49,7 @@ export class BrowserFleet {
       this.bindings.read(profile),
     ]);
     const profileFarm = binding === undefined ? undefined : this.requireFarm(binding.backend);
+    requireReadyProfile(binding);
     if (targetFarm !== undefined && profileFarm !== undefined && targetFarm !== profileFarm) {
       throw new CliError(
         "target_profile_backend_mismatch",
@@ -66,6 +68,7 @@ export class BrowserFleet {
   async provisionProfile(options: ProvisionOptions): Promise<CreateResult> {
     validateName(options.profile);
     const binding = await this.bindings.read(options.profile);
+    requireReadyProfile(binding);
     if (binding !== undefined) {
       const farm = this.requireFarm(binding.backend);
       await farm.probeAvailability();
@@ -105,6 +108,7 @@ export class BrowserFleet {
   ): Promise<BrowserListEntry | undefined> {
     validateName(profile);
     const binding = await this.bindings.read(profile);
+    requireReadyProfile(binding);
     if (binding?.target === null || binding === undefined) return undefined;
     const farm = this.requireFarm(binding.backend);
     await farm.probeAvailability(signal);
@@ -114,6 +118,7 @@ export class BrowserFleet {
   async createProfile(name: string): Promise<ProfileCreateResult> {
     validateName(name);
     const binding = await this.bindings.read(name);
+    requireReadyProfile(binding);
     if (binding !== undefined) {
       const farm = this.requireFarm(binding.backend);
       await farm.probeAvailability();
@@ -175,7 +180,66 @@ export class BrowserFleet {
     return await this.selectForMutation(async (farm) => await farm.deleteProfile(name, true));
   }
 
-  async destroy(name: string, backendId?: string, profileHint?: string): Promise<DestroyResult> {
+  async exportProfile(name: string, path: string): Promise<ProfileArchiveResult> {
+    validateName(name);
+    const binding = await this.bindings.read(name);
+    requireReadyProfile(binding);
+    if (binding !== undefined)
+      return await this.requireFarm(binding.backend).exportProfile(name, path);
+    const matches = (await this.listProfiles()).filter((entry) => entry.name === name);
+    if (matches.length !== 1)
+      throw new CliError(
+        matches.length ? "profile_backend_conflict" : "profile_missing",
+        `cannot identify one backend for Browser profile ${name}`,
+      );
+    return await this.requireFarm(matches[0]!.backend).exportProfile(name, path);
+  }
+
+  async importProfile(
+    name: string,
+    path: string,
+    backendId?: string,
+  ): Promise<ProfileArchiveResult> {
+    validateName(name);
+    path = await validateProfileArchive(path);
+    const binding = await this.bindings.read(name);
+    if (binding !== undefined && !binding.pendingImport)
+      throw new CliError(
+        "profile_exists",
+        `Browser profile ${name} already exists`,
+        "import into a new profile name",
+      );
+    if (binding !== undefined && backendId !== undefined && binding.backend !== backendId)
+      throw new CliError(
+        "profile_backend_mismatch",
+        "unfinished import belongs to a different backend",
+      );
+    if (binding === undefined && (await this.listProfiles()).some((entry) => entry.name === name)) {
+      throw new CliError(
+        "profile_exists",
+        `Browser profile ${name} already exists`,
+        "import into a new profile name",
+      );
+    }
+    const operation = async (farm: BrowserFarm) =>
+      await this.bindings.withImport(name, farm.backend.id, (resume) =>
+        farm.importProfile(name, path, resume),
+      );
+    const selected = binding?.backend ?? backendId;
+    if (selected !== undefined) {
+      const farm = this.requireFarm(selected);
+      await farm.probeAvailability();
+      return await operation(farm);
+    }
+    return await this.selectForMutation(operation);
+  }
+
+  async destroy(
+    name: string,
+    backendId?: string,
+    profileHint?: string,
+    force = false,
+  ): Promise<DestroyResult> {
     validateName(name);
     if (profileHint !== undefined) validateName(profileHint);
     const explicit = backendId === undefined ? undefined : this.requireFarm(backendId);
@@ -187,7 +251,7 @@ export class BrowserFleet {
     const bound = targetBound ?? currentBound;
     if (bound !== undefined) {
       await bound.probeAvailability();
-      const result = await bound.destroy(name, true);
+      const result = await bound.destroy(name, true, force);
       await this.clearDestroyedTarget(result, profileHint);
       return result;
     }
@@ -206,14 +270,14 @@ export class BrowserFleet {
     for (const farm of this.farms) {
       const match = (await farm.list(undefined, true)).find((target) => target.name === name);
       if (match !== undefined) {
-        const result = await farm.destroy(name, true);
+        const result = await farm.destroy(name, true, force);
         await this.clearDestroyedTarget(result, profileHint);
         return result;
       }
     }
     const firstAvailable = this.farms[0];
     if (firstAvailable === undefined) throw noBackendsConfigured();
-    const result = await firstAvailable.destroy(name, true);
+    const result = await firstAvailable.destroy(name, true, force);
     await this.clearDestroyedTarget(result, profileHint);
     return result;
   }

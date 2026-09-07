@@ -4,6 +4,7 @@ import {
   HypemanFarmBackend,
   type HypemanRequest,
 } from "../cli/hypeman-backend.ts";
+import { KernelBrowser } from "../cli/kernel.ts";
 import { profileFor, targetFor } from "../cli/model.ts";
 import { type HypemanBackendConfig, loadAgentbrowseConfig } from "../config/deployment.ts";
 
@@ -75,7 +76,8 @@ test("launch attaches the exact persistent volume and preserves requested resour
     vcpus: 4,
     size: "8G",
     platform: "linux/amd64",
-    volumes: [{ volume_id: "vol-exact", mount_path: "/home/kernel/user-data", readonly: false }],
+    volumes: [{ volume_id: "vol-exact", mount_path: "/home/kernel", readonly: false }],
+    tags: { "dev.agentbrowse.profile.layout": "2" },
     env: { NEKO_WEBRTC_UDPMUX: "58007" },
     entrypoint: ["/bin/sh", "-c"],
     cmd: [HYPEMAN_WRAPPER],
@@ -101,9 +103,52 @@ test("delete rechecks incarnation then deletes by immutable server ID, preservin
     calls.push(`${method} ${path}`);
     return path === "/volumes" ? [volume] : method === "GET" ? instance() : undefined;
   };
-  const backend = new HypemanFarmBackend(settings, config, request);
+  let stopped = false;
+  let closed = false;
+  const backend = new HypemanFarmBackend(settings, config, request, async () => ({
+    browser: new (class extends KernelBrowser {
+      override async stop() {
+        stopped = true;
+      }
+    })("http://unused"),
+    close: async () => {
+      closed = true;
+    },
+  }));
   await backend.inspectContainer(target.container);
   await backend.removeContainer(target.container);
+  expect(calls.filter((c) => c.startsWith("DELETE"))).toEqual(["DELETE /instances/exact-id"]);
+  expect(stopped).toBe(true);
+  expect(closed).toBe(true);
+});
+
+test("failed native shutdown preserves the VM and volume until explicitly forced", async () => {
+  const calls: string[] = [];
+  let closed = false;
+  const backend = new HypemanFarmBackend(
+    settings,
+    config,
+    async (method, path) => {
+      calls.push(`${method} ${path}`);
+      return path === "/volumes" ? [volume] : instance();
+    },
+    async () => ({
+      browser: new (class extends KernelBrowser {
+        override async stop() {
+          throw new Error("stuck");
+        }
+      })("http://unused"),
+      close: async () => {
+        closed = true;
+      },
+    }),
+  );
+  await expect(backend.removeContainer(target.container)).rejects.toMatchObject({
+    code: "profile_shutdown_failed",
+  });
+  expect(calls.some((c) => c.startsWith("DELETE"))).toBe(false);
+  expect(closed).toBe(true);
+  await backend.removeContainer(target.container, true);
   expect(calls.filter((c) => c.startsWith("DELETE"))).toEqual(["DELETE /instances/exact-id"]);
 });
 
@@ -120,6 +165,27 @@ test("a replacement instance cannot inherit deletion through its reused name", a
     code: "foreign_container",
   });
   expect(calls).not.toContain("DELETE");
+});
+
+test("a replacement cannot inherit the native stop between initial inspection and Kernel access", async () => {
+  let inspections = 0;
+  let opened = false;
+  const backend = new HypemanFarmBackend(
+    settings,
+    config,
+    async (_method, path) => {
+      if (path === "/volumes") return [volume];
+      return instance(++inspections === 1 ? "original" : "replacement");
+    },
+    async () => {
+      opened = true;
+      throw new Error("must not open");
+    },
+  );
+  await expect(backend.removeContainer(target.container)).rejects.toMatchObject({
+    code: "profile_shutdown_failed",
+  });
+  expect(opened).toBe(false);
 });
 
 test("foreign ownership tags block deletion even with a familiar instance name", async () => {

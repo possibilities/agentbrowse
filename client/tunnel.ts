@@ -22,6 +22,7 @@ export interface TunnelDependencies {
 
 export interface TunnelOptions {
   readyTimeoutMs?: number;
+  probePath?: string;
   /** Cancels tunnel startup. An already returned tunnel remains caller-owned. */
   signal?: AbortSignal;
   dependencies?: Partial<TunnelDependencies>;
@@ -77,7 +78,7 @@ export class LiveViewTunnel {
     const dependencies = { ...defaults, ...options.dependencies };
     options.signal?.throwIfAborted();
     if (target.liveViewAccess.mode === "direct") {
-      return new LiveViewTunnel(
+      const tunnel = new LiveViewTunnel(
         null,
         target,
         null,
@@ -85,6 +86,13 @@ export class LiveViewTunnel {
         dependencies,
         target.liveViewAccess.baseUrl,
       );
+      if (options.probePath !== undefined)
+        await tunnel.waitUntilReady(
+          options.readyTimeoutMs ?? READY_TIMEOUT_MS,
+          options.signal,
+          options.probePath,
+        );
+      return tunnel;
     }
     const localPort = await dependencies.allocatePort();
     options.signal?.throwIfAborted();
@@ -105,7 +113,11 @@ export class LiveViewTunnel {
       `http://127.0.0.1:${localPort}`,
     );
     try {
-      await tunnel.waitUntilReady(options.readyTimeoutMs ?? READY_TIMEOUT_MS, options.signal);
+      await tunnel.waitUntilReady(
+        options.readyTimeoutMs ?? READY_TIMEOUT_MS,
+        options.signal,
+        options.probePath ?? "/",
+      );
       return tunnel;
     } catch (error) {
       await tunnel.close();
@@ -123,28 +135,32 @@ export class LiveViewTunnel {
     return this.closePromise;
   }
 
-  private async waitUntilReady(timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  private async waitUntilReady(
+    timeoutMs: number,
+    signal?: AbortSignal,
+    probePath = "/",
+  ): Promise<void> {
     const deadline = this.dependencies.now() + timeoutMs;
     const abort = abortWait(signal);
     try {
       while (this.dependencies.now() < deadline) {
         signal?.throwIfAborted();
-        if (this.process!.exitCode !== null) {
-          await this.process!.exited;
+        if (this.process !== null && this.process.exitCode !== null) {
+          await this.process.exited;
           this.stderrText = await this.stderrPromise!;
-          throw new Error(`SSH tunnel exited with status ${this.process!.exitCode}`);
+          throw new Error(`SSH tunnel exited with status ${this.process.exitCode}`);
         }
-        if (await this.dependencies.probe(`${this.baseUrl}/`, signal)) return;
+        if (await this.dependencies.probe(`${this.baseUrl}${probePath}`, signal)) return;
         await Promise.race([
           this.dependencies.sleep(100),
-          this.process!.exited.then(() => undefined),
+          ...(this.process === null ? [] : [this.process.exited.then(() => undefined)]),
           abort.promise,
         ]);
       }
     } finally {
       abort.dispose();
     }
-    throw new Error(`SSH tunnel was not ready within ${timeoutMs} ms`);
+    throw new Error(`Browser connection was not ready within ${timeoutMs} ms`);
   }
 
   private async closeOnce(): Promise<void> {

@@ -176,3 +176,33 @@ test("SSH Live View can forward to a private VM address on its host", () => {
     "invalid SSH forward destination",
   );
 });
+
+test("private local API access waits for the requested readiness endpoint", async () => {
+  const probes: string[] = [];
+  let elapsed = 0;
+  const access = await LiveViewTunnel.open(
+    {
+      name: "profile-transfer",
+      slot: 0,
+      liveViewAccess: { mode: "direct", baseUrl: "http://127.0.0.1:28080" },
+    },
+    {
+      probePath: "/spec.json",
+      dependencies: {
+        probe: async (url) => {
+          probes.push(url);
+          return probes.length > 1;
+        },
+        sleep: async (ms) => {
+          elapsed += ms;
+        },
+        now: () => elapsed,
+        spawn: () => {
+          throw new Error("local API must not start SSH");
+        },
+      },
+    },
+  );
+  expect(probes).toEqual(["http://127.0.0.1:28080/spec.json", "http://127.0.0.1:28080/spec.json"]);
+  await access.close();
+});

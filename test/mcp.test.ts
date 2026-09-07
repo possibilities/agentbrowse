@@ -53,7 +53,7 @@ describe("which commands become tools", () => {
       path.replace(/ /g, "_"),
     );
     expect(TOOLS.map((tool) => tool.name).sort()).toEqual([...wanted].sort());
-    expect(wanted.length).toBe(9);
+    expect(wanted.length).toBe(11);
   });
 
   test("no operator or internal leaf is exposed, mcp and provider included", () => {

@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-
+import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import {
   type FarmBackend,
   type ManagedContainerRecord,
@@ -11,6 +10,7 @@ import {
   verifyDestroyOwnership,
 } from "./backend.ts";
 import { CliError } from "./errors.ts";
+import { type ProfileArchiveResult, validateProfileArchive } from "./kernel.ts";
 import {
   type BrowserDescription,
   type BrowserProfile,
@@ -36,6 +36,7 @@ export interface CreateOptions {
 export interface ProvisionOptions {
   readonly profile: string;
   readonly image?: string;
+  readonly readyTimeoutSeconds?: number;
 }
 
 export interface CreateResult extends BrowserDescription {
@@ -170,7 +171,10 @@ export class BrowserFarm {
         true,
       );
     });
-    return await this.waitForCreate(result, PROVIDER_READY_TIMEOUT_SECONDS);
+    return await this.waitForCreate(
+      result,
+      options.readyTimeoutSeconds ?? PROVIDER_READY_TIMEOUT_SECONDS,
+    );
   }
 
   private async prepareCreate(
@@ -418,41 +422,137 @@ export class BrowserFarm {
     });
   }
 
-  async destroy(name: string, hostVerified = false): Promise<DestroyResult> {
+  async destroy(name: string, hostVerified = false, force = false): Promise<DestroyResult> {
     validateName(name);
-    return await this.withAllocationLock(async () => {
-      if (!hostVerified) await this.backend.verifyHost();
-      const [recorded, managed] = await Promise.all([
-        this.readTarget(name),
-        this.backend.listManagedContainers(),
-      ]);
-      this.verifyReceiptBackend(recorded);
-      const discovered = managed.find((record) => record.name === name);
-      const container =
-        recorded?.container ?? discovered?.container ?? `agentbrowse-browser-${name}`;
-      const state = await this.backend.inspectContainer(container);
-      if (state === undefined) {
-        await this.removeTarget(name);
-        return {
-          name,
-          profile: recorded?.profile ?? discovered?.profile ?? null,
-          backend: this.backend.id,
-          container,
-          destroyed: false,
-        };
-      }
-      const target = recorded ?? targetFromLabels(name, this.backend.id, container, state);
-      verifyDestroyOwnership(state, target);
-      await this.backend.removeContainer(target.container);
+    return await this.withAllocationLock(() => this.destroyTarget(name, hostVerified, force));
+  }
+
+  private async destroyTarget(
+    name: string,
+    hostVerified = false,
+    force = false,
+  ): Promise<DestroyResult> {
+    if (!hostVerified) await this.backend.verifyHost();
+    const [recorded, managed] = await Promise.all([
+      this.readTarget(name),
+      this.backend.listManagedContainers(),
+    ]);
+    this.verifyReceiptBackend(recorded);
+    const discovered = managed.find((record) => record.name === name);
+    const container = recorded?.container ?? discovered?.container ?? `agentbrowse-browser-${name}`;
+    const state = await this.backend.inspectContainer(container);
+    if (state === undefined) {
       await this.removeTarget(name);
       return {
         name,
-        profile: target.profile,
+        profile: recorded?.profile ?? discovered?.profile ?? null,
         backend: this.backend.id,
-        container: target.container,
-        destroyed: true,
+        container,
+        destroyed: false,
       };
+    }
+    const target = recorded ?? targetFromLabels(name, this.backend.id, container, state);
+    verifyDestroyOwnership(state, target);
+    await this.backend.removeContainer(target.container, force);
+    await this.removeTarget(name);
+    return {
+      name,
+      profile: target.profile,
+      backend: this.backend.id,
+      container: target.container,
+      destroyed: true,
+    };
+  }
+
+  async exportProfile(name: string, path: string): Promise<ProfileArchiveResult> {
+    validateName(name);
+    path = resolve(path);
+    try {
+      await lstat(path);
+      throw new CliError("profile_archive_exists", `archive destination already exists: ${path}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    return await this.withAllocationLock(async () => {
+      await this.backend.verifyHost();
+      const profile = profileFor(name);
+      const state = await this.backend.inspectProfile(profile);
+      if (state === undefined)
+        throw new CliError("profile_missing", `Browser profile ${name} is absent`);
+      verifyManagedProfile(state, profile, this.backend.id);
+      await this.withIdleProfileTarget(profile, async (target) => {
+        await this.backend.withKernel(target, (kernel) => kernel.exportProfile(path));
+      });
+      return { name, backend: this.backend.id, path };
     });
+  }
+
+  async importProfile(name: string, path: string, resume = false): Promise<ProfileArchiveResult> {
+    validateName(name);
+    path = await validateProfileArchive(path);
+    return await this.withAllocationLock(async () => {
+      await this.backend.verifyHost();
+      const profile = profileFor(name);
+      if (!resume && (await this.backend.inspectProfile(profile)) !== undefined) {
+        throw new CliError(
+          "profile_exists",
+          `Browser profile ${name} already exists`,
+          "import into a new profile name",
+        );
+      }
+      await this.withIdleProfileTarget(profile, async (target) => {
+        await this.backend.withKernel(target, (kernel) => kernel.importProfile(path));
+      });
+      return { name, backend: this.backend.id, path };
+    });
+  }
+
+  private async withIdleProfileTarget(
+    profile: BrowserProfile,
+    operation: (target: Target) => Promise<void>,
+  ): Promise<void> {
+    if ((await this.backend.listProfileConsumers(profile)).length !== 0) {
+      throw new CliError(
+        "profile_in_use",
+        `Browser profile ${profile.name} must be idle for archive operations`,
+        "close its agent-browser session or destroy its exact target first",
+      );
+    }
+    const managed = await this.backend.listManagedContainers();
+    const name = this.nextTargetName(profile.name, new Set(managed.map((entry) => entry.name)));
+    if ((await this.readTarget(name)) !== undefined)
+      throw new CliError(
+        "target_name_unavailable",
+        "temporary profile target already has a receipt",
+      );
+    let operationError: unknown;
+    let failed = false;
+    try {
+      const target = await this.prepareCreate(
+        {
+          name,
+          profile: profile.name,
+          slot: this.firstFreeSlot(new Set(managed.map((entry) => entry.slot))),
+        },
+        managed,
+        true,
+      );
+      await this.waitForCreate(target, 120);
+      await operation(target);
+    } catch (error) {
+      operationError = error;
+      failed = true;
+    }
+    try {
+      await this.destroyTarget(name, true);
+    } catch (error) {
+      throw new CliError(
+        "profile_cleanup_failed",
+        `${failed ? `Archive operation failed: ${String(operationError)}. ` : ""}Temporary target ${name} could not be removed: ${String(error)}`,
+        `inspect and destroy the retained target with agentbrowse destroy ${name} before retrying the archive operation`,
+      );
+    }
+    if (failed) throw operationError;
   }
 
   async readTarget(name: string): Promise<Target | undefined> {

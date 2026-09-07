@@ -89,6 +89,19 @@ producer.
 
 ## Close without losing authentication
 
+Agentbrowse normally stops Chromium and syncs its profile before removing the
+VM. If close reports `profile_shutdown_failed`, keep the same profile and retry
+after restoring host access. `destroy --force` abandons unflushed writes and is
+for explicit recovery of an unresponsive target.
+
+For an explicitly requested profile copy or transfer, first close its target,
+then use `agentbrowse profile export NAME FILE.tar.zst` and
+`agentbrowse profile import NEW_NAME FILE.tar.zst [--backend BACKEND]`. These use
+Kernel's native archives and refuse active profiles or existing import names.
+An interrupted import reports `profile_import_pending`; remove any retained
+temporary target and retry the import with the intended archive. Keep archives
+private: they carry authentication state.
+
 After all attention items for the session are terminal and the browser work is
 finished:
 

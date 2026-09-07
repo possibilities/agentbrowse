@@ -48,8 +48,9 @@ Mac launchd service `io.arthack.agentbrowse.serve-hypeman` starts at user login
 and restarts after failure. Linux `agentbrowse-hypeman.service` is enabled at
 boot with automatic restart. `disable` preserves all volumes and stops owned
 VMs. On Linux the supervisor refreshes owned Tailscale CDP/WebRTC forwards when
-VM addresses change; Mac uses a bounded loopback TCP/UDP relay. Remote Live View
-HTTP uses SSH directly to the private VM. Keep these networks private.
+VM addresses change; Mac uses a bounded loopback TCP/UDP relay, including the
+private Kernel API on `28080 + slot + portOffset`. Remote Live View and Kernel
+API HTTP use SSH directly to the private VM. Keep these networks private.
 
 The host installer pins a prebuilt generic builder in `build.builder_image`;
 this bypasses Hypeman's default embedded Dockerfile bootstrap. Source-build

@@ -1,11 +1,18 @@
 # Context
 
 **Browser profile** — Durable browser state stored independently of any Browser target,
-including cookies, local storage, IndexedDB, and authentication. At most one Browser
-target may mount a Browser profile for writable use at a time.
+including cookies, local storage, IndexedDB, and authentication. Its Hypeman volume
+mounts at `/home/kernel`, leaving Kernel's `user-data` directory replaceable by its
+native configuration API. Hypeman permits one writable attachment at a time.
 _Avoid: browser session, user profile, target._
 
-**Browser target** — One named Kernel headful container or Hypeman VM on the configured host, exposing
+**Profile archive** — Kernel's native tar.zst of the contents of
+`/home/kernel/user-data`, captured while Chromium is stopped. Import applies it
+through Kernel's `/configure` endpoint to a new Browser profile; the live volume
+remains the source of durable state.
+_Avoid: storage state, cookie export, profile database._
+
+**Browser target** — One named Hypeman VM running Kernel's headful image on the configured host, exposing
 both a Chrome DevTools Protocol endpoint and the services needed for Live View.
 Its numeric slot deterministically assigns its host ports.
 _Avoid: browser session, Docker target._

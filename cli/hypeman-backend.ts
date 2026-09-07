@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { LiveViewTunnel } from "../client/tunnel.ts";
 import type { AgentbrowseConfig, HypemanBackendConfig } from "../config/deployment.ts";
 import { KERNEL_HEADFUL_IMAGE_LOCK } from "../config/kernel-headful-image.ts";
 import {
@@ -19,6 +20,7 @@ import {
   verifyDestroyOwnership,
 } from "./backend.ts";
 import { CliError } from "./errors.ts";
+import { KernelBrowser } from "./kernel.ts";
 import {
   type BrowserAccess,
   type BrowserProfile,
@@ -39,6 +41,7 @@ export type HypemanRequest = (
 // Hypeman's guest init supplies the Linux VM. Mount shared memory explicitly and
 // discover the VM address only when the deployment does not advertise a relay.
 export const HYPEMAN_WRAPPER =
+  `set -e; python3 -c '${readFileSync(new URL("../host/profile-layout.py", import.meta.url), "utf8").replaceAll("'", "'\\''")}' ; ` +
   'set -e; rm -f /var/run/supervisor.sock /var/run/supervisord.pid /run/dbus/system_bus_socket /tmp/pulse/native; chown 0:0 /usr/bin/mount /opt/chrome-for-testing/chrome_sandbox; chmod 4755 /opt/chrome-for-testing/chrome_sandbox; ln -sfn chrome_sandbox /opt/chrome-for-testing/chrome-sandbox; export CHROME_DEVEL_SANDBOX=/opt/chrome-for-testing/chrome_sandbox; mountpoint -q /dev/shm || mount -t tmpfs -o mode=1777 tmpfs /dev/shm; if [ -z "$NEKO_WEBRTC_NAT1TO1" ]; then set -- $(hostname -I); export NEKO_WEBRTC_NAT1TO1=$1; fi; exec /wrapper';
 
 function object(value: unknown): Row {
@@ -76,6 +79,13 @@ export class HypemanFarmBackend implements FarmBackend {
     readonly backendConfig: HypemanBackendConfig,
     readonly config: AgentbrowseConfig,
     request?: HypemanRequest,
+    private readonly kernelConnection?: (
+      target: Target,
+      address: string,
+    ) => Promise<{
+      browser: KernelBrowser;
+      close(): Promise<void>;
+    }>,
   ) {
     this.id = backendConfig.id;
     this.request = request ?? this.httpRequest.bind(this);
@@ -347,6 +357,7 @@ export class HypemanFarmBackend implements FarmBackend {
       "dev.agentbrowse.backend": this.id,
       "dev.agentbrowse.target": target.name,
       "dev.agentbrowse.profile": target.profile,
+      "dev.agentbrowse.profile.layout": "2",
       "dev.agentbrowse.slot": String(target.slot),
       "dev.agentbrowse.hypeman.spec": "1",
       "dev.agentbrowse.port-offset": String(this.backendConfig.portOffset),
@@ -380,6 +391,7 @@ export class HypemanFarmBackend implements FarmBackend {
     validateReadyTimeout(timeoutSeconds);
     const deadline = Date.now() + timeoutSeconds * 1000;
     const access = await this.browserAccess(target);
+    let started = false;
     while (Date.now() < deadline) {
       try {
         // Remote Live View travels through SSH and is checked by the viewer.
@@ -395,6 +407,14 @@ export class HypemanFarmBackend implements FarmBackend {
       } catch {
         /* guest may still be booting */
       }
+      if (!started) {
+        try {
+          await this.withKernel(target, (kernel) => kernel.ensureStarted());
+          started = true;
+        } catch {
+          /* Native API can start after CDP during initial VM boot. */
+        }
+      }
       await Bun.sleep(500);
     }
     throw new CliError(
@@ -402,7 +422,73 @@ export class HypemanFarmBackend implements FarmBackend {
       `Hypeman Browser target ${target.name} did not become ready within ${timeoutSeconds} seconds`,
     );
   }
-  async removeContainer(container: string): Promise<void> {
+  async withKernel<T>(
+    target: Target,
+    operation: (kernel: KernelBrowser) => Promise<T>,
+  ): Promise<T> {
+    const instance = await this.instance(target.container);
+    if (!instance) throw new CliError("browser_missing", "Kernel Browser target is absent");
+    const expected = this.observedIds.get(target.container);
+    if (expected !== undefined && instance.id !== expected) {
+      throw new CliError(
+        "foreign_container",
+        "Hypeman instance incarnation changed before Kernel access",
+      );
+    }
+    const state = this.state(instance, await this.volumes());
+    verifyDestroyOwnership(state, target);
+    if (!state.running)
+      throw new CliError("browser_target_not_running", "Kernel Browser target is not running");
+    const address = state.addresses[0];
+    if (!address)
+      throw new CliError(
+        "invalid_hypeman_response",
+        "Kernel Browser target has no private address",
+      );
+    const connection =
+      this.kernelConnection === undefined
+        ? await this.openKernel(
+            target,
+            address,
+            (await this.browserAccess(target, state)).cdpUrl,
+            state.labels["dev.agentbrowse.profile.layout"] === undefined,
+          )
+        : await this.kernelConnection(target, address);
+    try {
+      const current = await this.instance(target.container);
+      if (current?.id !== instance.id)
+        throw new CliError(
+          "foreign_container",
+          "Hypeman instance changed while opening Kernel access",
+        );
+      return await operation(connection.browser);
+    } finally {
+      await connection.close();
+    }
+  }
+
+  private async openKernel(target: Target, address: string, cdpUrl: string, legacy: boolean) {
+    const remoteHost = this.backendConfig.remoteHost;
+    const tunnel = await LiveViewTunnel.open(
+      {
+        ...target,
+        liveViewAccess:
+          remoteHost === null
+            ? {
+                mode: "direct",
+                baseUrl: `http://127.0.0.1:${28080 + target.slot + this.backendConfig.portOffset}`,
+              }
+            : { mode: "ssh", remoteHost, remoteAddress: address, remotePort: 10001 },
+      },
+      { probePath: "/spec.json" },
+    );
+    return {
+      browser: new KernelBrowser(tunnel.baseUrl, cdpUrl, legacy),
+      close: () => tunnel.close(),
+    };
+  }
+
+  async removeContainer(container: string, force = false): Promise<void> {
     const expected = this.observedIds.get(container);
     const i = await this.instance(container);
     if (!i) return;
@@ -419,6 +505,18 @@ export class HypemanFarmBackend implements FarmBackend {
       state,
     );
     verifyDestroyOwnership(state, target);
+    this.observedIds.set(container, string(i.id));
+    if (state.running && !force) {
+      try {
+        await this.withKernel(target, async (kernel) => await kernel.stop());
+      } catch (error) {
+        throw new CliError(
+          "profile_shutdown_failed",
+          `could not stop and sync Browser profile ${target.profile}: ${(error as Error).message}`,
+          `retry destroy; use agentbrowse destroy ${target.name} --force only to abandon unflushed browser writes`,
+        );
+      }
+    }
     await this.request("DELETE", `/instances/${enc(string(i.id))}`);
     await this.syncNetwork();
   }

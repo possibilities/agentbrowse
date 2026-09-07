@@ -1,0 +1,3 @@
+# 0013: Use Kernel's native profile lifecycle on durable Hypeman volumes
+
+Mount each Browser profile volume at `/home/kernel`, because Kernel's `/configure` replaces the sibling `user-data` directory with same-filesystem renames; mounting that directory itself prevents the native operation. Kernel owns archive extraction, ownership, and browser restart, while Hypeman owns persistence and exclusive writable attachment, and Agentbrowse keeps only names, backend/target receipts, and an unfinished-import reservation. Archives are explicit transfers of an idle profile, rather than the live source of truth, so ordinary close/reopen never depends on a successful snapshot upload or substitutes older authentication state after a host failure.

@@ -4,6 +4,12 @@ AgentBrowse runs persistent Kernel browsers in Hypeman VMs on Apple silicon
 and Linux, with CDP automation and native Live View. Hypeman is the only runtime.
 Browser profiles retain cookies and authentication independently of VM lifetime.
 
+Profiles use Kernel's native directory layout and archive API on persistent
+Hypeman volumes. `profile export NAME FILE.tar.zst` captures an idle profile;
+`profile import NEW_NAME FILE.tar.zst --backend BACKEND` restores it through
+Kernel. See [profile lifecycle and transfer](docs/profiles.md) for shutdown,
+interrupted imports, and the forward-only relocation of existing volumes.
+
 ## Install
 
 ```sh

@@ -242,6 +242,8 @@ const NETWORK: ReadonlySet<string> = new Set([
   "profile create",
   "profile list",
   "profile delete",
+  "profile export",
+  "profile import",
   "resolve",
   "view",
 ]);

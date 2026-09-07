@@ -145,7 +145,9 @@ class Relay:
             slot, offset = int(tags["dev.agentbrowse.slot"]), int(tags["dev.agentbrowse.port-offset"])
             if not 0 <= slot <= 999 or not 0 <= offset <= 8536:
                 raise RuntimeError("invalid owned forwarding ports")
-            for port, guest, udp in [(9222+slot+offset,9222,False), (18080+slot+offset,8080,False), (56000+slot+offset,56000+slot+offset,True)]:
+            # Mac clients use loopback because their processes may not route to
+            # the VM subnet. Keep Kernel's API private like CDP and Live View.
+            for port, guest, udp in [(9222+slot+offset,9222,False), (18080+slot+offset,8080,False), (28080+slot+offset,10001,False), (56000+slot+offset,56000+slot+offset,True)]:
                 key = (port, udp)
                 if key in wanted:
                     raise RuntimeError("duplicate Hypeman forwarding port")

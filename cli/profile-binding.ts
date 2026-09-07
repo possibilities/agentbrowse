@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { CliError } from "./errors.ts";
@@ -13,6 +13,16 @@ export interface ProfileBinding {
   readonly profile: string;
   readonly backend: string;
   readonly target: Target | null;
+  readonly pendingImport?: true;
+}
+
+export function requireReadyProfile(binding: ProfileBinding | undefined): void {
+  if (binding?.pendingImport)
+    throw new CliError(
+      "profile_import_pending",
+      `Browser profile ${binding.profile} has an unfinished import`,
+      "destroy its temporary target if present, then retry profile import with the intended archive, or explicitly delete the new profile",
+    );
 }
 
 export class ProfileBindingStore {
@@ -33,6 +43,7 @@ export class ProfileBindingStore {
     validateBackendId(backend);
     return await this.withProfileLock(profile, async () => {
       const existing = await this.read(profile);
+      requireReadyProfile(existing);
       if (existing !== undefined && existing.backend !== backend) {
         throw new CliError(
           "profile_backend_mismatch",
@@ -49,6 +60,7 @@ export class ProfileBindingStore {
   async bindTarget(target: Target): Promise<ProfileBinding> {
     return await this.withProfileLock(target.profile, async () => {
       const existing = await this.read(target.profile);
+      requireReadyProfile(existing);
       if (existing !== undefined && existing.backend !== target.backend) {
         throw new CliError(
           "profile_backend_mismatch",
@@ -59,6 +71,27 @@ export class ProfileBindingStore {
       const binding = { profile: target.profile, backend: target.backend, target };
       await this.write(binding);
       return binding;
+    });
+  }
+
+  async withImport<T>(
+    profile: string,
+    backend: string,
+    operation: (resume: boolean) => Promise<T>,
+  ): Promise<T> {
+    validateName(profile);
+    validateBackendId(backend);
+    return await this.withProfileLock(profile, async () => {
+      const existing = await this.read(profile);
+      if (existing !== undefined && (!existing.pendingImport || existing.backend !== backend)) {
+        throw new CliError("profile_exists", `Browser profile ${profile} already exists`);
+      }
+      await this.write({ profile, backend, target: null, pendingImport: true });
+      // Hold the reservation lock through the operation: a concurrent retry
+      // must re-read readiness before it can overwrite an unfinished import.
+      const result = await operation(existing?.pendingImport === true);
+      await this.write({ profile, backend, target: null });
+      return result;
     });
   }
 
@@ -103,12 +136,24 @@ export class ProfileBindingStore {
     await chmod(directory, 0o700);
     const temporaryPath = `${path}.tmp-${process.pid}-${crypto.randomUUID()}`;
     try {
-      await writeFile(temporaryPath, renderProfileBinding(binding), {
-        mode: 0o600,
-        flag: "wx",
-      });
+      const file = await open(temporaryPath, "wx", 0o600);
+      try {
+        await file.writeFile(renderProfileBinding(binding));
+        await file.sync();
+      } finally {
+        await file.close();
+      }
       await rename(temporaryPath, path);
       await chmod(path, 0o600);
+      // In particular, persist an import reservation before touching its volume.
+      for (const parent of [directory, this.stateDir]) {
+        const file = await open(parent, "r");
+        try {
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+      }
     } finally {
       await rm(temporaryPath, { force: true });
     }
@@ -201,7 +246,12 @@ export function parseProfileBinding(source: string): ProfileBinding {
   const backend = requiredString(value, "backend");
   validateNameAsBinding(profile);
   validateBackendAsBinding(backend);
-  if (value.target === null) return { profile, backend, target: null };
+  if (value.pendingImport !== undefined && value.pendingImport !== true)
+    throw invalidBinding("profile import state is invalid");
+  const importing = value.pendingImport === true ? { pendingImport: true as const } : {};
+  if (value.target === null) return { profile, backend, target: null, ...importing };
+  if (value.pendingImport === true)
+    throw invalidBinding("an importing profile cannot have a published target");
   if (!isObject(value.target)) throw invalidBinding("profile binding target is invalid");
   const name = requiredString(value.target, "name");
   const container = requiredString(value.target, "container");
@@ -224,6 +274,7 @@ export function renderProfileBinding(binding: ProfileBinding): string {
       version: PROFILE_BINDING_RECEIPT_VERSION,
       profile: binding.profile,
       backend: binding.backend,
+      ...(binding.pendingImport ? { pendingImport: true } : {}),
       target:
         binding.target === null
           ? null

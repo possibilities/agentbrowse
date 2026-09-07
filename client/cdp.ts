@@ -70,6 +70,7 @@ export class CdpConnection {
     method: string,
     params: Record<string, unknown> = {},
     sessionId?: string,
+    timeoutMs = CDP_TIMEOUT_MS,
   ): Promise<T> {
     if (this.closed || this.socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("CDP connection is not open"));
@@ -78,8 +79,8 @@ export class CdpConnection {
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`CDP ${method} timed out after ${CDP_TIMEOUT_MS} ms`));
-      }, CDP_TIMEOUT_MS);
+        reject(new Error(`CDP ${method} timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,

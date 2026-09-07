@@ -1,9 +1,11 @@
 import type { BrowserVideoConfig } from "../config/deployment.ts";
 import { CliError } from "./errors.ts";
+import type { KernelBrowser } from "./kernel.ts";
 import {
   type BrowserAccess,
   type BrowserProfile,
   CHROMIUM_FLAGS,
+  PROFILE_DATA_PATH,
   PROFILE_MOUNT_PATH,
   profileFor,
   type Target,
@@ -87,7 +89,8 @@ export interface FarmBackend {
   runBrowser(input: RunBrowserInput): Promise<void>;
   startContainer(container: string): Promise<void>;
   waitReady(target: Target, timeoutSeconds?: number): Promise<void>;
-  removeContainer(container: string): Promise<void>;
+  removeContainer(container: string, force?: boolean): Promise<void>;
+  withKernel<T>(target: Target, operation: (kernel: KernelBrowser) => Promise<T>): Promise<T>;
   missingImageRecovery(image: string): string;
 }
 
@@ -104,7 +107,9 @@ function hasProfileMount(state: ContainerState, profile: BrowserProfile): boolea
     (mount) =>
       mount.type === "volume" &&
       mount.name === profile.volume &&
-      mount.destination === PROFILE_MOUNT_PATH &&
+      (mount.destination === PROFILE_MOUNT_PATH ||
+        (state.labels["dev.agentbrowse.profile.layout"] === undefined &&
+          mount.destination === PROFILE_DATA_PATH)) &&
       mount.writable,
   );
 }

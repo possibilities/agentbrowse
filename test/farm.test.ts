@@ -15,6 +15,7 @@ import type {
 import { drift, verifyCommonOwnership } from "../cli/backend.ts";
 import { CliError } from "../cli/errors.ts";
 import { BrowserFarm } from "../cli/farm.ts";
+import type { KernelBrowser } from "../cli/kernel.ts";
 import {
   type BrowserProfile,
   CHROMIUM_FLAGS,
@@ -96,6 +97,12 @@ function profileState(profile: BrowserProfile): ProfileState {
 }
 
 class FakeBackend implements FarmBackend {
+  async withKernel<T>(
+    _target: ReturnType<typeof targetFor>,
+    _operation: (kernel: KernelBrowser) => Promise<T>,
+  ): Promise<T> {
+    throw new Error("unexpected Kernel call");
+  }
   readonly id = "hypeman";
   readonly type = "hypeman" as const;
   readonly maxTargets = 1_000;

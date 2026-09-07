@@ -33,6 +33,7 @@ interface ParsedDestroy {
   command: "destroy";
   name: string;
   json: boolean;
+  force?: boolean;
 }
 
 interface ParsedView {
@@ -73,6 +74,14 @@ type Parsed =
   | ParsedProfileCreate
   | ParsedProfileList
   | ParsedProfileDelete
+  | {
+      command: "profile";
+      action: "export" | "import";
+      name: string;
+      path: string;
+      backend?: string;
+      json: boolean;
+    }
   | ParsedResolve
   | ParsedView
   | { command: "list"; json: boolean }
@@ -144,7 +153,7 @@ export function parseArgs(argv: readonly string[]): Parsed {
       if (args.length !== 2) throw new UsageError(`unexpected argument: ${args[2]}`);
       return { command, action, json };
     }
-    if (action !== "create" && action !== "delete") {
+    if (action !== "create" && action !== "delete" && action !== "export" && action !== "import") {
       throw new UsageError(
         action === undefined ? "profile requires an action" : `unknown profile action: ${action}`,
       );
@@ -152,6 +161,23 @@ export function parseArgs(argv: readonly string[]): Parsed {
     const profileName = args[2];
     if (profileName === undefined || profileName.startsWith("--")) {
       throw new UsageError(`profile ${action} requires a Browser profile name`);
+    }
+    if (action === "export" || action === "import") {
+      const path = args[3];
+      if (!path || path.startsWith("--"))
+        throw new UsageError(`profile ${action} requires an archive path`);
+      if (action === "import" && args.length === 6 && args[4] === "--backend") {
+        return {
+          command,
+          action,
+          name: profileName,
+          path,
+          backend: takeValue(args, 4, "--backend"),
+          json,
+        };
+      }
+      if (args.length !== 4) throw new UsageError(`unexpected argument: ${args[4]}`);
+      return { command, action, name: profileName, path, json };
     }
     if (args.length !== 3) throw new UsageError(`unexpected argument: ${args[3]}`);
     return { command, action, name: profileName, json };
@@ -165,6 +191,7 @@ export function parseArgs(argv: readonly string[]): Parsed {
   }
 
   if (command === "destroy") {
+    if (args.length === 3 && args[2] === "--force") return { command, name, json, force: true };
     if (args.length !== 2) throw new UsageError(`unexpected argument: ${args[2]}`);
     return { command, name, json };
   }
@@ -441,12 +468,22 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
         process.stdout.write(
           parsed.json ? success(profileListPayload(result)) : humanProfileList(result),
         );
+      } else if (parsed.action === "export" || parsed.action === "import") {
+        const result =
+          parsed.action === "export"
+            ? await farm.exportProfile(parsed.name, parsed.path)
+            : await farm.importProfile(parsed.name, parsed.path, parsed.backend);
+        process.stdout.write(
+          parsed.json
+            ? success(result)
+            : `${parsed.action === "export" ? "Exported" : "Imported"} Browser profile ${result.name} on ${result.backend}: ${result.path}\n`,
+        );
       } else {
         const result = await farm.deleteProfile(parsed.name);
         process.stdout.write(parsed.json ? success(result) : humanProfileDelete(result));
       }
     } else {
-      const result = await farm.destroy(parsed.name);
+      const result = await farm.destroy(parsed.name, undefined, undefined, parsed.force);
       process.stdout.write(parsed.json ? success(result) : humanDestroy(result));
     }
     return 0;

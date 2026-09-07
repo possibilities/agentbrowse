@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -14,7 +14,8 @@ import type {
 import { CliError } from "../cli/errors.ts";
 import { BrowserFarm } from "../cli/farm.ts";
 import { BrowserFleet } from "../cli/fleet.ts";
-import type { BrowserAccess, BrowserProfile } from "../cli/model.ts";
+import { KernelBrowser } from "../cli/kernel.ts";
+import type { BrowserAccess, BrowserProfile, Target } from "../cli/model.ts";
 import { PROFILE_MOUNT_PATH, PROFILE_SCHEMA_VERSION } from "../cli/model.ts";
 import { ProfileBindingStore } from "../cli/profile-binding.ts";
 
@@ -33,12 +34,20 @@ function runtimeDir(): string {
 }
 
 class FleetBackend implements FarmBackend {
+  kernel = new KernelBrowser("http://unused");
+  async withKernel<T>(
+    _target: Target,
+    operation: (kernel: KernelBrowser) => Promise<T>,
+  ): Promise<T> {
+    return await operation(this.kernel);
+  }
   readonly type = "hypeman" as const;
   readonly events: string[] = [];
   readonly probeSignals: Array<AbortSignal | undefined> = [];
   probeError: CliError | null = null;
   verifyError: CliError | null = null;
   runError: CliError | null = null;
+  removeError: CliError | null = null;
   imagePresent = true;
   state: ContainerState | undefined;
   profiles = new Map<string, ProfileState>();
@@ -180,6 +189,7 @@ class FleetBackend implements FarmBackend {
 
   async removeContainer(): Promise<void> {
     this.events.push("remove");
+    if (this.removeError !== null) throw this.removeError;
     this.state = undefined;
   }
 
@@ -191,6 +201,95 @@ class FleetBackend implements FarmBackend {
 function fleet(backends: readonly FleetBackend[], directory = runtimeDir()): BrowserFleet {
   return new BrowserFleet(backends.map((backend) => new BrowserFarm(backend, directory)));
 }
+
+test("native import reserves the new profile, retains failed state, and can resume on its exact backend", async () => {
+  const archive = join(runtimeDir(), "profile.tar.zst");
+  writeFileSync(archive, Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 1]));
+  const remote = new FleetBackend("remote");
+  const local = new FleetBackend("local");
+  const browsers = fleet([remote, local]);
+  let shouldFail = true;
+  local.kernel = new (class extends KernelBrowser {
+    override async importProfile() {
+      await expect(browsers.provisionProfile({ profile: "imported" })).rejects.toMatchObject({
+        code: "profile_import_pending",
+      });
+      if (shouldFail) throw new CliError("kernel_request_failed", "bad archive");
+    }
+  })("http://unused");
+  await expect(browsers.importProfile("imported", archive, "local")).rejects.toMatchObject({
+    code: "kernel_request_failed",
+  });
+  expect(local.state).toBeUndefined();
+  expect(local.profiles.has("imported")).toBe(true);
+  expect(await browsers.bindings.read("imported")).toMatchObject({
+    backend: "local",
+    target: null,
+    pendingImport: true,
+  });
+  await expect(browsers.createProfile("imported")).rejects.toMatchObject({
+    code: "profile_import_pending",
+  });
+  await expect(browsers.importProfile("imported", archive, "remote")).rejects.toMatchObject({
+    code: "profile_backend_mismatch",
+  });
+  shouldFail = false;
+  await browsers.importProfile("imported", archive);
+  expect(await browsers.bindings.read("imported")).toEqual({
+    profile: "imported",
+    backend: "local",
+    target: null,
+  });
+  expect(local.state).toBeUndefined();
+  expect(remote.events).not.toContain("run");
+  await expect(browsers.importProfile("imported", archive)).rejects.toMatchObject({
+    code: "profile_exists",
+  });
+  expect((await browsers.provisionProfile({ profile: "imported" })).backend).toBe("local");
+});
+
+test("an import and cleanup failure retains both errors and the reserved target", async () => {
+  const archive = join(runtimeDir(), "profile.tar.zst");
+  writeFileSync(archive, Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 1]));
+  const backend = new FleetBackend("local");
+  backend.removeError = new CliError("profile_shutdown_failed", "shutdown unavailable");
+  backend.kernel = new (class extends KernelBrowser {
+    override async importProfile() {
+      throw new Error("archive extraction failed");
+    }
+  })("http://unused");
+  const browsers = fleet([backend]);
+  const error = await browsers.importProfile("imported", archive).catch((error) => error);
+  expect(error.code).toBe("profile_cleanup_failed");
+  expect(error.message).toContain("archive extraction failed");
+  expect(error.message).toContain("shutdown unavailable");
+  expect(backend.state).toBeDefined();
+  expect(await browsers.bindings.read("imported")).toMatchObject({ pendingImport: true });
+});
+
+test("export refuses an active profile and cleans up only its temporary idle target", async () => {
+  const backend = new FleetBackend("local");
+  const browsers = fleet([backend]);
+  const target = await browsers.provisionProfile({ profile: "signed-in" });
+  const path = join(runtimeDir(), "profile.tar.zst");
+  let exported = false;
+  backend.kernel = new (class extends KernelBrowser {
+    override async exportProfile() {
+      exported = true;
+    }
+  })("http://unused");
+  await expect(browsers.exportProfile("signed-in", path)).rejects.toMatchObject({
+    code: "profile_in_use",
+  });
+  expect(exported).toBe(false);
+  expect(backend.state).toBeDefined();
+  await browsers.destroy(target.name);
+  expect(await browsers.exportProfile("signed-in", path)).toMatchObject({ backend: "local", path });
+  expect(exported).toBe(true);
+  expect(backend.state).toBeUndefined();
+  expect(backend.profiles.has("signed-in")).toBe(true);
+  expect(await browsers.targetForProfile("signed-in")).toBeUndefined();
+});
 
 test("available first backend wins without touching Apple", async () => {
   const remoteDocker = new FleetBackend("remote-docker");
@@ -429,4 +528,44 @@ test("concurrent first bindings choose exactly one profile home", async () => {
   const binding = await store.read("research");
   expect(binding).toBeDefined();
   expect(["remote-docker", "apple-container-local"]).toContain(binding!.backend);
+});
+
+test("concurrent import retries cannot overwrite a profile that just became ready", async () => {
+  const store = new ProfileBindingStore(runtimeDir());
+  await expect(
+    store.withImport("research", "local", async () => {
+      throw new Error("interrupted import");
+    }),
+  ).rejects.toThrow("interrupted import");
+  let entered!: () => void;
+  let release!: () => void;
+  const active = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const first = store.withImport("research", "local", async (resume) => {
+    expect(resume).toBe(true);
+    calls += 1;
+    entered();
+    await gate;
+  });
+  await active;
+  const second = store.withImport("research", "local", async () => {
+    calls += 1;
+  });
+  const results = Promise.allSettled([first, second]);
+  release();
+  expect(await results).toMatchObject([
+    { status: "fulfilled" },
+    { status: "rejected", reason: { code: "profile_exists" } },
+  ]);
+  expect(calls).toBe(1);
+  expect(await store.read("research")).toEqual({
+    profile: "research",
+    backend: "local",
+    target: null,
+  });
 });

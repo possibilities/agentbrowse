@@ -113,13 +113,26 @@ async function dispatch(
     case "list":
       return listPayload(await farm.list());
     case "destroy":
-      return await farm.destroy(args["name"] as string);
+      return await farm.destroy(
+        args["name"] as string,
+        undefined,
+        undefined,
+        args["force"] === true,
+      );
     case "profile_create":
       return await farm.createProfile(args["name"] as string);
     case "profile_list":
       return profileListPayload(await farm.listProfiles());
     case "profile_delete":
       return await farm.deleteProfile(args["name"] as string);
+    case "profile_export":
+      return await farm.exportProfile(args["name"] as string, args["path"] as string);
+    case "profile_import":
+      return await farm.importProfile(
+        args["name"] as string,
+        args["path"] as string,
+        args["backend"] as string | undefined,
+      );
     case "resolve": {
       const session = (args["session"] as string | undefined) ?? "default";
       return resolvePayload(await resolveWithTimeout(session, farm));
