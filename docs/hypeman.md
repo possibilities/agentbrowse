@@ -19,6 +19,9 @@ The Mac requires Homebrew; the installer acquires missing caddy/e2fsprogs.
 The Linux host requires working SSH, passwordless sudo for installation and
 lifecycle, Debian APT, Tailscale and hardware virtualization (`/dev/kvm`).
 Artbird provides generic host setup; AgentBrowse owns these workload prerequisites.
+The installer persists Linux IPv4 forwarding in its owned
+`/etc/sysctl.d/70-agentbrowse-hypeman.conf`; networking must survive a reboot
+without Docker having initialized the host first.
 The installer stages Linux code into a root-owned directory before execution.
 
 Installation preserves the existing Hypeman data roots, credentials, VM IDs

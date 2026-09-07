@@ -19,9 +19,25 @@ def load(name, path):
 
 host = load("host", ROOT / "host/agentbrowse-hypeman")
 migration = load("migration", ROOT / "host/migrate-profiles.py")
+installer = load("installer", ROOT / "host/install.py")
 
 
 class HostSafetyTests(unittest.TestCase):
+    def test_linux_forwarding_is_persistent_and_refuses_foreign_files(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "forwarding.conf"
+            with patch.object(installer, "run", return_value=SimpleNamespace(stdout="1\n")):
+                installer.configure_linux_forwarding(path)
+                first_inode = path.stat().st_ino
+                installer.configure_linux_forwarding(path)
+                self.assertEqual(first_inode, path.stat().st_ino)
+                self.assertIn("net.ipv4.ip_forward = 1", path.read_text())
+                path.write_text("# another owner\nnet.ipv4.ip_forward = 0\n")
+                with self.assertRaisesRegex(RuntimeError, "foreign"):
+                    installer.configure_linux_forwarding(path)
+                self.assertIn("ip_forward = 0", path.read_text())
+
     def test_caddy_cleanup_requires_exact_owned_orphan(self):
         root = Path("/home/operator/.local/share/ab-hypeman")
         command = "/opt/homebrew/bin/caddy run --config " + str(root / "data/caddy/config.json")

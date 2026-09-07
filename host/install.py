@@ -20,6 +20,24 @@ def run(*args, **kwargs):
     return subprocess.run([str(a) for a in args], check=True, **kwargs)
 
 
+def configure_linux_forwarding(path=Path("/etc/sysctl.d/70-agentbrowse-hypeman.conf")):
+    marker = "# Managed by AgentBrowse Hypeman host installer\n"
+    if path.is_symlink() or (path.exists() and (
+        not path.is_file() or path.stat().st_uid != os.geteuid() or not path.read_text().startswith(marker)
+    )):
+        raise RuntimeError("refusing foreign Hypeman forwarding configuration")
+    content = marker + "net.ipv4.ip_forward = 1\n"
+    if not path.exists() or path.read_text() != content:
+        temporary = path.with_name(path.name + ".new")
+        with temporary.open("x") as output:
+            output.write(content)
+        temporary.chmod(0o644)
+        temporary.replace(path)
+    run("sysctl", "--load", path)
+    if run("sysctl", "-n", "net.ipv4.ip_forward", capture_output=True, text=True).stdout.strip() != "1":
+        raise RuntimeError("Hypeman requires IPv4 forwarding")
+
+
 def install():
     if MAC:
         if platform.machine() != "arm64":
@@ -48,6 +66,16 @@ def install():
     else:
         root.mkdir(mode=0o700, parents=True)
         api["write_private"](root / "OWNED", api["MARKER"] + "\n")
+    if not MAC:
+        configure_linux_forwarding()
+        unit = Path("/etc/systemd/system/agentbrowse-hypeman.service")
+        if unit.exists():
+            expected_start = "ExecStart=/usr/bin/python3 %s --root %s serve" % (destination / "agentbrowse-hypeman", root)
+            if unit.is_symlink() or unit.stat().st_uid != 0 or expected_start not in unit.read_text().splitlines():
+                raise RuntimeError("refusing foreign Hypeman systemd service")
+            # Recover a service that failed at boot because a prerequisite was
+            # absent before auditing its instances and replacing helper bytes.
+            run(sys.executable, destination / "agentbrowse-hypeman", "enable")
     receipt = root / "host-install.json"
     pending = root / "pending-host-install.json"
     files = ("agentbrowse-hypeman", "hypeman-relay.py", "install.py", "migrate-profiles.py")
