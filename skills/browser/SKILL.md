@@ -8,12 +8,13 @@ description: >-
 
 # Browser — durable agent and human interaction
 
-Use the two existing MCP integrations through Executor:
+Use the two directly connected MCP servers as one browser workflow:
 
 - `agent_browser` operates pages, tabs, forms, snapshots, and downloads.
 - `agentbrowse` owns Browser targets, durable profiles, and session resolution.
 
-Discover the relevant namespace and describe each tool before calling it.
+Select the relevant server in the harness catalog or tool search and inspect
+the tool schema before calling it.
 AgentBrowse's `guide` explains lifecycle; agent-browser's
 `agent_browser_skills_get` returns its installed driver guide. For that guide,
 pass `names: ["core"]` and the task's stable `session`; request `full` only for

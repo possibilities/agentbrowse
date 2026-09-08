@@ -33,14 +33,11 @@ mechanism. Do not delete the original profile as a side effect of copying it.
 
 ## Result handling
 
-Executor wraps MCP calls in its own success/error result. Check that outer
-status before interpreting the downstream content.
-
-AgentBrowse publishes the fleet envelope `{schema_version, ok, error, data}`
-in structured content and standalone JSON text. On a downstream refusal,
-Executor may retain that JSON under `error.details.content`; read its code and
-recovery before retrying. Session resolution's exact target is
-`data.target.name` inside this envelope.
+Inspect MCP `isError` and AgentBrowse's `{schema_version, ok, error, data}`
+envelope in `structuredContent`. If the host returns only content blocks,
+parse the standalone JSON block and keep diagnostic prose separate. Read
+`error.code` and `recovery` before retrying or claiming success.
+Session resolution returns the exact target in `data.target.name`.
 
 The agent-browser driver has its own returned schema. Inspect its declared
 result and content blocks rather than assuming the AgentBrowse envelope.
