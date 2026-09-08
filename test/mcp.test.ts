@@ -10,9 +10,11 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import * as z4mini from "zod/v4-mini";
@@ -20,6 +22,85 @@ import { CONTRACT, type ContractCommand } from "../cli/contract.ts";
 import { ANNOTATION_EXCEPTIONS, agentTools, serverInstructions } from "../cli/mcp-tools.ts";
 
 const MAIN = new URL("../cli/main.ts", import.meta.url).pathname;
+
+describe("stdio EOF shutdown", () => {
+  for (const mode of ["handshake", "before-initialize"]) {
+    test(`exits zero without a signal or terminal envelope (${mode})`, async () => {
+      const sandbox = mkdtempSync(join(tmpdir(), "agentbrowse-mcp-eof-"));
+      const state = join(sandbox, "state");
+      const child = spawn("bun", [MAIN, "mcp"], {
+        env: {
+          PATH: process.env["PATH"] ?? "",
+          HOME: sandbox,
+          XDG_DATA_HOME: join(sandbox, "data"),
+          XDG_STATE_HOME: state,
+          AGENTBROWSE_CONFIG: join(sandbox, "config.json"),
+          AGENTBROWSE_STATE_DIR: state,
+          AGENTBROWSE_RUNTIME_DIR: join(sandbox, "runtime"),
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const exit = new Promise<{ code: number | null; signal: string | null }>(
+        (resolve, reject) => {
+          child.once("error", reject);
+          child.once("exit", (code, signal) => resolve({ code, signal }));
+        },
+      );
+      let forced = false;
+      const timeout = setTimeout(() => {
+        forced = true;
+        child.kill("SIGKILL");
+      }, 5000);
+      const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+      const messages: Record<string, unknown>[] = [];
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      const send = (value: unknown) => child.stdin.write(`${JSON.stringify(value)}\n`);
+      const request = async (id: number, method: string, params: unknown) => {
+        send({ jsonrpc: "2.0", id, method, params });
+        for (;;) {
+          const line = await lines.next();
+          if (line.done) throw new Error("MCP closed before replying");
+          const message = JSON.parse(line.value);
+          messages.push(message);
+          if (message.id === id) return message;
+        }
+      };
+      try {
+        if (mode !== "before-initialize") {
+          const initialized = await request(1, "initialize", {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "eof-test", version: "1" },
+          });
+          expect(initialized.result.serverInfo.name).toBe("agentbrowse");
+          send({ jsonrpc: "2.0", method: "notifications/initialized" });
+          const listed = await request(2, "tools/list", {});
+          expect(listed.result.tools.some((tool: { name: string }) => tool.name === "guide")).toBe(
+            true,
+          );
+          const called = await request(3, "tools/call", { name: "guide", arguments: {} });
+          expect(called.result.structuredContent.ok).toBe(true);
+        }
+        child.stdin.end();
+        for await (const line of lines) messages.push(JSON.parse(line));
+        expect(await exit).toEqual({ code: 0, signal: null });
+        expect(forced).toBe(false);
+        expect(stderr).toBe("");
+        expect(messages.every((message) => message["jsonrpc"] === "2.0")).toBe(true);
+        expect(messages.length).toBe(mode === "before-initialize" ? 0 : 3);
+        expect(existsSync(state)).toBe(false);
+      } finally {
+        clearTimeout(timeout);
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        await exit;
+        rmSync(sandbox, { recursive: true, force: true });
+      }
+    }, 10000);
+  }
+});
 
 const TOOLS = agentTools(CONTRACT);
 
