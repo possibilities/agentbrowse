@@ -46,6 +46,8 @@ restore old live target identities or merge Chromium files from different profil
 
 The September 10, 2026 cleanup stores backups under
 `profile-backups/2026-09-10-generated` inside each host's AgentBrowse Hypeman root.
+The local `2026-09-10-generated-late` directory covers one additional detached
+profile from the deployment window.
 Each directory has `manifest.json` and per-volume `metadata.json`, `verified.json`,
 and `data.raw.zst`. Local binding copies are under
 `~/.local/state/agentbrowse/archived-generated-bindings/BACKEND/` on the client.
