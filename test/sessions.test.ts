@@ -83,7 +83,8 @@ test("ordinary close releases the VM, temporary volume and receipt; reopening st
   expect(destroyed).toEqual([first.result.name]);
   expect(await sessions.list()).toEqual([]);
   const second = await sessions.launch("research");
-  expect(second.receipt.profile).not.toBe(first.receipt.profile);
+  expect(second.receipt.profile).toBe(first.receipt.profile);
+  expect(second.receipt.lease).not.toBe(first.receipt.lease);
   expect(await sessions.release("research", first.receipt.lease)).toEqual({ released: false });
   expect(await sessions.read("research")).toEqual(second.receipt);
 });

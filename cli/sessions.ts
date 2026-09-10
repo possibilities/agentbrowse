@@ -175,7 +175,7 @@ export class ProviderSessions {
     const receipt: SessionReceipt = {
       version: 1,
       session,
-      profile: profile ?? `tmp-${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`,
+      profile: profile ?? legacy,
       persistent: profile !== undefined,
       lease: crypto.randomUUID().replaceAll("-", ""),
       createdAt: new Date().toISOString(),

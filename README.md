@@ -100,7 +100,7 @@ the exact resolved target, and the owner issues no driver commands until the
 handoff is terminal. Use another saved profile only for an intentional identity.
 
 The first launch chooses an available backend with disk capacity, then binds the
-profile there. New disposable incarnations receive new profiles; saved profiles
+profile there. Fresh disposable launches start with empty profile storage; saved profiles
 retain their backend home. No state is silently merged or moved across hosts.
 
 Failed launches retain recoverable ownership. `agentbrowse session list --json`
