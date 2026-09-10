@@ -182,3 +182,48 @@ test("provider failures remain valid protocol responses", async () => {
   expect(wrongEngine.error).toContain("require the chrome engine");
   expect(farm.provisioned).toHaveLength(0);
 });
+
+test("provider carries session leases through launch and close", async () => {
+  const farm = new FakeProviderFarm();
+  const result = await farm.provisionProfile({ profile: "temporary" });
+  const released: unknown[] = [];
+  const sessions = {
+    async launch(session: string) {
+      return { result, receipt: { session, lease: "exact-lease" } };
+    },
+    async release(...args: unknown[]) {
+      released.push(args);
+      return { released: true };
+    },
+  } as unknown as import("../cli/sessions.ts").ProviderSessions;
+  const launched = JSON.parse(
+    await handleProviderRequest(
+      request("browser.launch", "browser.provider", { session: "task" }),
+      {
+        ...farm,
+        provisionProfile: farm.provisionProfile.bind(farm),
+        destroy: farm.destroy.bind(farm),
+        sessions,
+      },
+    ),
+  );
+  expect(launched.browser.cleanup.session).toBe("task");
+  expect(launched.browser.cleanup.lease).toBe("exact-lease");
+  await handleProviderRequest(
+    request("browser.close", "browser.provider", launched.browser.cleanup),
+    {
+      ...farm,
+      provisionProfile: farm.provisionProfile.bind(farm),
+      destroy: farm.destroy.bind(farm),
+      sessions,
+    },
+  );
+  expect(released).toEqual([
+    [
+      "task",
+      "exact-lease",
+      { backend: result.backend, browserTarget: result.name, browserProfile: result.profile },
+    ],
+  ]);
+  expect(farm.destroyed).toEqual([]);
+});

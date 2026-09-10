@@ -236,6 +236,8 @@ const APPENDING: ReadonlySet<string> = new Set<string>();
  * static in-process contract, is not.
  */
 const NETWORK: ReadonlySet<string> = new Set([
+  "session prepare",
+  "session release",
   "create",
   "list",
   "destroy",
@@ -268,7 +270,9 @@ function annotations(path: string[], leaf: ContractCommand): ToolAnnotations {
   );
   return {
     readOnlyHint: leaf.mutates === false,
-    destructiveHint: leaf.mutates === true && (REMOVING_VERBS.has(leaf.name) || writesOut),
+    destructiveHint:
+      leaf.mutates === true &&
+      (REMOVING_VERBS.has(leaf.name) || full === "session release" || writesOut),
     idempotentHint: !APPENDING.has(full),
     openWorldHint: NETWORK.has(full),
   };

@@ -97,31 +97,27 @@ waits, uploads, and downloads belong to the third-party agent-browser CLI,
 which drives the target agentbrowse provisioned; that boundary is deliberate,
 and nothing here reads or manipulates page content.
 
-Three lifetimes are deliberately distinct, and confusing them is the mistake
-this tool exists to prevent:
+A session is a task's driver identity. New sessions are disposable by default:
+open one with agent-browser, then close it to remove both VM and temporary
+profile storage. Before a task needing saved sign-ins, call session prepare
+SESSION --profile personal. That leases the saved profile exclusively; successive
+owners accumulate sign-ins in it. profile_leased means wait for the owner,
+not drive their session. Existing profiles from earlier versions stay saved.
 
-  session  the stable name an agent puts on every agent-browser command
-  profile  the durable volume holding cookies, storage, and authentication
-  target   one live container incarnation, addressable and short-lived
+Only a target name addresses a live browser. Resolve SESSION and read
+.data.target.name for human handoff; never substitute the session or profile.
+While the human may control that target, do not issue driver commands.
+Close through agent-browser only after every handoff is terminal. Saved profiles
+survive; disposable profiles are deleted. Direct destroy preserves a profile
+and is not the normal session cleanup operation.
 
-Only a target name addresses a live browser. When a human must take over the
-exact prepared page, run \`agentbrowse resolve SESSION --json\` and read
-.data.target.name from the successful envelope; never substitute the session
-or profile name for that incarnation, and never keep a resolved name across a
-relaunch.
-
-On a machine configured this way, agent-browser launches sessions through
-agentbrowse's provider, so an agent normally never calls create or destroy at
-all: launching the session provisions the target, and \`agent-browser close\`
-destroys it. Reach for create only for a target that is not backed by a driver
-session, and for destroy only to reclaim capacity from one that is stranded.
-The farm is finite; backend_capacity_exhausted, slot_in_use, and no_free_slots
-all mean some earlier target was never released.
-
-Destroying a target preserves its Browser profile, and therefore its
-authentication, on purpose. Deleting the profile is the irreversible one:
-\`profile delete\` discards a human's signed-in state, so do it only when the
-human explicitly asks to remove that browser state permanently.
+At most 16 unfinished disposable sessions are retained, including failed
+launches. If the driver reports a generic plugin failure, inspect session list.
+After confirming your task and human handoffs have ended, session release
+SESSION --lease LEASE recovers that exact receipt. Failed shutdown retains
+state for recovery. No timer steals an active lease. Do not release other
+agents' sessions based only on age. Saved profile deletion requires an explicit
+request to remove that state.
 
 view is the handoff verb, and it opens the Live View on the operator's own
 display. Prefer the attention skill for a durable human interaction with an
@@ -129,6 +125,34 @@ outcome an agent can wait on; reach for view when the human is present and
 wants to look now.`;
 
 const ERROR_CODES: readonly ContractErrorCode[] = [
+  {
+    code: "invalid_session",
+    meaning: "The driver session name is empty, too long, or contains control characters.",
+  },
+  {
+    code: "invalid_session_receipt",
+    meaning: "A provider session receipt is malformed; no automatic cleanup is attempted.",
+  },
+  {
+    code: "session_already_prepared",
+    meaning: "This session already owns another profile.",
+    recovery: "Close or release the current lease before selecting another profile.",
+  },
+  {
+    code: "profile_leased",
+    meaning: "A saved profile already belongs to another session or target.",
+    recovery: "Wait for its owner to close; never use their driver session or steal the lease.",
+  },
+  {
+    code: "disposable_capacity_exhausted",
+    meaning: "All 16 unfinished disposable session slots are occupied.",
+    recovery:
+      "Inspect session list and release only exact leases whose work and human handoffs have ended.",
+  },
+  {
+    code: "session_target_changed",
+    meaning: "Cleanup found a different or ambiguous target and refused to act.",
+  },
   {
     code: "profile_exists",
     meaning: "An import would replace an existing Browser profile.",
@@ -471,7 +495,7 @@ export const CONTRACT: Contract = {
       session:
         "The stable name an agent puts on every agent-browser command. Names the work, not a browser.",
       profile:
-        "A durable backend volume holding cookies, storage, and authentication. Outlives every target and is derived from the session name.",
+        "Browser cookies, storage and authentication. Saved profiles outlive tasks; disposable profiles are removed on close. Select personal explicitly before authenticated work.",
       target:
         "One live container incarnation of a profile: the only name that addresses a running browser, and the exact object handed to a human.",
       slot: "A port slot from 0 to 999 fixing a target's CDP, Live View HTTP, and WebRTC ports. One target per slot.",
@@ -492,11 +516,11 @@ export const CONTRACT: Contract = {
       },
     },
     error_codes: ERROR_CODES,
-    read_only_commands: ["list", "profile list", "resolve", "guide"],
+    read_only_commands: ["list", "profile list", "session list", "resolve", "guide"],
     agent_defaults: [
       "Resolve, never guess: `agentbrowse resolve SESSION --json` names the exact live target incarnation.",
       "Let agent-browser provision and close targets through the provider; call create only for a target no driver session owns.",
-      "Destroy finished targets so the finite farm keeps capacity; the profile, and its authentication, survives.",
+      "Close task sessions: disposable storage is removed, while explicitly saved profiles retain sign-ins.",
     ],
   },
   global_arguments: [
@@ -516,6 +540,58 @@ export const CONTRACT: Contract = {
     },
   ],
   commands: [
+    {
+      name: "session",
+      summary: "Own disposable browsing or lease a saved profile",
+      audience: "agent",
+      mutates: true,
+      arguments: [],
+      subcommands: [
+        {
+          name: "prepare",
+          summary: "Prepare a task session, optionally leasing a saved profile",
+          audience: "agent",
+          mutates: true,
+          guidance:
+            "Public browsing needs no preparation: open a unique task session directly and close it to discard its storage. For your saved sign-ins, prepare a unique task session with profile personal before driver open. Only one session may own that profile. Keep the returned lease for recovery; a profile_leased result means wait for its owner, never use their session. Repeating prepare for the same session is idempotent.",
+          arguments: [
+            { ...SESSION_ARGUMENT, required: true },
+            {
+              name: "--profile",
+              type: "string",
+              description:
+                "Saved profile to lease; use personal for accumulated human sign-ins. Omit for disposable browsing.",
+            },
+          ],
+        },
+        {
+          name: "list",
+          summary: "List owned sessions, profile retention, exact leases and targets",
+          audience: "agent",
+          mutates: false,
+          arguments: [],
+          guidance:
+            "Prepared and failed sessions remain visible until closed or explicitly released. Age alone is not permission to interrupt an agent or human handoff.",
+        },
+        {
+          name: "release",
+          summary: "Recover one exact session lease and clean up its browser",
+          audience: "agent",
+          mutates: true,
+          guidance:
+            "Normally close through the driver. For a failed launch or abandoned session, release its exact lease only after confirming no active work or human handoff remains. Removes disposable storage; preserves saved profiles. A stale lease cannot close a replacement session.",
+          arguments: [
+            { ...SESSION_ARGUMENT, required: true },
+            {
+              name: "--lease",
+              type: "string",
+              required: true,
+              description: "Exact lease returned by session prepare or session list",
+            },
+          ],
+        },
+      ],
+    },
     {
       name: "create",
       summary: "Create or start one CDP + Live View browser target",

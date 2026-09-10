@@ -17,6 +17,8 @@ import { type ProfileArchiveResult, validateProfileArchive } from "./kernel.ts";
 import { profileFor, validateName } from "./model.ts";
 import { ProfileBindingStore, requireReadyProfile } from "./profile-binding.ts";
 
+import { ProviderSessions } from "./sessions.ts";
+
 const AVAILABILITY_CODES = new Set([
   "browser_host_unresolved",
   "browser_host_unreachable",
@@ -32,6 +34,7 @@ interface AvailabilityOutcome {
 export class BrowserFleet {
   private readonly farmById: ReadonlyMap<string, BrowserFarm>;
   readonly bindings: ProfileBindingStore;
+  readonly sessions: ProviderSessions;
 
   constructor(
     readonly farms: readonly BrowserFarm[],
@@ -39,6 +42,7 @@ export class BrowserFleet {
   ) {
     this.farmById = new Map(farms.map((farm) => [farm.backend.id, farm]));
     this.bindings = new ProfileBindingStore(stateDir);
+    this.sessions = new ProviderSessions(this, stateDir);
   }
 
   async create(options: CreateOptions): Promise<CreateResult> {

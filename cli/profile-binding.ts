@@ -159,7 +159,7 @@ export class ProfileBindingStore {
     }
   }
 
-  private async withProfileLock<T>(profile: string, operation: () => Promise<T>): Promise<T> {
+  async withProfileLock<T>(profile: string, operation: () => Promise<T>): Promise<T> {
     validateName(profile);
     const directory = join(this.stateDir, "profile-locks");
     await mkdir(directory, { recursive: true, mode: 0o700 });

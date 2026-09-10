@@ -69,6 +69,15 @@ interface ParsedProfileDelete {
 }
 
 type Parsed =
+  | {
+      command: "session";
+      action: "prepare" | "release";
+      session: string;
+      profile?: string;
+      lease?: string;
+      json: boolean;
+    }
+  | { command: "session"; action: "list"; json: boolean }
   | ParsedCreate
   | ParsedDestroy
   | ParsedProfileCreate
@@ -145,6 +154,23 @@ export function parseArgs(argv: readonly string[]): Parsed {
   if (command === "list") {
     if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
     return { command, json };
+  }
+  if (command === "session") {
+    const action = args[1];
+    if (action === "list" && args.length === 2) return { command, action, json };
+    const session = args[2];
+    if (!session || session.startsWith("--"))
+      throw new UsageError("session prepare/release requires a session name");
+    if (action === "prepare") {
+      if (args.length === 3) return { command, action, session, json };
+      if (args.length === 5 && args[3] === "--profile")
+        return { command, action, session, profile: takeValue(args, 3, "--profile"), json };
+    }
+    if (action === "release" && args.length === 5 && args[3] === "--lease")
+      return { command, action, session, lease: takeValue(args, 3, "--lease"), json };
+    throw new UsageError(
+      "use session prepare SESSION [--profile NAME], session list, or session release SESSION --lease LEASE",
+    );
   }
   if (command === "profile") {
     if (args.includes("-h") || args.includes("--help")) return { command: "help", json };
@@ -380,7 +406,7 @@ function humanResolve(result: ResolvedProviderTarget): string {
  */
 export async function resolveWithTimeout(
   session: string,
-  farm: Pick<BrowserFleet, "targetForProfile">,
+  farm: Pick<BrowserFleet, "targetForProfile"> & Partial<Pick<BrowserFleet, "sessions">>,
 ): Promise<ResolvedProviderTarget> {
   const controller = new AbortController();
   const timeout = setTimeout(() => {
@@ -445,7 +471,15 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
 
   try {
     const farm = browserFarm(env);
-    if (parsed.command === "create") {
+    if (parsed.command === "session") {
+      const result =
+        parsed.action === "list"
+          ? await farm.sessions.list()
+          : parsed.action === "prepare"
+            ? await farm.sessions.prepare(parsed.session, parsed.profile)
+            : await farm.sessions.release(parsed.session, parsed.lease!);
+      process.stdout.write(parsed.json ? success(result) : `${JSON.stringify(result, null, 2)}\n`);
+    } else if (parsed.command === "create") {
       const result = await farm.create({
         name: parsed.name,
         ...(parsed.profile === undefined ? {} : { profile: parsed.profile }),

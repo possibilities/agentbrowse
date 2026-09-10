@@ -1,5 +1,11 @@
 # Browser profiles and Kernel
 
+New driver sessions are disposable. Use `session prepare TASK --profile personal`
+for retained sign-ins; one task owns a saved profile at a time. Close through the
+driver to release the lease and remove disposable storage. Direct `destroy`
+preserves the profile and does not release a session lease. See
+[session retention](adr/0015-explicit-profile-retention-and-session-leases.md).
+
 The live Browser profile is a Hypeman volume. Kernel writes Chromium's files
 under `/home/kernel/user-data`; Agentbrowse mounts the volume at `/home/kernel`
 so Kernel can prepare and atomically replace `user-data` through `/configure`.

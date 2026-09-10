@@ -8,7 +8,8 @@ const PROTOCOL = "agent-browser.plugin.v1";
 const CAPABILITY = "browser.provider";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
-type ProviderFarm = Pick<BrowserFleet, "provisionProfile" | "destroy">;
+type ProviderFarm = Pick<BrowserFleet, "provisionProfile" | "destroy"> &
+  Partial<Pick<BrowserFleet, "sessions">>;
 
 export interface ProviderIdentity {
   readonly name: string;
@@ -86,7 +87,7 @@ function launchSession(request: PluginRequest): string {
   return session;
 }
 
-function launchResponse(result: CreateResult): string {
+function launchResponse(result: CreateResult, lease?: { session: string; lease: string }): string {
   return success({
     browser: {
       cdpUrl: result.cdpUrl,
@@ -99,6 +100,7 @@ function launchResponse(result: CreateResult): string {
         liveViewUrl: result.liveViewUrl,
       },
       cleanup: {
+        ...(lease ?? {}),
         backend: result.backend,
         browserTarget: result.name,
         browserProfile: result.profile,
@@ -158,11 +160,25 @@ export async function handleProviderRequest(
       });
     }
     if (input.type === "browser.launch") {
-      const profile = providerProfileName(launchSession(input));
+      const session = launchSession(input);
+      if (farm.sessions) {
+        const { result, receipt } = await farm.sessions.launch(session);
+        return launchResponse(result, { session, lease: receipt.lease });
+      }
+      const profile = providerProfileName(session);
       return launchResponse(await farm.provisionProfile({ profile }));
     }
     if (input.type === "browser.close") {
       const cleanup = closeTarget(input);
+      if (
+        farm.sessions &&
+        typeof input.request.session === "string" &&
+        typeof input.request.lease === "string"
+      ) {
+        return success({
+          data: await farm.sessions.release(input.request.session, input.request.lease, cleanup),
+        });
+      }
       return closeResponse(
         await farm.destroy(cleanup.browserTarget, cleanup.backend, cleanup.browserProfile),
       );

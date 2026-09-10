@@ -80,23 +80,39 @@ Set `AGENT_BROWSER_PROVIDER=agentbrowse` to omit `--provider agentbrowse`
 from each command. The plugin name must match `provider.name` in the agentbrowse
 config.
 
-The provider maps the agent-browser session name to a stable Browser profile;
-session names outside agentbrowse's name grammar receive a stable safe profile
-name. The first launch selects the first available backend with disk capacity for
-the new profile and target, then durably binds
-the profile to it. A launch reuses the target currently bound to that profile or
-allocates the first free slot and creates a uniquely named target incarnation on
-the same backend. Close always destroys that exact target, including one that
-was already running when the provider received the launch request, while
-preserving the profile and its backend home. A later launch gets a new target
-name with the same cookies and authentication state, so an old target reference
-cannot silently resolve to the replacement.
+New agent-browser sessions use **disposable profiles**. Close the task session
+through agent-browser to remove its target and temporary profile storage.
+Existing profiles from the previous version remain saved.
 
-The fleet's `browser` skill composes this provider lifecycle with agent-browser's
-version-matched command guide and Agentattention. A sign-in, MFA prompt, or
-captcha is prepared in the agent's current session and handed to the human as
-that exact live target; cookies written by the human remain in the Browser
-profile for later target incarnations.
+For saved sign-ins, lease the shared `personal` profile under a unique task session:
+
+```sh
+agentbrowse session prepare research-task --profile personal --json
+agent-browser --session research-task --provider agentbrowse open https://example.com
+agentbrowse resolve research-task --json
+agent-browser --session research-task --provider agentbrowse close
+```
+
+Successive tasks leasing `personal` accumulate sign-ins in the same Browser
+profile. One task owns it at a time; `profile_leased` means wait for its owner.
+Closing releases ownership and preserves the saved profile. Human handoffs use
+the exact resolved target, and the owner issues no driver commands until the
+handoff is terminal. Use another saved profile only for an intentional identity.
+
+The first launch chooses an available backend with disk capacity, then binds the
+profile there. New disposable incarnations receive new profiles; saved profiles
+retain their backend home. No state is silently merged or moved across hosts.
+
+Failed launches retain recoverable ownership. `agentbrowse session list --json`
+shows prepared, running and failed leases. Recover an ended task with
+`agentbrowse session release SESSION --lease LEASE --json`. A stale lease cannot
+close a replacement session. Never release another task or active human handoff
+based only on age. At most 16 unfinished disposable sessions can be retained;
+shutdown failures preserve state and consume a slot until recovered.
+
+The `browser` skill is the complete MCP workflow. `session_prepare`,
+`session_list` and `session_release` expose these same operations. A running MCP
+host may need to rediscover tools after upgrade; the CLI works immediately.
 
 No provider server runs locally. agent-browser starts `agentbrowse provider`
 for one `plugin.manifest`, `browser.launch`, or `browser.close` request; the

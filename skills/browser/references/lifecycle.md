@@ -19,8 +19,8 @@ only to the authorized destination.
 
 1. Close the profile's live target normally.
 2. Describe and call AgentBrowse `profile_export` with `name` and an explicit
-   absolute output `path`. It writes that local archive and can overwrite an
-   existing file, so choose a new destination unless replacement is intended.
+   absolute output `path`. It writes that local archive and refuses an
+   existing file, so choose a new destination.
 3. Call `profile_import` with the new name, absolute archive path, and the
    selected configured backend when needed. An existing destination profile or
    an active profile is refused.

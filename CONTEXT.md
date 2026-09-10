@@ -1,9 +1,10 @@
 # Context
 
-**Browser profile** — Durable browser state stored independently of any Browser target,
+**Browser profile** — Browser state stored independently of any Browser target,
 including cookies, local storage, IndexedDB, and authentication. Its Hypeman volume
 mounts at `/home/kernel`, leaving Kernel's `user-data` directory replaceable by its
-native configuration API. Hypeman permits one writable attachment at a time.
+native configuration API. Hypeman permits one writable attachment at a time. Saved profiles retain state
+after close; disposable profiles are removed with their owning task.
 _Avoid: browser session, user profile, target._
 
 **Profile archive** — Kernel's native tar.zst of the contents of
@@ -136,3 +137,10 @@ Control-scroll) fractional remainder of precision scrolling in Neko scroll
 units. Only whole units are admitted from it; it resets after idle, on discrete
 wheel input, and with every input cancellation.
 _Avoid: scroll accumulator, smoothing buffer, momentum state._
+
+
+**Session lease** — A durable receipt assigning a task's driver session exclusive
+ownership of one saved or disposable profile, with a unique incarnation token.
+Closing or releasing that exact lease cleans up its target; only disposable
+profile storage is deleted. Age alone does not revoke ownership.
+_Avoid: session lock, browser login, shared session._

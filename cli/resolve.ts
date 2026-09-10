@@ -3,7 +3,7 @@ import type { BrowserListEntry } from "./farm.ts";
 import type { BrowserFleet } from "./fleet.ts";
 import { providerProfileName } from "./model.ts";
 
-type ResolveFarm = Pick<BrowserFleet, "targetForProfile">;
+type ResolveFarm = Pick<BrowserFleet, "targetForProfile"> & Partial<Pick<BrowserFleet, "sessions">>;
 
 export interface ResolvedProviderTarget {
   readonly session: string;
@@ -20,7 +20,9 @@ export async function resolveProviderTarget(
   farm: ResolveFarm,
   signal?: AbortSignal,
 ): Promise<ResolvedProviderTarget> {
-  const profile = providerSessionProfileName(session);
+  const profile = farm.sessions
+    ? await farm.sessions.profileForSession(session)
+    : providerSessionProfileName(session);
   const target = await farm.targetForProfile(profile, signal);
   if (target === undefined) {
     throw new CliError(

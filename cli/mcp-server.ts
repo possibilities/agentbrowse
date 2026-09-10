@@ -101,6 +101,15 @@ async function dispatch(
 ): Promise<unknown> {
   const farm = browserFarm(env);
   switch (tool.name) {
+    case "session_prepare":
+      return await farm.sessions.prepare(
+        args["session"] as string,
+        args["profile"] as string | undefined,
+      );
+    case "session_list":
+      return await farm.sessions.list();
+    case "session_release":
+      return await farm.sessions.release(args["session"] as string, args["lease"] as string);
     case "create": {
       const name = args["name"] as string;
       const slot = args["slot"] as number;

@@ -134,7 +134,7 @@ describe("which commands become tools", () => {
       path.replace(/ /g, "_"),
     );
     expect(TOOLS.map((tool) => tool.name).sort()).toEqual([...wanted].sort());
-    expect(wanted.length).toBe(11);
+    expect(wanted.length).toBe(14);
   });
 
   test("no operator or internal leaf is exposed, mcp and provider included", () => {
@@ -225,9 +225,11 @@ describe("annotations", () => {
     expect(annotationsOf("create")).toMatchObject({ destructiveHint: false, idempotentHint: true });
   });
 
-  test("every leaf reaches a configured backend except guide", () => {
+  test("session list and guide stay local; other leaves reach a backend", () => {
     for (const tool of TOOLS) {
-      expect(tool.annotations.openWorldHint).toBe(tool.name !== "guide");
+      expect(tool.annotations.openWorldHint).toBe(
+        tool.name !== "guide" && tool.name !== "session_list",
+      );
     }
   });
 
@@ -242,7 +244,7 @@ describe("the server's instructions", () => {
   const instructions = serverInstructions(CONTRACT);
 
   test("carry the guidance, the envelope, every error code, and the opening moves", () => {
-    expect(instructions).toContain("Three lifetimes are deliberately distinct");
+    expect(instructions).toContain("New sessions are disposable by default");
     expect(instructions).toContain("schema_version");
     for (const entry of CONTRACT.concepts.error_codes) {
       expect(instructions).toContain(entry.code);
@@ -289,7 +291,7 @@ describe("a live stdio server", () => {
 
   test("initialize names the CLI and hands back the contract's instructions", () => {
     expect(client.getServerVersion()?.name).toBe("agentbrowse");
-    expect(client.getInstructions() ?? "").toContain("Three lifetimes are deliberately distinct");
+    expect(client.getInstructions() ?? "").toContain("New sessions are disposable by default");
   });
 
   test("tools/list is exactly the agent leaves the mapping generated", async () => {
