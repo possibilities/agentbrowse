@@ -14,7 +14,7 @@ import type {
   ProvisionOptions,
 } from "./farm.ts";
 import { type ProfileArchiveResult, validateProfileArchive } from "./kernel.ts";
-import { validateName } from "./model.ts";
+import { profileFor, validateName } from "./model.ts";
 import { ProfileBindingStore, requireReadyProfile } from "./profile-binding.ts";
 
 const AVAILABILITY_CODES = new Set([
@@ -62,7 +62,10 @@ export class BrowserFleet {
       await bound.probeAvailability();
       return await this.createAndBind(bound, options);
     }
-    return await this.selectForMutation(async (farm) => await this.createAndBind(farm, options));
+    return await this.selectForMutation(
+      async (farm) => await this.createAndBind(farm, options),
+      profile,
+    );
   }
 
   async provisionProfile(options: ProvisionOptions): Promise<CreateResult> {
@@ -74,7 +77,10 @@ export class BrowserFleet {
       await farm.probeAvailability();
       return await this.provisionAndBind(farm, options);
     }
-    return await this.selectForMutation(async (farm) => await this.provisionAndBind(farm, options));
+    return await this.selectForMutation(
+      async (farm) => await this.provisionAndBind(farm, options),
+      options.profile,
+    );
   }
 
   async list(signal?: AbortSignal): Promise<readonly BrowserListEntry[]> {
@@ -330,7 +336,10 @@ export class BrowserFleet {
     await this.bindings.clearTarget({ ...result, profile });
   }
 
-  private async selectForMutation<T>(operation: (farm: BrowserFarm) => Promise<T>): Promise<T> {
+  private async selectForMutation<T>(
+    operation: (farm: BrowserFarm) => Promise<T>,
+    newProfile?: string,
+  ): Promise<T> {
     if (this.farms.length === 0) throw noBackendsConfigured();
     const outcomes: AvailabilityOutcome[] = [];
     for (const farm of this.farms) {
@@ -340,6 +349,19 @@ export class BrowserFleet {
         if (!isAvailabilityFailure(error)) throw error;
         outcomes.push({ backend: farm.backend.id, error });
         continue;
+      }
+      if (
+        newProfile !== undefined &&
+        (await farm.backend.inspectProfile(profileFor(newProfile))) === undefined
+      ) {
+        try {
+          await farm.backend.verifyNewProfileCapacity?.();
+        } catch (error) {
+          if (!(error instanceof CliError) || error.code !== "backend_capacity_exhausted")
+            throw error;
+          outcomes.push({ backend: farm.backend.id, error });
+          continue;
+        }
       }
       // Any error after a successful probe surfaces immediately. The backend may
       // have found existing state or mutated resources, so selection never resumes.

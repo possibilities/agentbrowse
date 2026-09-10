@@ -8,3 +8,7 @@ same-named empty volume elsewhere would discard the cookies and authentication t
 profile promises to preserve. A versioned profile binding receipt also names the
 current exact target when one exists; serialized cleanup may clear it only when the
 backend and target identity still match.
+
+New profiles now also use the pre-mutation disk check in
+[0014](0014-check-capacity-before-profile-binding.md); binding and mutation
+failures retain this record's no-fallback rule.

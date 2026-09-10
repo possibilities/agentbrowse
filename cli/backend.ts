@@ -72,6 +72,7 @@ export interface FarmBackend {
   readonly maxTargets: number;
   newContainerName(name: string): string;
   verifyHost(signal?: AbortSignal): Promise<void>;
+  verifyNewProfileCapacity?(): Promise<void>;
   resolveImage(override?: string): Promise<string>;
   imageExists(image: string): Promise<boolean>;
   listManagedProfiles(signal?: AbortSignal): Promise<readonly ManagedProfileRecord[]>;

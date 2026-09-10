@@ -82,7 +82,8 @@ config.
 
 The provider maps the agent-browser session name to a stable Browser profile;
 session names outside agentbrowse's name grammar receive a stable safe profile
-name. The first launch selects the first available backend, then durably binds
+name. The first launch selects the first available backend with disk capacity for
+the new profile and target, then durably binds
 the profile to it. A launch reuses the target currently bound to that profile or
 allocates the first free slot and creates a uniquely named target incarnation on
 the same backend. Close always destroys that exact target, including one that

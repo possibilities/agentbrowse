@@ -30,7 +30,8 @@ _Avoid: Browser session, target name, profile name._
 
 **Ordered backend set** — The configured sequence of independently identified
 Browser target runtimes. Provisioning considers them in order and advances only
-when the current backend reports a classified availability failure.
+when the current backend reports a classified availability failure, or a pre-mutation
+disk-capacity check rejects a new Browser profile and target.
 _Avoid: failover list, provider chain._
 
 **Availability classification** — A pre-mutation result that says a backend's

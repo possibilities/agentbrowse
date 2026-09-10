@@ -267,3 +267,22 @@ test("HTTP discovery sends bearer credentials and preserves authentication and m
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("new profile preflight reserves both profile and default overlay without mutation", async () => {
+  const calls: string[] = [];
+  let available: unknown = 19 * 1024 ** 3;
+  const backend = new HypemanFarmBackend(settings, config, async (method, path) => {
+    calls.push(`${method} ${path}`);
+    return { disk: { available } };
+  });
+  await expect(backend.verifyNewProfileCapacity()).rejects.toMatchObject({
+    code: "backend_capacity_exhausted",
+  });
+  available = 20 * 1024 ** 3;
+  await backend.verifyNewProfileCapacity();
+  available = "unknown";
+  await expect(backend.verifyNewProfileCapacity()).rejects.toMatchObject({
+    code: "invalid_hypeman_response",
+  });
+  expect(calls).toEqual(Array(3).fill("GET /resources"));
+});

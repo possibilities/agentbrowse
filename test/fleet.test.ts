@@ -44,6 +44,10 @@ class FleetBackend implements FarmBackend {
   readonly type = "hypeman" as const;
   readonly events: string[] = [];
   readonly probeSignals: Array<AbortSignal | undefined> = [];
+  capacityError: CliError | null = null;
+  async verifyNewProfileCapacity(): Promise<void> {
+    if (this.capacityError) throw this.capacityError;
+  }
   probeError: CliError | null = null;
   verifyError: CliError | null = null;
   runError: CliError | null = null;
@@ -568,4 +572,39 @@ test("concurrent import retries cannot overwrite a profile that just became read
     backend: "local",
     target: null,
   });
+});
+
+test("full backend is skipped before a new profile is bound or created", async () => {
+  const full = new FleetBackend("full");
+  full.capacityError = new CliError("backend_capacity_exhausted", "disk full");
+  const local = new FleetBackend("local");
+  const browsers = fleet([full, local]);
+  const result = await browsers.provisionProfile({ profile: "fresh" });
+  expect(result.backend).toBe("local");
+  expect(full.profiles.size).toBe(0);
+  expect(full.events).not.toContain("run");
+  expect((await browsers.bindings.read("fresh"))?.backend).toBe("local");
+});
+
+test("full backend does not hide existing profiles or prevent target reuse and cleanup", async () => {
+  const home = new FleetBackend("home");
+  const local = new FleetBackend("local");
+  const browsers = fleet([home, local]);
+  const first = await browsers.provisionProfile({ profile: "saved" });
+  home.capacityError = new CliError("backend_capacity_exhausted", "disk full");
+  expect((await browsers.provisionProfile({ profile: "saved" })).name).toBe(first.name);
+  expect((await browsers.list()).length).toBe(1);
+  await browsers.destroy(first.name);
+  expect(home.profiles.has("saved")).toBe(true);
+  expect(local.events).not.toContain("run");
+});
+
+test("malformed capacity response cannot select another backend", async () => {
+  const broken = new FleetBackend("broken");
+  broken.capacityError = new CliError("invalid_hypeman_response", "bad resources");
+  const local = new FleetBackend("local");
+  await expect(fleet([broken, local]).provisionProfile({ profile: "fresh" })).rejects.toMatchObject(
+    { code: "invalid_hypeman_response" },
+  );
+  expect(local.events).toEqual([]);
 });

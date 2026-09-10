@@ -112,7 +112,9 @@ export class HypemanFarmBackend implements FarmBackend {
         `invalid Hypeman token file for ${this.id}`,
       );
     const timeout = AbortSignal.timeout(
-      method === "GET" && path === "/instances" ? this.config.discovery.commandTimeoutMs : 120_000,
+      method === "GET" && (path === "/instances" || path === "/resources")
+        ? this.config.discovery.commandTimeoutMs
+        : 120_000,
     );
     let response: Response;
     try {
@@ -151,6 +153,20 @@ export class HypemanFarmBackend implements FarmBackend {
   }
   async verifyHost(signal?: AbortSignal): Promise<void> {
     rows(await this.request("GET", "/instances", undefined, signal));
+  }
+  async verifyNewProfileCapacity(): Promise<void> {
+    const resources = object(await this.request("GET", "/resources"));
+    const available = object(resources.disk).available;
+    if (typeof available !== "number" || !Number.isFinite(available) || available < 0)
+      throw new CliError("invalid_hypeman_response", "Hypeman omitted available disk capacity");
+    // Hypeman 0.3.0 reserves a default 10 GiB writable overlay per instance.
+    const required = (10 + this.backendConfig.profileSizeGb) * 1024 ** 3;
+    if (available < required)
+      throw new CliError(
+        "backend_capacity_exhausted",
+        `backend ${this.id} needs ${required} disk bytes for a new profile and Browser target, but only ${available} are available`,
+        "release finished targets or increase host disk capacity; retained profiles are not automatically deleted",
+      );
   }
   async resolveImage(override?: string): Promise<string> {
     return (
