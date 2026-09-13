@@ -9,6 +9,22 @@ from recorder import Media
 
 
 class RecorderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_pointer_position_is_read_back_without_motion_wait(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / 'xdotool'
+            executable.write_text('#!/bin/sh\ncase "$*" in *--sync*) exit 9;; esac\nif [ "$1" = getmouselocation ]; then printf "X=100\\nY=200\\n"; fi\n')
+            executable.chmod(0o700)
+            with patch.dict(os.environ, {'PATH': directory + ':' + os.environ['PATH']}):
+                media = Media()
+                try:
+                    for _ in range(2):
+                        result = await media.handle({'op': 'pointer', 'x': 100, 'y': 200})
+                        self.assertTrue(result['positionConfirmed'])
+                    with self.assertRaisesRegex(RuntimeError, 'position not confirmed'):
+                        await media.handle({'op': 'pointer', 'x': 101, 'y': 200})
+                finally:
+                    await media.close()
+
     async def test_source_allocation_precedes_launch_and_survives_lost_reply(self):
         media = Media()
         try:

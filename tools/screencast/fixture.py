@@ -13,6 +13,12 @@ root.mkdir(mode=0o700)
 events = []
 html = b'''<!doctype html><title>Isolated screencast fixture</title><style>body{font:30px sans-serif;background:#162024;color:#eef3e8;padding:40px}button,select{font:inherit;margin:20px;padding:10px}#clock{font:40px monospace}</style><h1>Mac app / isolated recording</h1><button id="write">Write</button><select id="route"><option value="parallel">Parallel</option><option value="splayed">Splayed</option><option value="circuit">Circuit</option></select><label for="weight">Trace weight fixture</label><input id="weight" type="range" min="10" max="80" step="5" value="35"><p id="result">Ready</p><p id="live">waiting</p><p id="clock"></p><script>window.nonce=crypto.randomUUID();setInterval(()=>clock.textContent=performance.now().toFixed(0),50);window.liveCount=0;new EventSource('/live').onmessage=e=>{live.textContent=e.data;fetch('/live-event',{method:'POST',body:String(++liveCount)})};write.onclick=async()=>{result.textContent=await(await fetch('/write',{method:'POST'})).text();const end=performance.now()+1500;while(performance.now()<end){}};route.onchange=e=>fetch('/event',{method:'POST',body:JSON.stringify({value:route.value,trusted:e.isTrusted,nonce})});</script>'''
 
+if '--layout' in sys.argv[2:]:
+    html = html.replace(b'<select id="route">', b'<div style="height:1300px"></div><select id="route">')
+    html = html.replace(b'<input id="weight" type="range" min="10" max="80" step="5" value="35">', b'<input id="weight" type="range" min="50" max="250" step="1" value="250"><label for="size">Speaking size fixture</label><input id="size" type="range" min="35" max="120" step="1" value="77">')
+    html = html.replace(b'</script>', b"for(const e of [weight,size])e.oninput=ev=>fetch('/range-event',{method:'POST',body:JSON.stringify({id:e.id,value:e.value,trusted:ev.isTrusted})});</script>")
+
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
@@ -63,6 +69,24 @@ actions = [
     {'type': 'expectValue', 'selector': '#route', 'value': 'splayed'},
     {'type': 'wait', 'ms': 1000},
 ]
+if '--layout' in sys.argv[2:]:
+    actions = actions[:4] + [
+        {'type':'scrollintoview','selector':'#size'},
+        {'type':'focus','selector':'#size'},
+        {'type':'expectValue','selector':'#size','value':'77'},
+        {'type':'press','key':'PageDown'},
+        {'type':'press','key':'PageUp'},
+        {'type':'expectValue','selector':'#size','value':'78'},
+        {'type':'press','key':'ArrowLeft'},
+        {'type':'expectValue','selector':'#size','value':'77'},
+        {'type':'scrollintoview','selector':'#weight'},
+        {'type':'focus','selector':'#weight'},
+        {'type':'expectValue','selector':'#weight','value':'250'},
+        *[{'type':'press','key':'PageDown'} for _ in range(3)],
+        *[{'type':'press','key':'PageUp'} for _ in range(3)],
+        {'type':'expectValue','selector':'#weight','value':'250'},
+        {'type':'scrollintoview','selector':'#route'},
+    ] + actions[4:]
 (root/'script.json').write_text(json.dumps(actions))
 abort_preparation = '--abort-preparation' in sys.argv[2:]
 coordinated = '--coordinated' in sys.argv[2:] or abort_preparation
@@ -89,13 +113,14 @@ def coordinate_fixture():
             coordination_events.append({'stage': 'abort-preparation', 'monotonic': time.monotonic()})
             return
         weight = next(c for c in evidence['controls']['controls'] if c['id'] == 'weight')
-        if (weight['min'], weight['max'], weight['step'], weight['value']) != ('10', '80', '5', '35'):
+        expected_weight = ('50', '250', '1', '250') if '--layout' in sys.argv[2:] else ('10', '80', '5', '35')
+        if (weight['min'], weight['max'], weight['step'], weight['value']) != expected_weight:
             raise RuntimeError('real control attributes not observed')
         if not weight['visible'] or weight['rect']['width'] <= 0: raise RuntimeError('missing control rectangle')
         if 'Write' not in json.dumps(evidence['snapshot']): raise RuntimeError('fixture control not observed')
         # Longer than the driver's 30s idle limit: helper evidence polling must
         # preserve the same driver/page while the author works.
-        if coordinator_stop.wait(35): return
+        if coordinator_stop.wait(1 if '--layout' in sys.argv[2:] else 35): return
         refreshed = json.loads(evidence_path.read_text())
         if refreshed['identitySha256'] != evidence['identitySha256']: raise RuntimeError('preparation target changed')
         script_hash = hashlib.sha256((root/'script.json').read_bytes()).hexdigest()
@@ -137,7 +162,7 @@ coordinator = threading.Thread(target=coordinate_fixture, daemon=True) if coordi
 if coordinator: coordinator.start()
 try:
     with (root/'helper.log').open('w') as log:
-        result = subprocess.run(['bun', str(Path(__file__).with_name('run.ts')), '--url', f'http://127.0.0.1:{server.server_port}/', '--script', str(root/'script.json'), '--output', str(root/'capture'), '--seconds', '25'] + (['--prepare-wait', '600', '--coordination-wait', '5'] if coordinated else []), stdout=log, stderr=subprocess.STDOUT, timeout=240)
+        result = subprocess.run(['bun', str(Path(__file__).with_name('run.ts')), '--url', f'http://127.0.0.1:{server.server_port}/', '--script', str(root/'script.json'), '--output', str(root/'capture'), '--seconds', '35' if '--layout' in sys.argv[2:] else '25'] + (['--prepare-wait', '600', '--coordination-wait', '5'] if coordinated else []), stdout=log, stderr=subprocess.STDOUT, timeout=240)
     print(json.dumps({'exitCode': result.returncode, 'evidence': str(root)}))
     if result.returncode:
         print((root/'helper.log').read_text()[-3000:])

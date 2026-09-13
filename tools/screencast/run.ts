@@ -14,12 +14,15 @@ import { OBSERVE_CONTROLS } from "./controls.ts";
 import { digest, newIntent, publish, waitReply } from "./coordination.ts";
 import { ExecPeer } from "./exec.ts";
 import { assertOwner } from "./identity.ts";
+import { type ControlState, nativeCenter, observeControl, unchangedControl } from "./layout.ts";
 import { acceptPreparation, boundedDocument, preparationWindow } from "./preparation.ts";
 import { SafetyLatch } from "./safety.ts";
 
 type Action =
   | { type: "wait"; ms: number }
   | { type: "click"; selector: string }
+  | { type: "focus"; selector: string }
+  | { type: "scrollintoview"; selector: string }
   | { type: "fill"; selector: string; value: string }
   | { type: "press"; key: string }
   | { type: "expectValue" | "expectText" | "expectOpen"; selector: string; value: string };
@@ -57,12 +60,20 @@ export function validate(
         throw new Error("invalid wait");
       waits += action.ms as number;
     } else if (
-      ["click", "fill", "expectValue", "expectText", "expectOpen"].includes(action.type as string)
+      [
+        "click",
+        "focus",
+        "scrollintoview",
+        "fill",
+        "expectValue",
+        "expectText",
+        "expectOpen",
+      ].includes(action.type as string)
     ) {
       if (typeof action.selector !== "string" || action.selector.length > 500)
         throw new Error("invalid selector");
       if (
-        action.type !== "click" &&
+        !["click", "focus", "scrollintoview"].includes(action.type as string) &&
         (typeof action.value !== "string" || action.value.length > 4096)
       )
         throw new Error("invalid value");
@@ -597,7 +608,33 @@ async function run(): Promise<void> {
       const start = performance.now();
       let receipt: unknown;
       if (action.type === "wait") await Bun.sleep(action.ms);
-      else if (action.type === "click" || action.type === "fill") {
+      else if (action.type === "focus" || action.type === "scrollintoview") {
+        const observe = async () =>
+          (await ab(["eval", observeControl(action.selector)])).result as ControlState;
+        const before = await observe();
+        if (before.disabled) throw new Error("control disabled before layout action");
+        const driver = await ab([action.type, action.selector]); // One official command, no click/value assignment.
+        const deadline = performance.now() + 1500;
+        let previous: ControlState | undefined;
+        let after: ControlState;
+        while (true) {
+          after = await observe();
+          unchangedControl(before, after, action.type === "focus");
+          if (previous && JSON.stringify(previous.rect) === JSON.stringify(after.rect)) break;
+          if (performance.now() >= deadline) throw new Error("control rectangle did not settle");
+          previous = after;
+          await Bun.sleep(75);
+        }
+        await verify();
+        await geometry();
+        await pageIdentity();
+        const pointer = await peer.rpc("pointer", nativeCenter(after));
+        const confirmed = await observe();
+        unchangedControl(before, confirmed, action.type === "focus");
+        if (JSON.stringify(after.rect) !== JSON.stringify(confirmed.rect))
+          throw new Error("control moved during native pointer mapping");
+        receipt = { driver, before, after: confirmed, pointer, nativeEffect: "expected unchanged" };
+      } else if (action.type === "click" || action.type === "fill") {
         const p = (
           await ab([
             "eval",

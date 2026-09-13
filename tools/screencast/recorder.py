@@ -39,6 +39,8 @@ class Media:
             if proc.returncode:
                 raise RuntimeError("native command failed: " + err[-1000:].decode(errors="replace"))
             return out
+        except asyncio.TimeoutError as error:
+            raise RuntimeError("native command deadline exceeded") from error
         finally:
             if proc.returncode is None:
                 proc.kill()
@@ -109,8 +111,20 @@ class Media:
                 x, y = request.get("x"), request.get("y")
                 if type(x) is not int or type(y) is not int or not 0 <= x < 1920 or not 0 <= y < 1080:
                     raise ValueError("unverified pointer coordinates")
-                await self.command(["env", "DISPLAY=:1", "xdotool", "mousemove", "--sync", str(x), str(y)])
-                return {"x": x, "y": y, "kind": "actual native hover", "ackMonotonic": time.monotonic()}
+                # --sync waits for a motion event even when already at x/y.
+                # Send one move, then verify actual X pointer coordinates instead.
+                await self.command(["env", "DISPLAY=:1", "xdotool", "mousemove", str(x), str(y)])
+                deadline = time.monotonic() + 0.5
+                while True:
+                    raw = await self.command(["env", "DISPLAY=:1", "xdotool", "getmouselocation", "--shell"])
+                    position = dict(line.split("=", 1) for line in raw.decode().splitlines() if "=" in line)
+                    if position.get("X") == str(x) and position.get("Y") == str(y):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("native pointer position not confirmed")
+                    await asyncio.sleep(0.05)
+                return {"x": x, "y": y, "kind": "actual native hover", "positionConfirmed": True,
+                        "ackMonotonic": time.monotonic()}
             if op == "snapshot":
                 await self.command(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "x11grab",
                                     "-draw_mouse", "1", "-video_size", "1920x1080", "-i", ":1.0",
