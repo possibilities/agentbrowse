@@ -1,4 +1,5 @@
 """Serial disposable HTTP/SSE fixture. Never accesses Studio or changes host settings."""
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -63,14 +64,84 @@ actions = [
     {'type': 'wait', 'ms': 1000},
 ]
 (root/'script.json').write_text(json.dumps(actions))
+abort_preparation = '--abort-preparation' in sys.argv[2:]
+coordinated = '--coordinated' in sys.argv[2:] or abort_preparation
+coordinator_stop = threading.Event()
+coordination_events = []
+
+def atomic(name, value):
+    path = root/'capture'/name
+    temp = path.with_suffix('.tmp')
+    temp.write_text(json.dumps(value))
+    temp.replace(path)
+
+def coordinate_fixture():
+    # Host-file simulation only: no native device or state acknowledgement proof.
+    try:
+        deadline = time.monotonic() + 200
+        evidence_path = root/'capture/preparation-evidence.json'
+        while not evidence_path.exists():
+            if coordinator_stop.wait(0.1): return
+            if time.monotonic() > deadline: raise RuntimeError('missing preparation evidence')
+        evidence = json.loads(evidence_path.read_text())
+        if abort_preparation:
+            atomic('supervisor-abort.json', {'reason': 'disposable preparation abort fixture'})
+            coordination_events.append({'stage': 'abort-preparation', 'monotonic': time.monotonic()})
+            return
+        if 'Write' not in json.dumps(evidence['snapshot']): raise RuntimeError('fixture control not observed')
+        # Longer than the driver's 30s idle limit: helper evidence polling must
+        # preserve the same driver/page while the author works.
+        if coordinator_stop.wait(35): return
+        refreshed = json.loads(evidence_path.read_text())
+        if refreshed['identitySha256'] != evidence['identitySha256']: raise RuntimeError('preparation target changed')
+        script_hash = hashlib.sha256((root/'script.json').read_bytes()).hexdigest()
+        atomic('prepare-ready.json', {key: evidence[key] for key in ['preparationId', 'identitySha256']} |
+               {'scriptSha256': script_hash})
+        coordination_events.append({'stage': 'ready', 'monotonic': time.monotonic(), 'identity': evidence['identity']})
+        for index, action in enumerate(actions):
+            prefix = f'action-{index:03d}'
+            path = root/'capture'/f'{prefix}-intent.json'
+            while not path.exists():
+                if coordinator_stop.wait(0.05): return
+                if time.monotonic() > deadline: raise RuntimeError('missing intent')
+            data = path.read_bytes(); intent = json.loads(data)
+            if intent['index'] != index or intent['action'] != action or intent['scriptSha256'] != script_hash:
+                raise RuntimeError('intent mismatch')
+            if not (root/'capture/browser-capture-started.json').exists(): raise RuntimeError('missing start barrier')
+            atomic(f'{prefix}-permit.json', {'intentId': intent['intentId'],
+                   'intentSha256': hashlib.sha256(data).hexdigest(), 'allow': True})
+            completion_path = root/'capture'/f'{prefix}-completion.json'
+            while not completion_path.exists():
+                if coordinator_stop.wait(0.05): return
+                if time.monotonic() > deadline: raise RuntimeError('missing completion')
+            data = completion_path.read_bytes(); completion = json.loads(data)
+            if completion['intentId'] != intent['intentId']: raise RuntimeError('completion mismatch')
+            time.sleep(0.2)
+            if (root/'capture'/f'action-{index+1:03d}-intent.json').exists(): raise RuntimeError('next action before ack')
+            atomic(f'{prefix}-ack.json', {'intentId': intent['intentId'],
+                   'completionSha256': hashlib.sha256(data).hexdigest(), 'accepted': True})
+            coordination_events.append({'stage': 'mock-ack', 'index': index, 'monotonic': time.monotonic()})
+        while not (root/'capture/browser-capture-stopped.json').exists():
+            if coordinator_stop.wait(0.05): return
+            if time.monotonic() > deadline: raise RuntimeError('missing prompt stop signal')
+        coordination_events.append({'stage': 'browser-stopped', 'monotonic': time.monotonic()})
+    except Exception as error:
+        coordination_events.append({'error': str(error)})
+        atomic('supervisor-abort.json', {'error': str(error)})
+
+coordinator = threading.Thread(target=coordinate_fixture, daemon=True) if coordinated else None
+if coordinator: coordinator.start()
 try:
     with (root/'helper.log').open('w') as log:
-        result = subprocess.run(['bun', str(Path(__file__).with_name('run.ts')), '--url', f'http://127.0.0.1:{server.server_port}/', '--script', str(root/'script.json'), '--output', str(root/'capture'), '--seconds', '20'], stdout=log, stderr=subprocess.STDOUT, timeout=240)
+        result = subprocess.run(['bun', str(Path(__file__).with_name('run.ts')), '--url', f'http://127.0.0.1:{server.server_port}/', '--script', str(root/'script.json'), '--output', str(root/'capture'), '--seconds', '25'] + (['--prepare-wait', '600', '--coordination-wait', '5'] if coordinated else []), stdout=log, stderr=subprocess.STDOUT, timeout=240)
     print(json.dumps({'exitCode': result.returncode, 'evidence': str(root)}))
     if result.returncode:
         print((root/'helper.log').read_text()[-3000:])
     sys.exit(result.returncode)
 finally:
+    coordinator_stop.set()
+    if coordinator: coordinator.join(2)
+    if coordinated: (root/'coordination.json').write_text(json.dumps(coordination_events, indent=2))
     server.shutdown()
     server.server_close()
     thread.join(2)

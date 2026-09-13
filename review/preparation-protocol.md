@@ -1,0 +1,21 @@
+# Host-only preparation and coordination v1 (implementation in progress)
+
+All paths below are in the helper's new private `--output` directory. Supervisor never invokes browser tools. All outgoing helper JSON is UTF-8 JSON.stringify(value,null,2) plus one LF, atomically renamed from a temporary file. Incoming supervisor JSON must likewise be atomically renamed; hashes are lowercase SHA256 of the **exact file bytes**, not reserialized JSON.
+
+Start helper with `--prepare-wait 600 --coordination-wait 5 --script /absolute/actions.json` plus normal url/output/seconds. Preparation accepts60..900 seconds (10minutes recommended); guest exec lifetime is300+preparation seconds, independently finite. Script need not exist at launch. No tuning/input during preparation: helper only performs initial fullscreen layout and read-only identity/snapshot/screenshot operations. No native recording during authoring.
+
+`preparation-evidence.json` is refreshed roughly every10s and contains preparationId (random nonce), identitySha256, identity {session,lease,instanceId,target,pageId,timeOrigin,url}, readyPath, scriptPath, expiresUtc, observedUtc (epoch ms), snapshot (ordinary driver snapshot result), screenshot (absolute file path). Supervisor binds a reviewed script/effects plan from this evidence. After fresh native baseline and native recorder operational, supervisor atomically writes `prepare-ready.json` {preparationId,identitySha256,scriptSha256}. scriptSha256 hashes the exact bytes at scriptPath. Helper reads and validates those bytes once, saves accepted-actions.json, rechecks identity/readiness and starts browser recording. Ready is not accepted on timeout; malformed/mismatched ready fails closed. Missing script remains waiting until bounded deadline. Preparation acceptance may require several seconds for native/page frame checks before browser recording starts: include that in native60s budget.
+
+`browser-capture-started.json` {version:1,session,pageId,captureStart,utc} marks operational encoder progress, not decoded readiness. First action intent follows the bounded lead-in. Supervisor must see both recorders operational before first permit.
+
+For every script action (including waits/assertions), index is zero-based, decimal padded to at least3digits:
+- `action-000-intent.json`: {version:1,session,pageId,scriptSha256,preparationId,index:0,action,intentId}. intentId is fresh random per action.
+- supervisor writes `action-000-permit.json`: {intentId,intentSha256,allow:true}. Hash exact intent file bytes. Supervisor verifies native baseline/full expected fields before permit.
+- helper dispatches once, checks recorder progress, then writes `action-000-completion.json`: all intent fields plus receipt,startMs,endMs (helper monotonic action-relative brackets).
+- supervisor verifies corresponding entire native expected state and writes `action-000-ack.json`: {intentId,completionSha256,accepted:true}. Hash exact completion bytes. Next action cannot start before ack.
+
+Each permit/ack wait is bounded by --coordination-wait1..10s AND remaining recording budget. A false/mismatched reply aborts; input is never retried. If dispatch failed/uncertain, no successful completion is issued.
+
+Supervisor can atomically create `supervisor-abort.json` at any time. Its presence irrevocably stops helper dispatch (malformed content also stops); checked before driver subprocess spawn, guest RPCs, preparation and barrier waits. Already submitted input cannot be recalled. Supervisor must inspect `helper-failure.json` {version,session,pageId,error,stage,utc} and pending manifest.json to latch its own remote operations. Failure is published before cleanup. Missing output/transport is not success.
+
+After final ack and short tail, helper stops its encoder then atomically writes `browser-capture-stopped.json` {version:1,session,pageId,captureStop,utc} **before copy/decode/driver idle cleanup**. Supervisor stops native promptly on that signal, or on its own stricter finite deadline/failure. Native stop must not wait for overall helper process exit. Plan native dispatch-to-stop within~50s and retain10s margin inside its60s ceiling. No sync/audio/native ownership claim comes from these host-file receipts.

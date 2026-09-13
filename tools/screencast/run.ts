@@ -1,17 +1,19 @@
 #!/usr/bin/env bun
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 /** Opt-in local Hypeman producer helper. No installation, default changes or saved profiles.
  * Usage: bun tools/screencast/run.ts --url http://127.0.0.1:PORT/ --script SCRIPT.json --output NEW_DIRECTORY --seconds 30
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Target } from "../../cli/model.ts";
 import { browserFarm } from "../../cli/runtime.ts";
 import type { SessionReceipt } from "../../cli/sessions.ts";
 import { loadAgentbrowseConfig } from "../../config/deployment.ts";
+import { digest, newIntent, publish, waitReply } from "./coordination.ts";
 import { ExecPeer } from "./exec.ts";
 import { assertOwner } from "./identity.ts";
+import { acceptPreparation, boundedDocument, preparationWindow } from "./preparation.ts";
 import { SafetyLatch } from "./safety.ts";
 
 type Action =
@@ -80,7 +82,14 @@ async function run(): Promise<void> {
     if (
       !key ||
       !value ||
-      !["--url", "--script", "--output", "--seconds"].includes(key) ||
+      ![
+        "--url",
+        "--script",
+        "--output",
+        "--seconds",
+        "--prepare-wait",
+        "--coordination-wait",
+      ].includes(key) ||
       options.has(key)
     )
       throw new Error("usage: --url ORIGIN --script FILE --output NEW_DIRECTORY --seconds 5..120");
@@ -88,8 +97,16 @@ async function run(): Promise<void> {
   }
   const url = options.get("--url") ?? "",
     seconds = Number(options.get("--seconds"));
-  const script: unknown = JSON.parse(readFileSync(resolve(options.get("--script") ?? ""), "utf8"));
-  validate(url, seconds, script);
+  const coordinationSeconds = Number(options.get("--coordination-wait") ?? "0");
+  if (!Number.isInteger(coordinationSeconds) || coordinationSeconds < 0 || coordinationSeconds > 10)
+    throw new Error("coordination-wait must be 1..10 seconds when enabled");
+  const prepareSeconds = preparationWindow(options.get("--prepare-wait"));
+  const scriptPath = resolve(options.get("--script") ?? "");
+  if (!options.has("--script")) throw new Error("script path required");
+  let script: unknown = prepareSeconds
+    ? undefined
+    : JSON.parse(boundedDocument(scriptPath).toString());
+  validate(url, seconds, prepareSeconds ? [{ type: "wait", ms: 0 }] : script);
   const outputArg = options.get("--output");
   if (!outputArg) throw new Error("new output directory required");
   const root = resolve(outputArg);
@@ -159,15 +176,29 @@ async function run(): Promise<void> {
     renameSync(join(root, "manifest.tmp"), join(root, "manifest.json"));
   };
   const safety = new SafetyLatch((error) => {
+    // Publish failure immediately, including when an action is still awaiting
+    // completion, so the native supervisor need not wait for host cleanup.
+    publish(root, "helper-failure.json", {
+      version: 1,
+      session,
+      error: String(error),
+      stage: manifest.stage,
+      utc: Date.now(),
+    });
     peer?.fail(error);
     child?.kill("SIGKILL");
   });
+  const checkExternalAbort = () => {
+    if (existsSync(join(root, "supervisor-abort.json")))
+      safety.trip(new Error("supervisor abort; no further dispatch"));
+    safety.check();
+  };
   const cancel = () => safety.trip(new Error("operator cancellation"));
   process.on("SIGINT", cancel);
   process.on("SIGTERM", cancel);
   save();
   async function command(argv: string[], timeout = 15000): Promise<string> {
-    safety.check();
+    checkExternalAbort();
     peer?.check();
     if (
       argv[0] === join(homedir(), ".local/bin/agent-browser") &&
@@ -371,8 +402,13 @@ async function run(): Promise<void> {
     manifest.target = target;
     manifest.instanceId = instanceId;
     save();
-    peer = new ExecPeer(backend, instanceId as string, Number(new URL(url).port), (error) =>
-      safety.trip(error),
+    peer = new ExecPeer(
+      backend,
+      instanceId as string,
+      Number(new URL(url).port),
+      (error) => safety.trip(error),
+      300 + prepareSeconds,
+      checkExternalAbort,
     );
     await peer.connect();
     monitor = setInterval(() => {
@@ -407,6 +443,79 @@ async function run(): Promise<void> {
     }
     await geometry();
     await pageIdentity();
+    if (prepareSeconds) {
+      const preparationId = randomBytes(16).toString("hex");
+      const identity = {
+        session,
+        lease: lease.lease,
+        instanceId,
+        target: target.name,
+        pageId,
+        timeOrigin: pageTimeOrigin,
+        url,
+      };
+      const identitySha256 = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+      const deadline = performance.now() + prepareSeconds * 1000;
+      const readyPath = join(root, "prepare-ready.json");
+      manifest.stage = "preparing";
+      manifest.preparation = {
+        preparationId,
+        identity,
+        identitySha256,
+        readyPath,
+        scriptPath,
+        expiresUtc: new Date(Date.now() + prepareSeconds * 1000).toISOString(),
+      };
+      save();
+      let nextEvidence = 0;
+      while (true) {
+        checkExternalAbort();
+        peer.check();
+        if (performance.now() >= deadline)
+          throw new Error("preparation deadline expired without acceptance");
+        if (performance.now() >= nextEvidence) {
+          await verify();
+          await geometry();
+          await pageIdentity();
+          const snapshot = await ab(["snapshot", "-i"]);
+          const stamp = Date.now();
+          const screenshot = join(root, `prepare-${stamp}.png`);
+          await ab(["screenshot", screenshot]);
+          write("preparation-evidence.tmp", {
+            ...(manifest.preparation as object),
+            observedUtc: stamp,
+            snapshot,
+            screenshot,
+            instruction:
+              "Read artifacts only; helper is sole driver. Atomically rename ready JSON after authoring script.",
+          });
+          renameSync(
+            join(root, "preparation-evidence.tmp"),
+            join(root, "preparation-evidence.json"),
+          );
+          nextEvidence = performance.now() + 10000;
+        }
+        try {
+          const ready = boundedDocument(readyPath);
+          const scriptBytes = boundedDocument(scriptPath);
+          script = acceptPreparation(ready, scriptBytes, preparationId, identitySha256);
+          validate(url, seconds, script);
+          await verify();
+          await geometry();
+          await pageIdentity();
+          if (performance.now() >= deadline)
+            throw new Error("preparation acceptance exceeded deadline");
+          manifest.preparationAccepted = { utc: Date.now(), ready: JSON.parse(ready.toString()) };
+          writeFileSync(join(root, "accepted-actions.json"), scriptBytes, { mode: 0o600 });
+          save();
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        await Bun.sleep(200);
+      }
+    }
+    validate(url, seconds, script);
     let stable = 0;
     for (let attempt = 0; attempt < 4 && stable < 2; attempt++) {
       await peer.rpc("snapshot");
@@ -429,10 +538,28 @@ async function run(): Promise<void> {
     recording = true;
     save();
     manifest.captureStart = await peer.rpc("start", { seconds });
+    publish(root, "browser-capture-started.json", {
+      version: 1,
+      session,
+      pageId,
+      captureStart: manifest.captureStart,
+      utc: Date.now(),
+    });
     save();
     await Bun.sleep(1000); // Bounded stable-page lead-in, retained in source timestamps.
     const actionStart = performance.now();
     const actionReceipts = manifest.actions as unknown[];
+    const scriptSha256 =
+      (manifest.preparationAccepted as { ready?: { scriptSha256?: string } } | undefined)?.ready
+        ?.scriptSha256 ?? digest(Buffer.from(JSON.stringify(script)));
+    const coordinationIdentity = {
+      session,
+      pageId,
+      scriptSha256,
+      preparationId:
+        (manifest.preparation as { preparationId?: string } | undefined)?.preparationId ?? null,
+    };
+    let actionIndex = 0;
     for (const action of script) {
       peer.check();
       await peer.rpc("status");
@@ -441,6 +568,29 @@ async function run(): Promise<void> {
       await pageIdentity();
       if (performance.now() - captureDispatch > (seconds - 2) * 1000)
         throw new Error("actions exceeded recording budget");
+      const prefix = `action-${String(actionIndex).padStart(3, "0")}`;
+      const intent = newIntent(coordinationIdentity, actionIndex, action);
+      const checkCoordination = async () => {
+        if (!peer) throw new Error("missing owned peer");
+        checkExternalAbort();
+        peer.check();
+        await peer.rpc("status");
+        if (performance.now() - captureDispatch > (seconds - 2) * 1000)
+          throw new Error("coordination exceeded capture budget");
+      };
+      if (coordinationSeconds) {
+        const intentSha256 = publish(root, `${prefix}-intent.json`, intent);
+        await waitReply(
+          join(root, `${prefix}-permit.json`),
+          { intentId: intent.intentId, intentSha256, allow: true },
+          performance.now() + coordinationSeconds * 1000,
+          checkCoordination,
+        );
+        await verify();
+        await geometry();
+        await pageIdentity();
+        await checkCoordination();
+      }
       const start = performance.now();
       let receipt: unknown;
       if (action.type === "wait") await Bun.sleep(action.ms);
@@ -491,6 +641,22 @@ async function run(): Promise<void> {
       if (performance.now() - captureDispatch > (seconds - 2) * 1000)
         throw new Error("action completed outside recording budget");
       await peer.rpc("status");
+      const completion = {
+        ...intent,
+        receipt,
+        startMs: start - actionStart,
+        endMs: performance.now() - actionStart,
+      };
+      if (coordinationSeconds) {
+        const completionSha256 = publish(root, `${prefix}-completion.json`, completion);
+        await waitReply(
+          join(root, `${prefix}-ack.json`),
+          { intentId: intent.intentId, completionSha256, accepted: true },
+          performance.now() + coordinationSeconds * 1000,
+          checkCoordination,
+        );
+      }
+      actionIndex++;
       actionReceipts.push({
         action,
         startMs: start - actionStart,
@@ -506,6 +672,13 @@ async function run(): Promise<void> {
     if (performance.now() - captureDispatch > (seconds - 1) * 1000)
       throw new Error("final tail exceeded recording budget");
     manifest.captureStop = await peer.rpc("stop");
+    publish(root, "browser-capture-stopped.json", {
+      version: 1,
+      session,
+      pageId,
+      captureStop: manifest.captureStop,
+      utc: Date.now(),
+    });
     manifest.stage = "copying";
     save();
     const video = join(root, "source.mp4");
@@ -583,6 +756,14 @@ async function run(): Promise<void> {
     safety.trip(error);
     manifest.status = "pending";
     manifest.error = String(error);
+    publish(root, "helper-failure.json", {
+      version: 1,
+      session,
+      pageId,
+      error: String(error),
+      stage: manifest.stage,
+      utc: Date.now(),
+    });
     save();
     clearInterval(monitor);
     peer?.revoke();

@@ -29,7 +29,11 @@ export class ExecPeer {
     readonly instanceId: string,
     port: number,
     private readonly onFailure: (error: Error) => void = () => {},
+    private readonly lifetimeSeconds = 300,
+    private readonly beforeRpc: () => void = () => {},
   ) {
+    if (!Number.isInteger(lifetimeSeconds) || lifetimeSeconds < 300 || lifetimeSeconds > 1200)
+      throw new Error("exec lifetime must be 300..1200 seconds");
     if (backend.remoteHost !== null || new URL(backend.baseUrl).hostname !== "127.0.0.1")
       throw new Error("first slice requires local loopback Hypeman API");
     this.bridge = new FixedBridge(
@@ -59,7 +63,7 @@ export class ExecPeer {
         JSON.stringify({
           command: ["python3", "-c", boot],
           tty: true,
-          timeout: 300,
+          timeout: this.lifetimeSeconds,
           wait_for_agent: 3,
         }),
       );
@@ -144,6 +148,7 @@ export class ExecPeer {
     fields: Record<string, unknown> = {},
     timeout = 10000,
   ): Promise<Record<string, unknown>> {
+    this.beforeRpc();
     this.check();
     const request = ++this.sequence;
     return new Promise((resolve, reject) => {
