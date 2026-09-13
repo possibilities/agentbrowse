@@ -154,9 +154,10 @@ class Peer:
             self.stopping.set()
             if self.server:
                 self.server.close()
-                await self.server.wait_closed()
             for writer, _, _ in list(self.streams.values()):
                 writer.close()
+            if self.server:
+                await self.server.wait_closed()
             for task in list(self.tasks) + workers:
                 task.cancel()
             await asyncio.gather(*list(self.tasks), *workers, return_exceptions=True)

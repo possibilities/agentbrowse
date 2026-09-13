@@ -120,6 +120,7 @@ test("revocation closes existing TCP streams as well as the listener", async () 
   peer.send({ type: "revoke" });
   await ended;
   await peer.child.exited;
+  await peer.reading;
   expect(peer.bridge.active).toBe(0);
   expect(peer.messages.some((m) => m.type === "stopped")).toBe(true);
   await expect(connect(p)).rejects.toThrow();
