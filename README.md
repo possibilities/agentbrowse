@@ -1,3 +1,5 @@
+> *Slop Made With Sweat: Made with a lot of love by someone who loves code but read none of it.*
+
 # AgentBrowse
 
 AgentBrowse runs persistent Kernel browsers in Hypeman VMs on Apple silicon
