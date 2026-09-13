@@ -10,6 +10,7 @@ import type { Target } from "../../cli/model.ts";
 import { browserFarm } from "../../cli/runtime.ts";
 import type { SessionReceipt } from "../../cli/sessions.ts";
 import { loadAgentbrowseConfig } from "../../config/deployment.ts";
+import { OBSERVE_CONTROLS } from "./controls.ts";
 import { digest, newIntent, publish, waitReply } from "./coordination.ts";
 import { ExecPeer } from "./exec.ts";
 import { assertOwner } from "./identity.ts";
@@ -478,6 +479,7 @@ async function run(): Promise<void> {
           await geometry();
           await pageIdentity();
           const snapshot = await ab(["snapshot", "-i"]);
+          const controls = (await ab(["eval", OBSERVE_CONTROLS])).result;
           const stamp = Date.now();
           const screenshot = join(root, `prepare-${stamp}.png`);
           await ab(["screenshot", screenshot]);
@@ -485,6 +487,7 @@ async function run(): Promise<void> {
             ...(manifest.preparation as object),
             observedUtc: stamp,
             snapshot,
+            controls,
             screenshot,
             instruction:
               "Read artifacts only; helper is sole driver. Atomically rename ready JSON after authoring script.",

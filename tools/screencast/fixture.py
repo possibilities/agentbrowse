@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 root = Path(sys.argv[1]).resolve()
 root.mkdir(mode=0o700)
 events = []
-html = b'''<!doctype html><title>Isolated screencast fixture</title><style>body{font:30px sans-serif;background:#162024;color:#eef3e8;padding:40px}button,select{font:inherit;margin:20px;padding:10px}#clock{font:40px monospace}</style><h1>Mac app / isolated recording</h1><button id="write">Write</button><select id="route"><option value="parallel">Parallel</option><option value="splayed">Splayed</option><option value="circuit">Circuit</option></select><p id="result">Ready</p><p id="live">waiting</p><p id="clock"></p><script>window.nonce=crypto.randomUUID();setInterval(()=>clock.textContent=performance.now().toFixed(0),50);window.liveCount=0;new EventSource('/live').onmessage=e=>{live.textContent=e.data;fetch('/live-event',{method:'POST',body:String(++liveCount)})};write.onclick=async()=>{result.textContent=await(await fetch('/write',{method:'POST'})).text();const end=performance.now()+1500;while(performance.now()<end){}};route.onchange=e=>fetch('/event',{method:'POST',body:JSON.stringify({value:route.value,trusted:e.isTrusted,nonce})});</script>'''
+html = b'''<!doctype html><title>Isolated screencast fixture</title><style>body{font:30px sans-serif;background:#162024;color:#eef3e8;padding:40px}button,select{font:inherit;margin:20px;padding:10px}#clock{font:40px monospace}</style><h1>Mac app / isolated recording</h1><button id="write">Write</button><select id="route"><option value="parallel">Parallel</option><option value="splayed">Splayed</option><option value="circuit">Circuit</option></select><label for="weight">Trace weight fixture</label><input id="weight" type="range" min="10" max="80" step="5" value="35"><p id="result">Ready</p><p id="live">waiting</p><p id="clock"></p><script>window.nonce=crypto.randomUUID();setInterval(()=>clock.textContent=performance.now().toFixed(0),50);window.liveCount=0;new EventSource('/live').onmessage=e=>{live.textContent=e.data;fetch('/live-event',{method:'POST',body:String(++liveCount)})};write.onclick=async()=>{result.textContent=await(await fetch('/write',{method:'POST'})).text();const end=performance.now()+1500;while(performance.now()<end){}};route.onchange=e=>fetch('/event',{method:'POST',body:JSON.stringify({value:route.value,trusted:e.isTrusted,nonce})});</script>'''
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -88,6 +88,10 @@ def coordinate_fixture():
             atomic('supervisor-abort.json', {'reason': 'disposable preparation abort fixture'})
             coordination_events.append({'stage': 'abort-preparation', 'monotonic': time.monotonic()})
             return
+        weight = next(c for c in evidence['controls']['controls'] if c['id'] == 'weight')
+        if (weight['min'], weight['max'], weight['step'], weight['value']) != ('10', '80', '5', '35'):
+            raise RuntimeError('real control attributes not observed')
+        if not weight['visible'] or weight['rect']['width'] <= 0: raise RuntimeError('missing control rectangle')
         if 'Write' not in json.dumps(evidence['snapshot']): raise RuntimeError('fixture control not observed')
         # Longer than the driver's 30s idle limit: helper evidence polling must
         # preserve the same driver/page while the author works.

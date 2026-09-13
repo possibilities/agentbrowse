@@ -1,0 +1,7 @@
+# Read-only numeric control evidence
+
+Adds one fixed DOM observation to same-target preparation, alongside snapshot and screenshot. It reads current numeric values, raw min/max/step, labels/unique-ID selectors, states, rectangles and bounded select options. No caller expression, browser input, focus/scroll or DOM mutation is added. Bound256 controls/64 options/160char text; flags indicate truncation. Text/password/file/hidden values are omitted. Raw absent attrs remain null; supervisor must validate actual finite values and not guess constraints.
+
+Evidence: full bun run check236pass/5skip, lint/TypeScript/Zig completed (controls-full-check.log). New tests verify text/password redaction and collection caps. Real disposable coordinated fixture09 /Users/arthack/code/screencast-controls-fixture-09 exit0/released: observed actual range min10/max80/step5/value35, numeric35, visible rect129x16, unique#weight selector. Fixture coordinator checks those attributes/rectangle before ready. Same-target preparation,11handshakes, source copy/hash/full decode and exact cleanup complete. No native supervisor/device or Studio validation claim.
+
+Protocol field details are appended to preparation-protocol.md. Preparation observations occur successively, not atomically; screenshot and subsequent state checks still matter. Frozen core changes are tools/screencast/controls.ts and run.ts; fixture.py adds the real range and assertions. agent-browser remains unchanged.
