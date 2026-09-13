@@ -377,3 +377,7 @@ bun run check
 ```
 
 This checks the Bun/TypeScript CLI and runs the Zig test suite.
+
+## Opt-in screencast helper (review stage)
+
+The isolated [local Hypeman screencast helper](tools/screencast/README.md) combines a single-loopback-origin grant, installed agent-browser actions and guest-native recording. It is not installed as a default command and changes no fleet configuration. Use its disposable fixture before reviewing an application-specific recording script.
