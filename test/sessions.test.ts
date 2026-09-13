@@ -20,6 +20,7 @@ function setup() {
   let shutdownError = false;
   let launchError = false;
   const destroyed: string[] = [];
+  const destroyedIds: (string | undefined)[] = [];
   const targets = new Map<string, ReturnType<typeof targetFor>>();
   const farm = {
     bindings,
@@ -45,7 +46,14 @@ function setup() {
         created: true,
       };
     },
-    async destroy(name: string, backend: string, profile: string) {
+    async destroy(
+      name: string,
+      backend: string,
+      profile: string,
+      _force: boolean,
+      instanceId?: string,
+    ) {
+      destroyedIds.push(instanceId);
       if (shutdownError) throw new Error("shutdown failed");
       destroyed.push(name);
       targets.delete(profile);
@@ -62,6 +70,7 @@ function setup() {
     farm,
     profiles,
     destroyed,
+    destroyedIds,
     targets,
     setShutdownError: (v: boolean) => {
       shutdownError = v;
@@ -168,4 +177,16 @@ test("provider cleanup cannot substitute another target under the same lease", a
     }),
   ).rejects.toMatchObject({ code: "session_target_changed" });
   expect(profiles.has(receipt.profile)).toBe(true);
+});
+
+test("release carries original instance ID to destruction under the lease lock", async () => {
+  const { sessions, destroyedIds } = setup();
+  const { receipt } = await sessions.launch("uuid-owner");
+  await sessions.release(receipt.session, receipt.lease, {
+    browserTarget: receipt.target!.name,
+    browserProfile: receipt.profile,
+    backend: "local",
+    instanceId: "original-uuid",
+  });
+  expect(destroyedIds).toEqual(["original-uuid"]);
 });

@@ -249,6 +249,7 @@ export class BrowserFleet {
     backendId?: string,
     profileHint?: string,
     force = false,
+    expectedInstanceId?: string,
   ): Promise<DestroyResult> {
     validateName(name);
     if (profileHint !== undefined) validateName(profileHint);
@@ -261,7 +262,7 @@ export class BrowserFleet {
     const bound = targetBound ?? currentBound;
     if (bound !== undefined) {
       await bound.probeAvailability();
-      const result = await bound.destroy(name, true, force);
+      const result = await bound.destroy(name, true, force, expectedInstanceId);
       await this.clearDestroyedTarget(result, profileHint);
       return result;
     }
@@ -280,14 +281,14 @@ export class BrowserFleet {
     for (const farm of this.farms) {
       const match = (await farm.list(undefined, true)).find((target) => target.name === name);
       if (match !== undefined) {
-        const result = await farm.destroy(name, true, force);
+        const result = await farm.destroy(name, true, force, expectedInstanceId);
         await this.clearDestroyedTarget(result, profileHint);
         return result;
       }
     }
     const firstAvailable = this.farms[0];
     if (firstAvailable === undefined) throw noBackendsConfigured();
-    const result = await firstAvailable.destroy(name, true, force);
+    const result = await firstAvailable.destroy(name, true, force, expectedInstanceId);
     await this.clearDestroyedTarget(result, profileHint);
     return result;
   }

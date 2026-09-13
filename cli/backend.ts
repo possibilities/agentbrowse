@@ -20,6 +20,7 @@ export interface ContainerMount {
 }
 
 export interface ContainerState {
+  instanceId?: string;
   image: string;
   labels: Readonly<Record<string, string>>;
   environment: readonly string[];
@@ -90,7 +91,7 @@ export interface FarmBackend {
   runBrowser(input: RunBrowserInput): Promise<void>;
   startContainer(container: string): Promise<void>;
   waitReady(target: Target, timeoutSeconds?: number): Promise<void>;
-  removeContainer(container: string, force?: boolean): Promise<void>;
+  removeContainer(container: string, force?: boolean, expectedInstanceId?: string): Promise<void>;
   withKernel<T>(target: Target, operation: (kernel: KernelBrowser) => Promise<T>): Promise<T>;
   missingImageRecovery(image: string): string;
 }

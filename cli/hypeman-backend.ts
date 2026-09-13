@@ -259,6 +259,7 @@ export class HypemanFarmBackend implements FarmBackend {
     const network = object(row.network ?? {});
     const address = network.ip;
     return {
+      instanceId: string(row.id),
       image: string(row.image),
       labels,
       running: row.state === "Running",
@@ -504,8 +505,12 @@ export class HypemanFarmBackend implements FarmBackend {
     };
   }
 
-  async removeContainer(container: string, force = false): Promise<void> {
-    const expected = this.observedIds.get(container);
+  async removeContainer(
+    container: string,
+    force = false,
+    expectedInstanceId?: string,
+  ): Promise<void> {
+    const expected = expectedInstanceId ?? this.observedIds.get(container);
     const i = await this.instance(container);
     if (!i) return;
     if (expected !== undefined && i.id !== expected)

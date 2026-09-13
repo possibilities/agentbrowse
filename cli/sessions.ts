@@ -198,7 +198,12 @@ export class ProviderSessions {
   async release(
     session: string,
     lease: string,
-    expected?: { browserTarget: string; browserProfile: string; backend: string },
+    expected?: {
+      browserTarget: string;
+      browserProfile: string;
+      backend: string;
+      instanceId?: string;
+    },
   ): Promise<{ released: boolean; profile?: string; preserved?: boolean }> {
     return this.lock(async () => {
       const receipt = await this.read(session);
@@ -231,7 +236,13 @@ export class ProviderSessions {
             "session_target_changed",
             "profile target changed; refusing stale cleanup",
           );
-        await this.farm.destroy(target.name, target.backend, receipt.profile);
+        await this.farm.destroy(
+          target.name,
+          target.backend,
+          receipt.profile,
+          false,
+          expected?.instanceId,
+        );
       }
       if (!receipt.persistent && binding) await this.farm.deleteProfile(receipt.profile);
       await rm(this.path(session));

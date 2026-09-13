@@ -8,8 +8,9 @@ const PROTOCOL = "agent-browser.plugin.v1";
 const CAPABILITY = "browser.provider";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
-type ProviderFarm = Pick<BrowserFleet, "provisionProfile" | "destroy"> &
-  Partial<Pick<BrowserFleet, "sessions">>;
+type ProviderFarm = Pick<BrowserFleet, "provisionProfile" | "destroy"> & {
+  sessions?: Pick<BrowserFleet["sessions"], "launch" | "release">;
+};
 
 export interface ProviderIdentity {
   readonly name: string;

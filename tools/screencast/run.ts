@@ -106,8 +106,8 @@ async function run(): Promise<void> {
     plugins: [
       {
         name: "agentbrowse",
-        command: join(homedir(), ".local/bin/agentbrowse"),
-        args: ["provider"],
+        command: process.execPath,
+        args: [new URL("provider.ts", import.meta.url).pathname, root, session],
         capabilities: ["browser.provider"],
       },
     ],
@@ -122,12 +122,14 @@ async function run(): Promise<void> {
     AGENTBROWSE_STATE_DIR: join(root, "state"),
     AGENTBROWSE_RUNTIME_DIR: join(root, "runtime"),
     AGENT_BROWSER_CONFIG: join(root, "driver.json"),
+    AGENT_BROWSER_IDLE_TIMEOUT_MS: "30000",
   });
   write("environment.json", {
     AGENTBROWSE_CONFIG: env.AGENTBROWSE_CONFIG,
     AGENTBROWSE_STATE_DIR: env.AGENTBROWSE_STATE_DIR,
     AGENTBROWSE_RUNTIME_DIR: env.AGENTBROWSE_RUNTIME_DIR,
     AGENT_BROWSER_CONFIG: env.AGENT_BROWSER_CONFIG,
+    AGENT_BROWSER_IDLE_TIMEOUT_MS: env.AGENT_BROWSER_IDLE_TIMEOUT_MS,
   });
   const farm = browserFarm(env),
     selectedBackend = loadAgentbrowseConfig(env).backends[0];
@@ -167,6 +169,13 @@ async function run(): Promise<void> {
   async function command(argv: string[], timeout = 15000): Promise<string> {
     safety.check();
     peer?.check();
+    if (
+      argv[0] === join(homedir(), ".local/bin/agent-browser") &&
+      driverPid &&
+      driverSocketDir &&
+      readFileSync(join(driverSocketDir, `${session}.pid`), "utf8").trim() !== String(driverPid)
+    )
+      throw new Error("driver incarnation changed; no dispatch");
     const proc = Bun.spawn(argv, { env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
     child = proc;
     const timer = setTimeout(() => proc.kill("SIGKILL"), timeout);
@@ -247,16 +256,42 @@ async function run(): Promise<void> {
     if (!lease || !target || !instanceId)
       throw new Error("cleanup pending: no saved exact lease and instance; no name-only close");
     await verify();
-    // Review gate: Sessions.release fences lease/target, but destroy's fresh
-    // inspect can replace the backend's observed UUID. It does not accept this
-    // helper's originally pinned UUID. A detached driver also lacks an owned
-    // child handle. Preserve exact recovery state instead of guessing cleanup.
     manifest.cleanupIdentity = { session, lease: lease.lease, target, instanceId };
-    throw new Error(
-      "cleanup pending: immutable-instance release and owned driver reap not yet supported by helper",
-    );
+    // No driver commands during this wait: they would refresh its idle timer.
+    if (!driverPid) throw new Error("cleanup pending: driver identity was not captured");
+    const deadline = performance.now() + 45000;
+    while (true) {
+      try {
+        process.kill(driverPid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") break;
+        throw error;
+      }
+      if (performance.now() > deadline)
+        throw new Error("cleanup pending: owned driver did not exit");
+      await Bun.sleep(200);
+    }
+    const detached = JSON.parse(readFileSync(join(root, "driver-detached.json"), "utf8"));
+    if (detached.lease !== lease.lease || detached.session !== session)
+      throw new Error("cleanup pending: missing exact detach acknowledgement");
+    await verify();
+    const released = await farm.sessions.release(session, lease.lease, {
+      browserTarget: target.name,
+      browserProfile: lease.profile,
+      backend: target.backend,
+      instanceId,
+    });
+    if (!released.released || (await farm.sessions.read(session)))
+      throw new Error("exact lease release not confirmed");
+    manifest.driverCleanup = {
+      pid: driverPid,
+      exited: true,
+      method: "official idle-timeout; no signals sent",
+    };
   }
 
+  let driverPid: number | undefined;
+  let driverSocketDir: string | undefined;
   let pageId: string | undefined;
   let pageTimeOrigin: number | undefined;
   async function pageIdentity(): Promise<void> {
@@ -321,6 +356,12 @@ async function run(): Promise<void> {
   }
   try {
     await ab(["open", "about:blank"]);
+    const driver = await ab(["session", "info"]);
+    if (!Number.isSafeInteger(driver.pid) || Number(driver.pid) < 2 || driver.active !== true)
+      throw new Error("exact driver PID unavailable");
+    driverPid = Number(driver.pid);
+    driverSocketDir = String(driver.socketDir);
+    manifest.driver = driver;
     lease = await farm.sessions.read(session);
     if (!lease?.target || lease.persistent) throw new Error("fresh disposable lease required");
     target = await farm.farms[0]?.readTarget(lease.target.name);

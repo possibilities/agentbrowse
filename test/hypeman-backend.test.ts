@@ -286,3 +286,24 @@ test("new profile preflight reserves both profile and default overlay without mu
   });
   expect(calls).toEqual(Array(3).fill("GET /resources"));
 });
+
+test("original caller UUID survives a later inspection of a same-name replacement", async () => {
+  const deletes: string[] = [];
+  const backend = new HypemanFarmBackend(settings, config, async (method, path) => {
+    if (method === "DELETE") {
+      deletes.push(path);
+      return;
+    }
+    if (path === "/volumes") return [volume];
+    if (path.startsWith("/instances/")) return instance("replacement-id");
+    throw new Error(`unexpected ${method} ${path}`);
+  });
+  // This deliberately refreshes the backend's ordinary observed-ID cache.
+  await backend.inspectContainer(target.container);
+  await expect(
+    backend.removeContainer(target.container, true, "original-id"),
+  ).rejects.toMatchObject({ code: "foreign_container" });
+  expect(deletes).toEqual([]);
+  await backend.removeContainer(target.container, true, "replacement-id");
+  expect(deletes).toEqual(["/instances/replacement-id"]);
+});

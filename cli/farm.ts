@@ -422,15 +422,23 @@ export class BrowserFarm {
     });
   }
 
-  async destroy(name: string, hostVerified = false, force = false): Promise<DestroyResult> {
+  async destroy(
+    name: string,
+    hostVerified = false,
+    force = false,
+    expectedInstanceId?: string,
+  ): Promise<DestroyResult> {
     validateName(name);
-    return await this.withAllocationLock(() => this.destroyTarget(name, hostVerified, force));
+    return await this.withAllocationLock(() =>
+      this.destroyTarget(name, hostVerified, force, expectedInstanceId),
+    );
   }
 
   private async destroyTarget(
     name: string,
     hostVerified = false,
     force = false,
+    expectedInstanceId?: string,
   ): Promise<DestroyResult> {
     if (!hostVerified) await this.backend.verifyHost();
     const [recorded, managed] = await Promise.all([
@@ -441,6 +449,11 @@ export class BrowserFarm {
     const discovered = managed.find((record) => record.name === name);
     const container = recorded?.container ?? discovered?.container ?? `agentbrowse-browser-${name}`;
     const state = await this.backend.inspectContainer(container);
+    if (expectedInstanceId !== undefined && state?.instanceId !== expectedInstanceId)
+      throw new CliError(
+        "foreign_container",
+        "original instance identity missing or replaced before release",
+      );
     if (state === undefined) {
       await this.removeTarget(name);
       return {
@@ -453,7 +466,7 @@ export class BrowserFarm {
     }
     const target = recorded ?? targetFromLabels(name, this.backend.id, container, state);
     verifyDestroyOwnership(state, target);
-    await this.backend.removeContainer(target.container, force);
+    await this.backend.removeContainer(target.container, force, expectedInstanceId);
     await this.removeTarget(name);
     return {
       name,
