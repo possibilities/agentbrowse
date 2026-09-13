@@ -91,11 +91,14 @@ export interface Contract {
   readonly commands: readonly ContractCommand[];
 }
 
-const GUIDANCE = `agentbrowse owns browser target lifecycle, session resolution, and human
-handoff. It does not touch pages. Clicking, typing, snapshots, refs, tabs,
-waits, uploads, and downloads belong to the third-party agent-browser CLI,
-which drives the target agentbrowse provisioned; that boundary is deliberate,
-and nothing here reads or manipulates page content.
+const GUIDANCE = `agentbrowse owns browser target lifecycle, session resolution, upload
+staging, and human handoff. It does not touch pages. Clicking, typing,
+snapshots, refs, tabs, waits, selecting staged files, and downloads belong to
+the third-party agent-browser CLI, which drives the target agentbrowse
+provisioned; that boundary is deliberate, and nothing here reads or manipulates
+page content. A remote Browser target cannot read a local path directly. Before
+agent-browser selects a file, session stage transfers its bytes to that exact
+target and returns the verified guest path.
 
 A session is a task's driver identity. New sessions are disposable by default:
 open one with agent-browser, then close it to remove both VM and temporary
@@ -182,6 +185,21 @@ const ERROR_CODES: readonly ContractErrorCode[] = [
   {
     code: "kernel_request_failed",
     meaning: "Kernel's native browser API failed or returned an invalid response.",
+  },
+  {
+    code: "invalid_upload_file",
+    meaning: "The upload source is not an absolute path to one readable regular file.",
+    recovery: "Pass an absolute local path with a safe filename.",
+  },
+  {
+    code: "upload_verification_failed",
+    meaning: "The staged file's byte count or SHA-256 digest does not match the local source.",
+    recovery: "Retry staging from a stable local file; do not select the partial file.",
+  },
+  {
+    code: "upload_cleanup_failed",
+    meaning: "AgentBrowse could not remove a partial staged upload from the Browser target.",
+    recovery: "Close the agent-browser session to delete its Browser target and staged files.",
   },
   {
     code: "profile_cleanup_failed",
@@ -480,13 +498,19 @@ const SESSION_ARGUMENT: ContractArgument = {
   default: "default",
 };
 
+const REQUIRED_SESSION_ARGUMENT: ContractArgument = {
+  ...SESSION_ARGUMENT,
+  default: undefined,
+  required: true,
+};
+
 export const CONTRACT: Contract = {
   contract_version: 1,
   meta: {
     name: "agentbrowse",
     version: packageJson.version,
     purpose:
-      "Create durable Kernel browser targets on ordered backends, resolve an agent-browser session to its exact live target, and hand that target to a human.",
+      "Create durable Kernel browser targets on ordered backends, stage verified uploads, resolve an agent-browser session to its exact live target, and hand that target to a human.",
     audience: "agent",
   },
   guidance: GUIDANCE,
@@ -501,6 +525,8 @@ export const CONTRACT: Contract = {
       slot: "A port slot from 0 to 999 fixing a target's CDP, Live View HTTP, and WebRTC ports. One target per slot.",
       backend:
         "A configured Hypeman host tried in configured order. A profile binds to the backend that first created it.",
+      staged_upload:
+        "One verified local file copied into a private temporary path in the exact active Browser target. The target's deletion removes it; it never enters the Browser profile.",
     },
     output_contract: {
       envelope: {
@@ -520,6 +546,7 @@ export const CONTRACT: Contract = {
     agent_defaults: [
       "Resolve, never guess: `agentbrowse resolve SESSION --json` names the exact live target incarnation.",
       "Let agent-browser provision and close targets through the provider; call create only for a target no driver session owns.",
+      "Before agent-browser selects a local file, stage its absolute path into the same active session and use the returned guest path.",
       "Close task sessions: disposable storage is removed, while explicitly saved profiles retain sign-ins.",
     ],
   },
@@ -555,7 +582,7 @@ export const CONTRACT: Contract = {
           guidance:
             "Public browsing needs no preparation: open a unique task session directly and close it to discard its storage. For your saved sign-ins, prepare a unique task session with profile personal before driver open. Only one session may own that profile. Keep the returned lease for recovery; a profile_leased result means wait for its owner, never use their session. Repeating prepare for the same session is idempotent.",
           arguments: [
-            { ...SESSION_ARGUMENT, required: true },
+            REQUIRED_SESSION_ARGUMENT,
             {
               name: "--profile",
               type: "string",
@@ -574,6 +601,26 @@ export const CONTRACT: Contract = {
             "Prepared and failed sessions remain visible until closed or explicitly released. Age alone is not permission to interrupt an agent or human handoff.",
         },
         {
+          name: "stage",
+          summary: "Stage one verified local file in a running session's Browser target",
+          audience: "agent",
+          mutates: true,
+          guidance:
+            "Call after agent-browser opens the same session. The file is streamed into a private temporary directory in that exact Browser target, then its byte count and SHA-256 are verified. Give the returned path to agent-browser's upload command; never give it the original local path for a remote target. Agent-browser still owns the page selector and file-input action. Confirm the page received the expected nonzero size before continuing. Closing the session deletes the staged file with the target.",
+          arguments: [
+            REQUIRED_SESSION_ARGUMENT,
+            {
+              name: "path",
+              type: "string",
+              format: "path",
+              direction: "in",
+              description: "Absolute local path of one readable regular file",
+              positional: true,
+              required: true,
+            },
+          ],
+        },
+        {
           name: "release",
           summary: "Recover one exact session lease and clean up its browser",
           audience: "agent",
@@ -581,7 +628,7 @@ export const CONTRACT: Contract = {
           guidance:
             "Normally close through the driver. For a failed launch or abandoned session, release its exact lease only after confirming no active work or human handoff remains. Removes disposable storage; preserves saved profiles. A stale lease cannot close a replacement session.",
           arguments: [
-            { ...SESSION_ARGUMENT, required: true },
+            REQUIRED_SESSION_ARGUMENT,
             {
               name: "--lease",
               type: "string",
@@ -803,7 +850,7 @@ export const CONTRACT: Contract = {
       mutates: true,
       blocking: true,
       guidance:
-        "Every audience: agent leaf above becomes a tool, generated from this contract at start-up; adding one here adds a tool with no further edit. provider stays hidden because its audience is internal, and so does mcp itself. Dispatch happens in this same process, through the exact functions create, list, destroy, profile, resolve, and view already call — nothing is spawned and no argv is re-parsed. The server therefore owns the same three responsibilities as the CLI: browser target lifecycle, session resolution, and human handoff through view. Page interaction — clicking, typing, snapshots — stays with the third-party agent-browser CLI and is deliberately absent here.",
+        "Every audience: agent leaf above becomes a tool, generated from this contract at start-up; adding one here adds a tool with no further edit. provider stays hidden because its audience is internal, and so does mcp itself. Dispatch happens in this same process, through the exact functions create, list, destroy, profile, stage, resolve, and view already call — nothing is spawned and no argv is re-parsed. The server therefore owns the same four responsibilities as the CLI: browser target lifecycle, session-scoped upload staging, session resolution, and human handoff through view. Page interaction — clicking, typing, snapshots, and selecting a staged file input — stays with the third-party agent-browser CLI and is deliberately absent here.",
       arguments: [],
     },
   ],

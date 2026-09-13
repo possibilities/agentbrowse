@@ -77,6 +77,13 @@ type Parsed =
       lease?: string;
       json: boolean;
     }
+  | {
+      command: "session";
+      action: "stage";
+      session: string;
+      path: string;
+      json: boolean;
+    }
   | { command: "session"; action: "list"; json: boolean }
   | ParsedCreate
   | ParsedDestroy
@@ -160,7 +167,7 @@ export function parseArgs(argv: readonly string[]): Parsed {
     if (action === "list" && args.length === 2) return { command, action, json };
     const session = args[2];
     if (!session || session.startsWith("--"))
-      throw new UsageError("session prepare/release requires a session name");
+      throw new UsageError("session prepare/stage/release requires a session name");
     if (action === "prepare") {
       if (args.length === 3) return { command, action, session, json };
       if (args.length === 5 && args[3] === "--profile")
@@ -168,8 +175,14 @@ export function parseArgs(argv: readonly string[]): Parsed {
     }
     if (action === "release" && args.length === 5 && args[3] === "--lease")
       return { command, action, session, lease: takeValue(args, 3, "--lease"), json };
+    if (action === "stage") {
+      const path = args[3];
+      if (!path || path.startsWith("--"))
+        throw new UsageError("session stage requires an absolute local file path");
+      if (args.length === 4) return { command, action, session, path, json };
+    }
     throw new UsageError(
-      "use session prepare SESSION [--profile NAME], session list, or session release SESSION --lease LEASE",
+      "use session prepare SESSION [--profile NAME], session list, session stage SESSION ABSOLUTE_PATH, or session release SESSION --lease LEASE",
     );
   }
   if (command === "profile") {
@@ -425,6 +438,22 @@ export async function resolveWithTimeout(
   }
 }
 
+export async function stageSessionUpload(
+  session: string,
+  path: string,
+  farm: Pick<BrowserFleet, "targetForProfile" | "stageUpload"> &
+    Partial<Pick<BrowserFleet, "sessions">>,
+): Promise<Record<string, unknown>> {
+  const resolved = await resolveWithTimeout(session, farm);
+  const staged = await farm.stageUpload(resolved.target, path);
+  return {
+    session,
+    profile: resolved.profile,
+    target: { name: resolved.target.name, backend: resolved.target.backend },
+    ...staged,
+  };
+}
+
 export async function run(argv: readonly string[], env = process.env): Promise<number> {
   const json = argv.includes("--json");
   let parsed: Parsed;
@@ -477,7 +506,9 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
           ? await farm.sessions.list()
           : parsed.action === "prepare"
             ? await farm.sessions.prepare(parsed.session, parsed.profile)
-            : await farm.sessions.release(parsed.session, parsed.lease!);
+            : parsed.action === "stage"
+              ? await stageSessionUpload(parsed.session, parsed.path, farm)
+              : await farm.sessions.release(parsed.session, parsed.lease!);
       process.stdout.write(parsed.json ? success(result) : `${JSON.stringify(result, null, 2)}\n`);
     } else if (parsed.command === "create") {
       const result = await farm.create({

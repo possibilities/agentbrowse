@@ -103,6 +103,29 @@ The first launch chooses an available backend with disk capacity, then binds the
 profile there. Fresh disposable launches start with empty profile storage; saved profiles
 retain their backend home. No state is silently merged or moved across hosts.
 
+### Upload a local file through a remote Browser target
+
+Chrome resolves file-input paths inside the Browser target, not on the machine
+running agent-browser. Passing a local path directly can therefore create a
+zero-byte `File` even though agent-browser reports that it selected the input.
+Stage each file after opening the same session, then give agent-browser the
+returned guest path:
+
+```sh
+agent-browser --session research-task open https://example.com/upload
+staged_path="$(agentbrowse session stage research-task \
+  /absolute/path/to/video.mp4 --json | jq -er '.data.path')"
+agent-browser --session research-task upload '#file-input' "$staged_path"
+```
+
+`session stage` streams one regular file through Kernel's native filesystem API
+into the exact running Browser target and returns its guest `path`, `bytes`, and
+`sha256` only after verifying all three. It never selects a page element or
+submits a form. Confirm the page's selected file has the expected nonzero size
+before continuing. The private staged file lives outside the Browser profile
+and disappears when agent-browser closes and deletes the target. See
+[remote file uploads](docs/uploads.md).
+
 Failed launches retain recoverable ownership. `agentbrowse session list --json`
 shows prepared, running and failed leases. Recover an ended task with
 `agentbrowse session release SESSION --lease LEASE --json`. A stale lease cannot
@@ -111,8 +134,9 @@ based only on age. At most 16 unfinished disposable sessions can be retained;
 shutdown failures preserve state and consume a slot until recovered.
 
 The `browser` skill is the complete MCP workflow. `session_prepare`,
-`session_list` and `session_release` expose these same operations. A running MCP
-host may need to rediscover tools after upgrade; the CLI works immediately.
+`session_list`, `session_stage`, and `session_release` expose these same
+operations. A running MCP host may need to rediscover tools after upgrade; the
+CLI works immediately.
 
 No provider server runs locally. agent-browser starts `agentbrowse provider`
 for one `plugin.manifest`, `browser.launch`, or `browser.close` request; the

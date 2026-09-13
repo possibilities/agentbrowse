@@ -13,8 +13,12 @@ import type {
   ProfileListEntry,
   ProvisionOptions,
 } from "./farm.ts";
-import { type ProfileArchiveResult, validateProfileArchive } from "./kernel.ts";
-import { profileFor, validateName } from "./model.ts";
+import {
+  type ProfileArchiveResult,
+  type StagedUploadResult,
+  validateProfileArchive,
+} from "./kernel.ts";
+import { profileFor, targetFor, validateName } from "./model.ts";
 import { ProfileBindingStore, requireReadyProfile } from "./profile-binding.ts";
 
 import { ProviderSessions } from "./sessions.ts";
@@ -123,6 +127,22 @@ export class BrowserFleet {
     const farm = this.requireFarm(binding.backend);
     await farm.probeAvailability(signal);
     return await farm.targetFromBinding(binding.target, signal);
+  }
+
+  async stageUpload(target: BrowserListEntry, path: string): Promise<StagedUploadResult> {
+    const farm = this.requireFarm(target.backend);
+    if (target.profile === null) {
+      throw new CliError(
+        "target_profile_mismatch",
+        `Browser target ${target.name} has no Browser profile identity`,
+      );
+    }
+    const exact = targetFor(target.name, target.slot, {
+      profile: target.profile,
+      backend: target.backend,
+      container: target.container,
+    });
+    return await farm.backend.withKernel(exact, (kernel) => kernel.stageUpload(path));
   }
 
   async createProfile(name: string): Promise<ProfileCreateResult> {

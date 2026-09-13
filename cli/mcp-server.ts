@@ -37,6 +37,7 @@ import {
   profileListPayload,
   resolvePayload,
   resolveWithTimeout,
+  stageSessionUpload,
 } from "./main.ts";
 import { type AgentTool, agentTools, serverInstructions } from "./mcp-tools.ts";
 import { browserFarm } from "./runtime.ts";
@@ -108,6 +109,8 @@ async function dispatch(
       );
     case "session_list":
       return await farm.sessions.list();
+    case "session_stage":
+      return await stageSessionUpload(args["session"] as string, args["path"] as string, farm);
     case "session_release":
       return await farm.sessions.release(args["session"] as string, args["lease"] as string);
     case "create": {

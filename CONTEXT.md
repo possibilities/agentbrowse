@@ -29,6 +29,12 @@ provider maps to one Browser profile and, while running, one exact Browser targe
 incarnation. Closing and relaunching it preserves the profile but changes the target.
 _Avoid: Browser session, target name, profile name._
 
+**Staged upload** — One local regular file streamed into a private temporary
+path inside an Agent-browser session's exact running Browser target. AgentBrowse
+verifies its byte count and SHA-256 before the path reaches agent-browser; target
+deletion removes it without writing it into the Browser profile.
+_Avoid: attachment, uploaded post, profile file._
+
 **Ordered backend set** — The configured sequence of independently identified
 Browser target runtimes. Provisioning considers them in order and advances only
 when the current backend reports a classified availability failure, or a pre-mutation

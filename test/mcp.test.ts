@@ -134,7 +134,7 @@ describe("which commands become tools", () => {
       path.replace(/ /g, "_"),
     );
     expect(TOOLS.map((tool) => tool.name).sort()).toEqual([...wanted].sort());
-    expect(wanted.length).toBe(14);
+    expect(wanted.length).toBe(15);
   });
 
   test("no operator or internal leaf is exposed, mcp and provider included", () => {
@@ -162,6 +162,7 @@ describe("which commands become tools", () => {
     expect(TOOLS.map((tool) => tool.name)).toContain("profile_create");
     expect(TOOLS.map((tool) => tool.name)).toContain("profile_list");
     expect(TOOLS.map((tool) => tool.name)).toContain("profile_delete");
+    expect(TOOLS.map((tool) => tool.name)).toContain("session_stage");
     // Never prefixed with the CLI name: the host namespaces by server.
     expect(TOOLS.every((tool) => !tool.name.startsWith("agentbrowse"))).toBe(true);
   });
@@ -205,6 +206,15 @@ describe("the input schema", () => {
     const schema = schemaOf("resolve") as { properties: Record<string, Record<string, unknown>> };
     expect(schema.properties["session"]?.["default"]).toBe("default");
   });
+
+  test("session stage requires one local input path", () => {
+    const schema = schemaOf("session_stage") as {
+      properties: Record<string, Record<string, unknown>>;
+      required: string[];
+    };
+    expect(schema.properties["path"]?.["type"]).toBe("string");
+    expect(schema.required).toEqual(expect.arrayContaining(["session", "path"]));
+  });
 });
 
 describe("annotations", () => {
@@ -223,6 +233,11 @@ describe("annotations", () => {
     expect(annotationsOf("destroy")).toMatchObject({ readOnlyHint: false, destructiveHint: true });
     expect(annotationsOf("profile_delete")).toMatchObject({ destructiveHint: true });
     expect(annotationsOf("create")).toMatchObject({ destructiveHint: false, idempotentHint: true });
+    expect(annotationsOf("session_stage")).toMatchObject({
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    });
   });
 
   test("session list and guide stay local; other leaves reach a backend", () => {

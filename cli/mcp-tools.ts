@@ -218,14 +218,16 @@ const REMOVING_VERBS = new Set([
 ]);
 
 /**
- * Full paths whose repeat call is NOT a no-op. Empty for agentbrowse, unlike
- * AgentBoard's `add`: `create` and `profile create` both report `created:
+ * Full paths whose repeat call is NOT a no-op. `session stage` creates a fresh
+ * private guest path on every call so an uncertain transfer can never be
+ * mistaken for the caller's first result. Unlike AgentBoard's `add`, `create`
+ * and `profile create` both report `created:
  * false` and hand back the existing target or profile on a repeat instead of
  * making a second one, and `destroy` / `profile delete` already tolerate an
  * absent target by reporting `destroyed: false` / `deleted: false`. Nothing
  * here appends.
  */
-const APPENDING: ReadonlySet<string> = new Set<string>();
+const APPENDING: ReadonlySet<string> = new Set<string>(["session stage"]);
 
 /**
  * Full paths that reach a configured backend. Unlike AgentBoard, whose store
@@ -237,6 +239,7 @@ const APPENDING: ReadonlySet<string> = new Set<string>();
  */
 const NETWORK: ReadonlySet<string> = new Set([
   "session prepare",
+  "session stage",
   "session release",
   "create",
   "list",

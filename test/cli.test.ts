@@ -103,6 +103,13 @@ test("parse target, profile, provider, resolve, and view commands", () => {
     session: "default",
     json: false,
   });
+  expect(parseArgs(["session", "stage", "research-task", "/tmp/a video.mp4", "--json"])).toEqual({
+    command: "session",
+    action: "stage",
+    session: "research-task",
+    path: "/tmp/a video.mp4",
+    json: true,
+  });
 });
 
 test("create requires an explicit slot", () => {
@@ -124,4 +131,8 @@ test("unknown command and extra destroy flags are usage faults", () => {
   expect(() => parseArgs(["profile", "unknown"])).toThrow(UsageError);
   expect(() => parseArgs(["profile", "create"])).toThrow(UsageError);
   expect(() => parseArgs(["profile", "list", "extra"])).toThrow(UsageError);
+  expect(() => parseArgs(["session", "stage", "research-task"])).toThrow(UsageError);
+  expect(() => parseArgs(["session", "stage", "research-task", "/tmp/a", "extra"])).toThrow(
+    UsageError,
+  );
 });

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { BrowserListEntry } from "../cli/farm.ts";
+import { stageSessionUpload } from "../cli/main.ts";
 import { providerSessionProfileName, resolveProviderTarget } from "../cli/resolve.ts";
 
 function target(
@@ -65,4 +66,32 @@ test("resolution refuses absent, stopped, and ambiguous exact targets", async ()
       targetForProfile: async () => ({ ...target("research"), slotConflict: true }),
     }),
   ).rejects.toMatchObject({ code: "browser_target_slot_conflict" });
+});
+
+test("session staging resolves first and returns the exact target with the verified guest path", async () => {
+  const staged: Array<{ target: BrowserListEntry; path: string }> = [];
+  const result = await stageSessionUpload("research", "/tmp/video.mp4", {
+    targetForProfile: async (profile) => target(profile),
+    stageUpload: async (resolved, path) => {
+      staged.push({ target: resolved, path });
+      return {
+        path: "/tmp/agentbrowse-upload-0123456789abcdef0123456789abcdef/video.mp4",
+        bytes: 123,
+        sha256: "a".repeat(64),
+      };
+    },
+  });
+
+  expect(staged).toEqual([{ target: target("research"), path: "/tmp/video.mp4" }]);
+  expect(result).toEqual({
+    session: "research",
+    profile: "research",
+    target: {
+      name: "research-0123456789abcdef",
+      backend: "remote-docker",
+    },
+    path: "/tmp/agentbrowse-upload-0123456789abcdef0123456789abcdef/video.mp4",
+    bytes: 123,
+    sha256: "a".repeat(64),
+  });
 });

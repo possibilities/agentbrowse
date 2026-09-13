@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -167,5 +168,142 @@ test("invalid archive responses never publish a destination", async () => {
   } finally {
     server.stop(true);
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+function uploadFixture(options: { wrongDigest?: boolean; cleanupFails?: boolean } = {}) {
+  const calls: string[] = [];
+  let uploaded = Buffer.alloc(0);
+  let destination = "";
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === "/process/exec") {
+        const body = (await request.json()) as { command: string; args: string[] };
+        calls.push(body.command);
+        if (body.command === "sha256sum") {
+          const digest = options.wrongDigest
+            ? "0".repeat(64)
+            : createHash("sha256").update(uploaded).digest("hex");
+          return Response.json({
+            exit_code: 0,
+            stdout_b64: Buffer.from(`${digest}  ${destination}\n`).toString("base64"),
+          });
+        }
+        return Response.json({
+          exit_code: body.command === "rm" && options.cleanupFails ? 1 : 0,
+          stdout_b64: "",
+        });
+      }
+      if (url.pathname === "/fs/write_file") {
+        destination = url.searchParams.get("path") ?? "";
+        expect(url.searchParams.get("mode")).toBe("0600");
+        expect(request.headers.get("content-type")).toBe("application/octet-stream");
+        uploaded = Buffer.from(await request.arrayBuffer());
+        calls.push("write_file");
+        return new Response(null, { status: 201 });
+      }
+      if (url.pathname === "/fs/file_info") {
+        calls.push("file_info");
+        expect(url.searchParams.get("path")).toBe(destination);
+        return Response.json({
+          name: destination.split("/").at(-1),
+          path: destination,
+          size_bytes: uploaded.length,
+          is_dir: false,
+          mod_time: "2026-09-13T00:00:00Z",
+          mode: "-rw-------",
+        });
+      }
+      return new Response(null, { status: 404 });
+    },
+  });
+  return {
+    server,
+    calls,
+    get destination() {
+      return destination;
+    },
+    get uploaded() {
+      return uploaded;
+    },
+    kernel: new KernelBrowser(server.url.origin),
+  };
+}
+
+test("upload staging streams bytes into a private guest path and verifies size and digest", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "kernel-upload-"));
+  const fixture = uploadFixture();
+  try {
+    const bytes = Buffer.from("verified video bytes");
+    const source = join(directory, "sample video.mp4");
+    await writeFile(source, bytes);
+    const result = await fixture.kernel.stageUpload(source);
+    expect(result).toEqual({
+      path: fixture.destination,
+      bytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+    expect(result.path).toMatch(/^\/tmp\/agentbrowse-upload-[a-f0-9]{32}\/sample video\.mp4$/);
+    expect(fixture.uploaded).toEqual(bytes);
+    expect(fixture.calls).toEqual([
+      "mkdir",
+      "chown",
+      "write_file",
+      "chown",
+      "file_info",
+      "sha256sum",
+    ]);
+  } finally {
+    fixture.server.stop(true);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("upload staging refuses unverifiable bytes and removes only its exact partial directory", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "kernel-upload-mismatch-"));
+  const fixture = uploadFixture({ wrongDigest: true });
+  try {
+    const source = join(directory, "sample.mp4");
+    await writeFile(source, "source bytes");
+    await expect(fixture.kernel.stageUpload(source)).rejects.toMatchObject({
+      code: "upload_verification_failed",
+    });
+    expect(fixture.calls.at(-1)).toBe("rm");
+  } finally {
+    fixture.server.stop(true);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("upload staging reports a failed partial cleanup instead of hiding it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "kernel-upload-cleanup-"));
+  const fixture = uploadFixture({ wrongDigest: true, cleanupFails: true });
+  try {
+    const source = join(directory, "sample.mp4");
+    await writeFile(source, "source bytes");
+    await expect(fixture.kernel.stageUpload(source)).rejects.toMatchObject({
+      code: "upload_cleanup_failed",
+    });
+  } finally {
+    fixture.server.stop(true);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("upload staging requires an absolute regular local file before contacting Kernel", async () => {
+  const fixture = uploadFixture();
+  try {
+    await expect(fixture.kernel.stageUpload("relative.mp4")).rejects.toMatchObject({
+      code: "invalid_upload_file",
+    });
+    await expect(fixture.kernel.stageUpload(tmpdir())).rejects.toMatchObject({
+      code: "invalid_upload_file",
+    });
+    expect(fixture.calls).toEqual([]);
+  } finally {
+    fixture.server.stop(true);
   }
 });
