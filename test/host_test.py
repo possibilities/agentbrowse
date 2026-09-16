@@ -5,8 +5,11 @@ import tempfile
 import json
 import io
 import os
+import sys
+import threading
 import unittest
-from unittest.mock import patch
+import urllib.error
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -48,6 +51,141 @@ class HostSafetyTests(unittest.TestCase):
                 self.assertEqual(service.forwards[(30087, False)][0][2], "replacement")
                 service.close()
 
+    def test_macos_relay_idle_does_not_repeat_initial_hydration(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            service = Mock()
+            service.sync = Mock()
+            service.close = Mock()
+            control = relay.RelayControl(root, service)
+            try:
+                service.sync()
+                for _ in range(4):
+                    control.serve_once(timeout=0.01)
+                service.sync.assert_called_once_with()
+            finally:
+                control.close()
+
+    def test_macos_relay_refuses_to_replace_an_active_control_socket(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            first = relay.RelayControl(root, Mock())
+            try:
+                with self.assertRaisesRegex(RuntimeError, "already active"):
+                    relay.RelayControl(root, Mock())
+            finally:
+                first.close()
+
+    def test_macos_relay_control_acknowledges_lifecycle_sync(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            service = Mock()
+            service.sync = Mock()
+            service.close = Mock()
+            control = relay.RelayControl(root, service)
+            worker = threading.Thread(target=control.serve_once, kwargs={"timeout": 1})
+            worker.start()
+            try:
+                relay.request_sync(root)
+                worker.join(timeout=2)
+                self.assertFalse(worker.is_alive())
+                service.sync.assert_called_once_with()
+            finally:
+                control.close()
+
+    def test_local_network_sync_command_reaches_the_running_relay(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            service = Mock()
+            service.sync = Mock()
+            service.close = Mock()
+            control = relay.RelayControl(root, service)
+            worker = threading.Thread(target=control.serve_once, kwargs={"timeout": 1})
+            worker.start()
+            try:
+                with patch.object(host, "MAC", True), patch.object(
+                    sys, "argv", ["agentbrowse-hypeman", "--root", d, "network-sync"]
+                ), patch("sys.stdout", new_callable=io.StringIO) as output:
+                    host.main()
+                worker.join(timeout=2)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(json.loads(output.getvalue()), {"synchronized": True})
+                service.sync.assert_called_once_with()
+            finally:
+                control.close()
+
+    def test_macos_relay_control_reports_failure_and_clears_forwards(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            service = Mock()
+            service.sync.side_effect = RuntimeError("bad forwarding state")
+            service.close = Mock()
+            control = relay.RelayControl(root, service)
+            worker = threading.Thread(target=control.serve_once, kwargs={"timeout": 1})
+            worker.start()
+            try:
+                with self.assertRaisesRegex(RuntimeError, "bad forwarding state"):
+                    relay.request_sync(root)
+                worker.join(timeout=2)
+                self.assertFalse(worker.is_alive())
+                service.close.assert_called_once_with()
+            finally:
+                control.close()
+
+    def test_macos_supervisor_hydrates_once_then_waits_for_control(self):
+        class Child:
+            def __init__(self):
+                self.polls = 0
+
+            def poll(self):
+                self.polls += 1
+                return None if self.polls < 6 else 0
+
+        class Stopped:
+            @staticmethod
+            def is_set():
+                return False
+
+        service = Mock()
+        control = Mock()
+        module = Mock()
+        module.RelayControl.return_value = control
+        host.run_macos_relay(Path("/private/root"), service, Child(), Stopped(), module)
+        service.sync.assert_called_once_with()
+        self.assertGreaterEqual(control.serve_once.call_count, 1)
+        control.close.assert_called_once_with()
+
+    def test_macos_supervisor_does_not_retry_reachable_http_failures(self):
+        service = Mock()
+        service.sync.side_effect = urllib.error.HTTPError(
+            "http://localhost/instances", 401, "unauthorized", {}, io.BytesIO(b"unauthorized")
+        )
+        child = Mock()
+        child.poll.return_value = None
+        stopped = Mock()
+        stopped.is_set.return_value = False
+
+        with self.assertRaises(urllib.error.HTTPError):
+            host.run_macos_relay(Path("/private/root"), service, child, stopped, Mock())
+
+        service.sync.assert_called_once_with()
+        service.close.assert_called_once_with()
+
+    def test_macos_readiness_probes_api_once_while_waiting_for_control_socket(self):
+        relay_module = Mock()
+        relay_module.request_sync.side_effect = [RuntimeError("not listening yet"), None]
+        with patch.object(host, "request") as request, patch.object(host.time, "sleep"):
+            host.wait_ready(Path("/private/root"), relay_module, timeout=1)
+
+        request.assert_called_once_with(Path("/private/root"), "GET", "/instances", timeout=3)
+        self.assertEqual(relay_module.request_sync.call_count, 2)
+
+    def test_readiness_does_not_retry_reachable_api_failures(self):
+        with patch.object(host, "request", side_effect=host.HypemanHTTPError("Hypeman HTTP 401")) as request:
+            with self.assertRaisesRegex(host.HypemanHTTPError, "401"):
+                host.wait_ready(Path("/private/root"), timeout=1)
+        request.assert_called_once_with(Path("/private/root"), "GET", "/instances", timeout=3)
+
     def test_linux_forwarding_is_persistent_and_refuses_foreign_files(self):
         from types import SimpleNamespace
         with tempfile.TemporaryDirectory() as d:
@@ -62,6 +200,22 @@ class HostSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "foreign"):
                     installer.configure_linux_forwarding(path)
                 self.assertIn("ip_forward = 0", path.read_text())
+
+    def test_host_install_refreshes_forwarding_after_restoring_stopped_instances(self):
+        calls = []
+
+        def request(_root, method, path, body=None):
+            calls.append((method, path, body))
+            if method == "GET":
+                return [{"id": "running", "state": "Running"}, {"id": "stopped", "state": "Stopped"}]
+
+        with patch.object(installer, "run") as run:
+            restored = installer.restore_instances(
+                {"request": request}, Path("/owned/root"), ["running", "stopped"], Path("/owned/helper")
+            )
+        self.assertEqual(restored, 1)
+        self.assertIn(("POST", "/instances/stopped/start", {}), calls)
+        run.assert_called_once_with(sys.executable, Path("/owned/helper"), "network-sync")
 
     def test_caddy_cleanup_requires_exact_owned_orphan(self):
         root = Path("/home/operator/.local/share/ab-hypeman")

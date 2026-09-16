@@ -3,6 +3,7 @@ import {
   HYPEMAN_WRAPPER,
   HypemanFarmBackend,
   type HypemanRequest,
+  networkSyncCommand,
 } from "../cli/hypeman-backend.ts";
 import { KernelBrowser } from "../cli/kernel.ts";
 import { profileFor, targetFor } from "../cli/model.ts";
@@ -50,6 +51,7 @@ const volume = {
     "dev.agentbrowse.profile.schema": "1",
   },
 };
+const noNetworkSync = async () => {};
 function instance(id = "exact-id") {
   return {
     id,
@@ -65,12 +67,24 @@ function instance(id = "exact-id") {
 
 test("launch attaches the exact persistent volume and preserves requested resources and browser transport", async () => {
   const calls: { method: string; path: string; body?: unknown }[] = [];
-  const backend = new HypemanFarmBackend(settings, config, async (method, path, body) => {
-    calls.push({ method, path, body });
-    if (path === "/volumes") return [volume];
-    if (path === "/instances" && method === "POST") return instance();
-    throw new Error(`unexpected ${method} ${path}`);
-  });
+  const lifecycle: string[] = [];
+  let synchronizations = 0;
+  const backend = new HypemanFarmBackend(
+    settings,
+    config,
+    async (method, path, body) => {
+      calls.push({ method, path, body });
+      lifecycle.push(`${method} ${path}`);
+      if (path === "/volumes") return [volume];
+      if (path === "/instances" && method === "POST") return instance();
+      throw new Error(`unexpected ${method} ${path}`);
+    },
+    undefined,
+    async () => {
+      synchronizations++;
+      lifecycle.push("SYNC");
+    },
+  );
   await backend.runBrowser({ target, image: "browser@sha256:test", nekoLogLevel: "info" });
   expect(calls.at(-1)?.body).toMatchObject({
     vcpus: 4,
@@ -83,6 +97,8 @@ test("launch attaches the exact persistent volume and preserves requested resour
     cmd: [HYPEMAN_WRAPPER],
   });
   expect(calls.some((c) => c.path.startsWith("/images"))).toBe(false);
+  expect(synchronizations).toBe(1);
+  expect(lifecycle.slice(-2)).toEqual(["POST /instances", "SYNC"]);
 });
 
 test("stopped and foreign consumers prevent reusing a writable profile", async () => {
@@ -105,21 +121,33 @@ test("delete rechecks incarnation then deletes by immutable server ID, preservin
   };
   let stopped = false;
   let closed = false;
-  const backend = new HypemanFarmBackend(settings, config, request, async () => ({
-    browser: new (class extends KernelBrowser {
-      override async stop() {
-        stopped = true;
-      }
-    })("http://unused"),
-    close: async () => {
-      closed = true;
+  let synchronizations = 0;
+  const backend = new HypemanFarmBackend(
+    settings,
+    config,
+    request,
+    async () => ({
+      browser: new (class extends KernelBrowser {
+        override async stop() {
+          stopped = true;
+        }
+      })("http://unused"),
+      close: async () => {
+        closed = true;
+      },
+    }),
+    async () => {
+      synchronizations++;
+      calls.push("SYNC");
     },
-  }));
+  );
   await backend.inspectContainer(target.container);
   await backend.removeContainer(target.container);
   expect(calls.filter((c) => c.startsWith("DELETE"))).toEqual(["DELETE /instances/exact-id"]);
   expect(stopped).toBe(true);
   expect(closed).toBe(true);
+  expect(synchronizations).toBe(1);
+  expect(calls.slice(-2)).toEqual(["DELETE /instances/exact-id", "SYNC"]);
 });
 
 test("failed native shutdown preserves the VM and volume until explicitly forced", async () => {
@@ -142,6 +170,7 @@ test("failed native shutdown preserves the VM and volume until explicitly forced
         closed = true;
       },
     }),
+    noNetworkSync,
   );
   await expect(backend.removeContainer(target.container)).rejects.toMatchObject({
     code: "profile_shutdown_failed",
@@ -155,10 +184,16 @@ test("failed native shutdown preserves the VM and volume until explicitly forced
 test("a replacement instance cannot inherit deletion through its reused name", async () => {
   let replacement = false;
   const calls: string[] = [];
-  const backend = new HypemanFarmBackend(settings, config, async (method, path) => {
-    calls.push(method);
-    return path === "/volumes" ? [volume] : instance(replacement ? "replacement" : "original");
-  });
+  const backend = new HypemanFarmBackend(
+    settings,
+    config,
+    async (method, path) => {
+      calls.push(method);
+      return path === "/volumes" ? [volume] : instance(replacement ? "replacement" : "original");
+    },
+    undefined,
+    noNetworkSync,
+  );
   await backend.inspectContainer(target.container);
   replacement = true;
   await expect(backend.removeContainer(target.container)).rejects.toMatchObject({
@@ -181,6 +216,7 @@ test("a replacement cannot inherit the native stop between initial inspection an
       opened = true;
       throw new Error("must not open");
     },
+    noNetworkSync,
   );
   await expect(backend.removeContainer(target.container)).rejects.toMatchObject({
     code: "profile_shutdown_failed",
@@ -189,10 +225,15 @@ test("a replacement cannot inherit the native stop between initial inspection an
 });
 
 test("foreign ownership tags block deletion even with a familiar instance name", async () => {
-  const backend = new HypemanFarmBackend(settings, config, async (_method, path) =>
-    path === "/volumes"
-      ? [volume]
-      : { ...instance(), tags: { ...tags, "dev.agentbrowse.backend": "somebody-else" } },
+  const backend = new HypemanFarmBackend(
+    settings,
+    config,
+    async (_method, path) =>
+      path === "/volumes"
+        ? [volume]
+        : { ...instance(), tags: { ...tags, "dev.agentbrowse.backend": "somebody-else" } },
+    undefined,
+    noNetworkSync,
   );
   await expect(backend.removeContainer(target.container)).rejects.toMatchObject({
     code: "foreign_container",
@@ -289,15 +330,21 @@ test("new profile preflight reserves both profile and default overlay without mu
 
 test("original caller UUID survives a later inspection of a same-name replacement", async () => {
   const deletes: string[] = [];
-  const backend = new HypemanFarmBackend(settings, config, async (method, path) => {
-    if (method === "DELETE") {
-      deletes.push(path);
-      return;
-    }
-    if (path === "/volumes") return [volume];
-    if (path.startsWith("/instances/")) return instance("replacement-id");
-    throw new Error(`unexpected ${method} ${path}`);
-  });
+  const backend = new HypemanFarmBackend(
+    settings,
+    config,
+    async (method, path) => {
+      if (method === "DELETE") {
+        deletes.push(path);
+        return;
+      }
+      if (path === "/volumes") return [volume];
+      if (path.startsWith("/instances/")) return instance("replacement-id");
+      throw new Error(`unexpected ${method} ${path}`);
+    },
+    undefined,
+    noNetworkSync,
+  );
   // This deliberately refreshes the backend's ordinary observed-ID cache.
   await backend.inspectContainer(target.container);
   await expect(
@@ -306,4 +353,73 @@ test("original caller UUID survives a later inspection of a same-name replacemen
   expect(deletes).toEqual([]);
   await backend.removeContainer(target.container, true, "replacement-id");
   expect(deletes).toEqual(["/instances/replacement-id"]);
+});
+
+test("start synchronizes forwarding after the lifecycle transition", async () => {
+  const calls: string[] = [];
+  let synchronizations = 0;
+  const backend = new HypemanFarmBackend(
+    settings,
+    config,
+    async (method, path) => {
+      calls.push(`${method} ${path}`);
+      return method === "GET" ? { ...instance(), state: "Stopped" } : undefined;
+    },
+    undefined,
+    async () => {
+      synchronizations++;
+      calls.push("SYNC");
+    },
+  );
+  await backend.startContainer(target.container);
+  expect(calls).toEqual([
+    `GET /instances/${target.container}`,
+    "POST /instances/exact-id/start",
+    "SYNC",
+  ]);
+  expect(synchronizations).toBe(1);
+});
+
+test("network synchronization routes through the owning local helper or hardened remote command", () => {
+  expect(networkSyncCommand({ ...settings, tokenFile: "/private/host/token" })).toEqual([
+    "/private/host/host/agentbrowse-hypeman",
+    "--root",
+    "/private/host",
+    "network-sync",
+  ]);
+  expect(
+    networkSyncCommand({ ...settings, remoteHost: "artbird", networkAddress: "100.111.14.90" }),
+  ).toEqual([
+    "ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=8",
+    "artbird",
+    "sudo",
+    "-n",
+    "/usr/local/bin/agentbrowse-hypeman",
+    "network-sync",
+  ]);
+});
+
+test("a synchronization failure is reported after the accepted lifecycle mutation", async () => {
+  const calls: string[] = [];
+  const backend = new HypemanFarmBackend(
+    settings,
+    config,
+    async (method, path) => {
+      calls.push(`${method} ${path}`);
+      if (path === "/volumes") return [volume];
+      return undefined;
+    },
+    undefined,
+    async () => {
+      throw new Error("relay unavailable");
+    },
+  );
+  await expect(
+    backend.runBrowser({ target, image: "browser@sha256:test", nekoLogLevel: "info" }),
+  ).rejects.toThrow("relay unavailable");
+  expect(calls).toContain("POST /instances");
 });

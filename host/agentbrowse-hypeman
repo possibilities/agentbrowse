@@ -2,6 +2,7 @@
 """Explicit Hypeman infrastructure lifecycle. Uses only Python's standard library."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,10 @@ BUILDER_IMAGE = "docker.io/onkernel/builder-generic@sha256:b24344e48c46ff9efe4b5
 MARKER = "agentbrowse-hypeman-v1"
 MAC = sys.platform == "darwin"
 DEFAULT_ROOT = Path.home() / ".local/share/ab-hypeman" if MAC else Path("/var/lib/agentbrowse-hypeman")
+
+
+class HypemanHTTPError(RuntimeError):
+    pass
 
 
 def run(args, **kwargs):
@@ -74,7 +79,7 @@ def request(root, method, path, body=None, timeout=60):
             data = response.read()
             return json.loads(data) if data else None
     except urllib.error.HTTPError as error:
-        raise RuntimeError("Hypeman HTTP %d: %s" % (error.code, error.read().decode()[:1000])) from None
+        raise HypemanHTTPError("Hypeman HTTP %d: %s" % (error.code, error.read().decode()[:1000])) from None
 
 
 def setup(root, port, subnet=None):
@@ -159,6 +164,25 @@ def setup(root, port, subnet=None):
     print(json.dumps({"installed": True, "root": str(root), "version": VERSION}))
 
 
+def wait_ready(root, relay_module=None, timeout=90):
+    """Wait for the API and, on macOS, one acknowledged relay refresh."""
+    api_ready = False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if not api_ready:
+                request(root, "GET", "/instances", timeout=3)
+                api_ready = True
+            if relay_module:
+                relay_module.request_sync(root)
+            return
+        except HypemanHTTPError:
+            raise
+        except (RuntimeError, OSError):
+            time.sleep(1)
+    raise RuntimeError("Hypeman did not become ready; inspect " + str(root / "logs/server.log"))
+
+
 def enable(root):
     owned(root)
     if MAC:
@@ -173,15 +197,8 @@ def enable(root):
             run(["launchctl", "bootstrap", domain, plist])
     else:
         run(["systemctl", "enable", "--now", "agentbrowse-hypeman"])
-    deadline = time.monotonic() + 90
-    while time.monotonic() < deadline:
-        try:
-            request(root, "GET", "/instances", timeout=3)
-            print('{"running":true}')
-            return
-        except (RuntimeError, OSError):
-            time.sleep(1)
-    raise RuntimeError("Hypeman did not become ready; inspect " + str(root / "logs/server.log"))
+    wait_ready(root, load_relay_module() if MAC else None)
+    print('{"running":true}')
 
 
 def network_sync(root):
@@ -256,15 +273,45 @@ def reap_orphan_caddy(root):
             pass
 
 
+def load_relay_module():
+    spec = importlib.util.spec_from_file_location("hypeman_relay", Path(__file__).with_name("hypeman-relay.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_macos_relay(root, relay, child, stopped, module):
+    """Hydrate once, then synchronize only on acknowledged lifecycle requests."""
+    control = None
+    try:
+        deadline = time.monotonic() + 90
+        while child.poll() is None and not stopped.is_set():
+            try:
+                relay.sync()
+                break
+            except (HypemanHTTPError, urllib.error.HTTPError):
+                raise
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Hypeman API did not become ready for relay hydration")
+                stopped.wait(0.2)
+        if child.poll() is None and not stopped.is_set():
+            control = module.RelayControl(root, relay)
+        while control and child.poll() is None and not stopped.is_set():
+            control.serve_once()
+    finally:
+        if control:
+            control.close()
+        else:
+            relay.close()
+
+
 def serve(root):
-    import importlib.util
     import signal
     import threading
     owned(root)
     reap_orphan_caddy(root)
-    spec = importlib.util.spec_from_file_location("hypeman_relay", Path(__file__).with_name("hypeman-relay.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_relay_module()
     relay = module.Relay(root) if MAC else None
     previous_network = None
     stopped = threading.Event()
@@ -272,20 +319,24 @@ def serve(root):
     signal.signal(signal.SIGINT, lambda *_: stopped.set())
     child = subprocess.Popen([str(root / "bin/hypeman-api")])
     try:
-        while child.poll() is None and not stopped.wait(1):
+        if relay:
+            # Connection failures are expected while the child starts, but a
+            # reachable invalid response is fatal instead of becoming an
+            # unbounded discovery loop.
             try:
-                if relay:
-                    relay.sync()
-                else:
+                run_macos_relay(root, relay, child, stopped, module)
+            finally:
+                relay = None
+        else:
+            while child.poll() is None and not stopped.wait(1):
+                try:
                     current = json.dumps([{key: i.get(key) for key in ("id", "state", "network", "tags")}
                         for i in request(root, "GET", "/instances", timeout=2)], sort_keys=True)
                     if current != previous_network:
                         network_sync(root)
                         previous_network = current
-            except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
-                if relay:
-                    relay.close()
-                print("Hypeman relay: " + str(error), file=sys.stderr, flush=True)
+                except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+                    print("Hypeman relay: " + str(error), file=sys.stderr, flush=True)
     finally:
         if relay:
             relay.close()
@@ -318,7 +369,12 @@ def main():
     elif args.command == "serve":
         serve(root)
     elif args.command == "network-sync":
-        network_sync(root)
+        if MAC:
+            module = load_relay_module()
+            module.request_sync(root)
+            print('{"synchronized":true}')
+        else:
+            network_sync(root)
     elif args.command == "enable":
         enable(root)
     elif args.command == "disable":

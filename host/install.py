@@ -38,6 +38,21 @@ def configure_linux_forwarding(path=Path("/etc/sysctl.d/70-agentbrowse-hypeman.c
         raise RuntimeError("Hypeman requires IPv4 forwarding")
 
 
+def restore_instances(api, root, running, helper):
+    """Restore the pre-install running set, then refresh forwarding once."""
+    current = {i["id"]: i["state"] for i in api["request"](root, "GET", "/instances")}
+    restarted = 0
+    for instance_id in running:
+        if instance_id not in current:
+            raise RuntimeError("pending restoration instance is missing: " + instance_id)
+        if current[instance_id] not in ("Running", "Initializing"):
+            api["request"](root, "POST", "/instances/" + instance_id + "/start", {})
+            restarted += 1
+    if restarted:
+        run(sys.executable, helper, "network-sync")
+    return restarted
+
+
 def install():
     if MAC:
         if platform.machine() != "arm64":
@@ -139,14 +154,7 @@ def install():
     run(sys.executable, helper, "setup")
     run(sys.executable, helper, "enable")
     run(sys.executable, helper, "pull", BROWSER_IMAGE)
-    current = {i["id"]: i["state"] for i in api["request"](root, "GET", "/instances")}
-    for instance_id in running:
-        if instance_id not in current:
-            raise RuntimeError("pending restoration instance is missing: " + instance_id)
-        if current[instance_id] not in ("Running", "Initializing"):
-            api["request"](root, "POST", "/instances/" + instance_id + "/start", {})
-    if not MAC:
-        api["network_sync"](root)
+    restore_instances(api, root, running, helper)
     api["write_private"](receipt, json.dumps(expected, indent=2) + "\n")
     pending.unlink(missing_ok=True)
     print(json.dumps({"installed": True, "changed": True, "restoredInstances": len(running)}))

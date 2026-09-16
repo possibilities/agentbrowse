@@ -2,9 +2,13 @@
 import json
 import selectors
 import socket
+import stat
 import threading
 import time
 import urllib.request
+
+
+CONTROL_SOCKET = "relay-sync.sock"
 
 
 class Forward:
@@ -164,3 +168,119 @@ class Relay:
         for _, forward in self.forwards.values():
             forward.close()
         self.forwards.clear()
+
+
+class RelayControl:
+    """Private lifecycle trigger for the relay owned by the host supervisor."""
+
+    def __init__(self, root, relay):
+        self.path = root / CONTROL_SOCKET
+        self.relay = relay
+        if self.path.exists() or self.path.is_symlink():
+            metadata = self.path.lstat()
+            if metadata.st_uid != root.stat().st_uid or not stat.S_ISSOCK(metadata.st_mode):
+                raise RuntimeError("unsafe Hypeman relay control socket")
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.settimeout(0.2)
+                probe.connect(str(self.path))
+            except (ConnectionRefusedError, FileNotFoundError):
+                pass
+            else:
+                raise RuntimeError("Hypeman relay control socket is already active")
+            finally:
+                probe.close()
+            self.path.unlink()
+        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self.socket.bind(str(self.path))
+            self.path.chmod(0o600)
+            self.socket.listen(4)
+        except BaseException:
+            self.socket.close()
+            self.path.unlink(missing_ok=True)
+            raise
+
+    def serve_once(self, timeout=1):
+        self.socket.settimeout(timeout)
+        try:
+            connection, _ = self.socket.accept()
+        except socket.timeout:
+            return
+        try:
+            connection.settimeout(5)
+            request = b""
+            while b"\n" not in request and len(request) <= 32:
+                chunk = connection.recv(33 - len(request))
+                if not chunk:
+                    break
+                request += chunk
+            if request != b"sync\n":
+                response = {"ok": False, "error": "invalid control request"}
+            else:
+                try:
+                    self.relay.sync()
+                    response = {"ok": True}
+                except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+                    # A partially applied forwarding set is harder to reason about
+                    # than a clear failure. The caller receives the exact failure
+                    # and the next lifecycle transition can rebuild from scratch.
+                    self.relay.close()
+                    response = {"ok": False, "error": str(error)[:1000]}
+            try:
+                connection.sendall((json.dumps(response) + "\n").encode())
+            except OSError:
+                pass
+        finally:
+            connection.close()
+
+    def close(self):
+        self.socket.close()
+        self.path.unlink(missing_ok=True)
+        self.relay.close()
+
+
+def request_sync(root):
+    """Request one acknowledged relay refresh from the running supervisor."""
+    path = root / CONTROL_SOCKET
+    client = None
+    try:
+        deadline = time.monotonic() + 8
+        while True:
+            candidate = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                metadata = path.lstat()
+                if (
+                    path.is_symlink()
+                    or metadata.st_uid != root.stat().st_uid
+                    or not stat.S_ISSOCK(metadata.st_mode)
+                ):
+                    raise RuntimeError("unsafe Hypeman relay control socket")
+                candidate.settimeout(max(0.1, deadline - time.monotonic()))
+                candidate.connect(str(path))
+                client = candidate
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                candidate.close()
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Hypeman relay control socket is unavailable") from None
+                time.sleep(0.05)
+            except BaseException:
+                candidate.close()
+                raise
+        client.sendall(b"sync\n")
+        response = b""
+        while b"\n" not in response and len(response) <= 4096:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+    finally:
+        if client:
+            client.close()
+    try:
+        result = json.loads(response)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise RuntimeError("Hypeman relay returned an invalid synchronization response") from None
+    if result.get("ok") is not True:
+        raise RuntimeError("Hypeman relay synchronization failed: " + str(result.get("error", "unknown error")))

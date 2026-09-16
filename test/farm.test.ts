@@ -121,6 +121,7 @@ class FakeBackend implements FarmBackend {
   removed: string[] = [];
   removedProfiles: string[] = [];
   runs: RunBrowserInput[] = [];
+  networkSyncs = 0;
 
   newContainerName(name: string): string {
     return `agentbrowse-browser-${name}`;
@@ -216,6 +217,10 @@ class FakeBackend implements FarmBackend {
     this.started.push(container);
   }
 
+  async syncNetwork(): Promise<void> {
+    this.networkSyncs += 1;
+  }
+
   async waitReady(target: ReturnType<typeof targetFor>, timeoutSeconds = 120): Promise<void> {
     this.waited.push(target.container);
     this.waitTimeouts.push(timeoutSeconds);
@@ -278,6 +283,18 @@ test("create reuses an exactly matching managed container", async () => {
   expect(result.created).toBe(false);
   expect(backend.runs).toHaveLength(0);
   expect(backend.started).toEqual(["agentbrowse-browser-testing"]);
+});
+
+test("create retry refreshes forwarding for an already-running managed container", async () => {
+  const backend = new FakeBackend();
+  backend.existing = managedState("testing", 2, backend.image, backend.ip);
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  const result = await farm.create({ name: "testing", slot: 2 });
+
+  expect(result.created).toBe(false);
+  expect(backend.networkSyncs).toBe(1);
+  expect(backend.started).toHaveLength(0);
 });
 
 test("provider provisioning reuses the target currently bound to its profile", async () => {
@@ -648,6 +665,17 @@ test("destroy is idempotent when both metadata and container are absent", async 
     destroyed: false,
   });
   expect(backend.removed).toHaveLength(0);
+  expect(backend.networkSyncs).toBe(1);
+});
+
+test("destroy retry refreshes forwarding before rejecting a missing expected instance", async () => {
+  const backend = new FakeBackend();
+  const farm = new BrowserFarm(backend, runtimeDir());
+
+  await expect(farm.destroy("missing", false, false, "deleted-instance")).rejects.toMatchObject({
+    code: "foreign_container",
+  });
+  expect(backend.networkSyncs).toBe(1);
 });
 
 test("destroy recovers ownership from labels when local metadata is absent", async () => {

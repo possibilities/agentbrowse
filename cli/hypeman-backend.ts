@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { LiveViewTunnel } from "../client/tunnel.ts";
 import type { AgentbrowseConfig, HypemanBackendConfig } from "../config/deployment.ts";
 import { KERNEL_HEADFUL_IMAGE_LOCK } from "../config/kernel-headful-image.ts";
@@ -37,6 +38,25 @@ export type HypemanRequest = (
   body?: unknown,
   signal?: AbortSignal,
 ) => Promise<unknown>;
+
+export function networkSyncCommand(config: HypemanBackendConfig): string[] {
+  if (config.remoteHost === null) {
+    const root = dirname(config.tokenFile);
+    return [resolve(root, "host", "agentbrowse-hypeman"), "--root", root, "network-sync"];
+  }
+  return [
+    "ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=8",
+    config.remoteHost,
+    "sudo",
+    "-n",
+    "/usr/local/bin/agentbrowse-hypeman",
+    "network-sync",
+  ];
+}
 
 // Hypeman's guest init supplies the Linux VM. Mount shared memory explicitly and
 // discover the VM address only when the deployment does not advertise a relay.
@@ -86,6 +106,7 @@ export class HypemanFarmBackend implements FarmBackend {
       browser: KernelBrowser;
       close(): Promise<void>;
     }>,
+    private readonly networkSynchronizer?: () => Promise<void>,
   ) {
     this.id = backendConfig.id;
     this.request = request ?? this.httpRequest.bind(this);
@@ -541,23 +562,13 @@ export class HypemanFarmBackend implements FarmBackend {
     await this.request("DELETE", `/instances/${enc(string(i.id))}`);
     await this.syncNetwork();
   }
-  private async syncNetwork(): Promise<void> {
-    if (this.backendConfig.remoteHost === null) return;
-    const child = Bun.spawn(
-      [
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=8",
-        this.backendConfig.remoteHost,
-        "sudo",
-        "-n",
-        "/usr/local/bin/agentbrowse-hypeman",
-        "network-sync",
-      ],
-      { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
-    );
+  async syncNetwork(): Promise<void> {
+    if (this.networkSynchronizer !== undefined) {
+      await this.networkSynchronizer();
+      return;
+    }
+    const command = networkSyncCommand(this.backendConfig);
+    const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
     const [code, stderr] = await Promise.all([
       child.exited,
       new Response(child.stderr).text(),
@@ -567,6 +578,7 @@ export class HypemanFarmBackend implements FarmBackend {
       throw new CliError(
         "hypeman_network_failed",
         `Hypeman network forwarding failed: ${stderr.slice(0, 1000)}`,
+        `retry the lifecycle command or run ${networkSyncCommand(this.backendConfig).join(" ")}`,
       );
   }
   missingImageRecovery(image: string): string {

@@ -187,6 +187,10 @@ class FleetBackend implements FarmBackend {
     this.events.push("start");
   }
 
+  async syncNetwork(): Promise<void> {
+    this.events.push("sync-network");
+  }
+
   async waitReady(): Promise<void> {
     this.events.push("wait");
   }

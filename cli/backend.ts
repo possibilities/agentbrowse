@@ -90,6 +90,7 @@ export interface FarmBackend {
   browserAccess(target: Target, state?: ContainerState): Promise<BrowserAccess>;
   runBrowser(input: RunBrowserInput): Promise<void>;
   startContainer(container: string): Promise<void>;
+  syncNetwork(): Promise<void>;
   waitReady(target: Target, timeoutSeconds?: number): Promise<void>;
   removeContainer(container: string, force?: boolean, expectedInstanceId?: string): Promise<void>;
   withKernel<T>(target: Target, operation: (kernel: KernelBrowser) => Promise<T>): Promise<T>;

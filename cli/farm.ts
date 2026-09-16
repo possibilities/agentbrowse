@@ -257,6 +257,10 @@ export class BrowserFarm {
       if (!state.running) {
         await this.backend.startContainer(target.container);
         state = await this.backend.inspectContainer(target.container);
+      } else {
+        // A retry after an accepted create/start response was lost must also
+        // repair forwarding that the interrupted caller never synchronized.
+        await this.backend.syncNetwork();
       }
     } else {
       if (!(await this.backend.imageExists(image))) {
@@ -449,12 +453,15 @@ export class BrowserFarm {
     const discovered = managed.find((record) => record.name === name);
     const container = recorded?.container ?? discovered?.container ?? `agentbrowse-browser-${name}`;
     const state = await this.backend.inspectContainer(container);
-    if (expectedInstanceId !== undefined && state?.instanceId !== expectedInstanceId)
-      throw new CliError(
-        "foreign_container",
-        "original instance identity missing or replaced before release",
-      );
     if (state === undefined) {
+      // A retry after an accepted delete response was lost must remove stale
+      // loopback forwarding before the local address can be reused.
+      await this.backend.syncNetwork();
+      if (expectedInstanceId !== undefined)
+        throw new CliError(
+          "foreign_container",
+          "original instance identity missing or replaced before release",
+        );
       await this.removeTarget(name);
       return {
         name,
@@ -464,6 +471,11 @@ export class BrowserFarm {
         destroyed: false,
       };
     }
+    if (expectedInstanceId !== undefined && state.instanceId !== expectedInstanceId)
+      throw new CliError(
+        "foreign_container",
+        "original instance identity missing or replaced before release",
+      );
     const target = recorded ?? targetFromLabels(name, this.backend.id, container, state);
     verifyDestroyOwnership(state, target);
     await this.backend.removeContainer(target.container, force, expectedInstanceId);
