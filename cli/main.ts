@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { type ParsedBackup, runBackup } from "./backup.ts";
 import { CONTRACT, renderAgentHelp, renderHelp, renderTeaser } from "./contract.ts";
 import { failure as failureEnvelope, success as successEnvelope } from "./envelope.ts";
 import { CliError, UsageError } from "./errors.ts";
@@ -106,7 +107,8 @@ type Parsed =
   | { command: "guide"; json: boolean }
   | { command: "help"; json: boolean }
   | { command: "agent-help"; json: boolean }
-  | { command: "agent-teaser"; json: boolean };
+  | { command: "agent-teaser"; json: boolean }
+  | ParsedBackup;
 
 function takeValue(args: readonly string[], index: number, flag: string): string {
   const value = args[index + 1];
@@ -114,6 +116,94 @@ function takeValue(args: readonly string[], index: number, flag: string): string
     throw new UsageError(`${flag} requires a value`);
   }
   return value;
+}
+
+function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
+  const action = args[1];
+  if (action === "measure") {
+    const options = new Set(args.slice(2));
+    for (const option of options) {
+      if (option !== "--all" && option !== "--compression-estimate") {
+        throw new UsageError(`unknown option for backup measure: ${option}`);
+      }
+    }
+    if (!options.has("--all")) throw new UsageError("backup measure requires --all");
+    return {
+      command: "backup",
+      action,
+      all: true,
+      compressionEstimate: options.has("--compression-estimate"),
+      json,
+    };
+  }
+  if (action !== "create" && action !== "list" && action !== "inspect" && action !== "restore") {
+    throw new UsageError(
+      action === undefined ? "backup requires an action" : `unknown backup action: ${action}`,
+    );
+  }
+  let backend: string | undefined;
+  let destination: string | undefined;
+  let set: string | undefined;
+  let identity: string | undefined;
+  const recipients: string[] = [];
+  let unencrypted = false;
+  let dryRun = false;
+  for (let index = 2; index < args.length; index += 1) {
+    const option = args[index]!;
+    if (option === "--backend") backend = takeValue(args, index++, option);
+    else if (option === "--destination") destination = takeValue(args, index++, option);
+    else if (option === "--set") set = takeValue(args, index++, option);
+    else if (option === "--identity") identity = takeValue(args, index++, option);
+    else if (option === "--recipient") recipients.push(takeValue(args, index++, option));
+    else if (option === "--unencrypted") unencrypted = true;
+    else if (option === "--dry-run") dryRun = true;
+    else throw new UsageError(`unknown option for backup ${action}: ${option}`);
+  }
+  if (backend === undefined) throw new UsageError(`backup ${action} requires --backend ID`);
+  if (action === "create") {
+    if (destination === undefined)
+      throw new UsageError("backup create requires --destination ABSOLUTE_SET_PATH");
+    if (set !== undefined || identity !== undefined)
+      throw new UsageError("backup create does not accept --set or --identity");
+    if (unencrypted && recipients.length > 0)
+      throw new UsageError("backup create --unencrypted conflicts with --recipient");
+    return {
+      command: "backup",
+      action,
+      backend,
+      destination,
+      recipients,
+      unencrypted,
+      dryRun,
+      json,
+    };
+  }
+  if (recipients.length > 0 || unencrypted)
+    throw new UsageError(`backup ${action} does not accept encryption creation options`);
+  if (action === "list") {
+    if (destination === undefined)
+      throw new UsageError("backup list requires --destination ABSOLUTE_COLLECTION_PATH");
+    if (set !== undefined || identity !== undefined || dryRun)
+      throw new UsageError("backup list accepts only --backend and --destination");
+    return { command: "backup", action, backend, destination, json };
+  }
+  if (set === undefined) throw new UsageError(`backup ${action} requires --set ABSOLUTE_SET_PATH`);
+  if (destination !== undefined)
+    throw new UsageError(`backup ${action} does not accept --destination`);
+  if (action === "inspect") {
+    if (identity !== undefined || dryRun)
+      throw new UsageError("backup inspect accepts only --backend and --set");
+    return { command: "backup", action, backend, set, json };
+  }
+  return {
+    command: "backup",
+    action,
+    backend,
+    set,
+    ...(identity === undefined ? {} : { identity }),
+    dryRun,
+    json,
+  };
 }
 
 export function parseArgs(argv: readonly string[]): Parsed {
@@ -145,6 +235,7 @@ export function parseArgs(argv: readonly string[]): Parsed {
     if (args.length !== 1) throw new UsageError(`unexpected argument: ${args[1]}`);
     return { command, json: false };
   }
+  if (command === "backup") return parseBackup(args, json);
   if (command === "view") {
     if (json) throw new UsageError("view does not accept --json");
     if (args.length > 2) throw new UsageError(`unexpected argument: ${args[2]}`);
@@ -499,6 +590,11 @@ export async function run(argv: readonly string[], env = process.env): Promise<n
   }
 
   try {
+    if (parsed.command === "backup") {
+      const result = await runBackup(parsed, env);
+      process.stdout.write(parsed.json ? success(result) : `${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    }
     const farm = browserFarm(env);
     if (parsed.command === "session") {
       const result =

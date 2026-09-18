@@ -178,6 +178,13 @@ const ERROR_CODES: readonly ContractErrorCode[] = [
     meaning: "Kernel could not confirm Chromium stopped and its filesystem synced.",
   },
   {
+    code: "profile_backup_failed",
+    meaning:
+      "Portable full-volume profile measurement, backup inspection, backup creation, or restore failed on a host.",
+    recovery:
+      "Inspect the named backend and retry the same idempotent backup command; incomplete sets have no manifest.",
+  },
+  {
     code: "profile_shutdown_failed",
     meaning: "The Browser target was retained because its profile could not be stopped and synced.",
     recovery: "Retry destroy; --force explicitly abandons unflushed browser writes.",
@@ -527,6 +534,8 @@ export const CONTRACT: Contract = {
         "A configured Hypeman host tried in configured order. A profile binds to the backend that first created it.",
       staged_upload:
         "One verified local file copied into a private temporary path in the exact active Browser target. The target's deletion removes it; it never enters the Browser profile.",
+      profile_volume_backup:
+        "A versioned host-recovery set of complete detached Hypeman ext4 images. It is distinct from Kernel's native profile export/import archive.",
     },
     output_contract: {
       envelope: {
@@ -542,7 +551,16 @@ export const CONTRACT: Contract = {
       },
     },
     error_codes: ERROR_CODES,
-    read_only_commands: ["list", "profile list", "session list", "resolve", "guide"],
+    read_only_commands: [
+      "list",
+      "profile list",
+      "session list",
+      "resolve",
+      "backup measure",
+      "backup list",
+      "backup inspect",
+      "guide",
+    ],
     agent_defaults: [
       "Resolve, never guess: `agentbrowse resolve SESSION --json` names the exact live target incarnation.",
       "Let agent-browser provision and close targets through the provider; call create only for a target no driver session owns.",
@@ -692,6 +710,160 @@ export const CONTRACT: Contract = {
           type: "boolean",
           description:
             "Delete an unresponsive VM without stopping Chromium; may lose unflushed writes",
+        },
+      ],
+    },
+    {
+      name: "backup",
+      summary: "Recover complete Hypeman Browser profile volumes",
+      audience: "operator",
+      subcommands: [
+        {
+          name: "measure",
+          summary: "Measure every configured backend without changing it",
+          audience: "operator",
+          mutates: false,
+          guidance:
+            "Run `agentbrowse backup measure --all --compression-estimate --json` before choosing backup storage. It reports ownership and attachment reconciliation, reserved capacity, logical and allocated bytes, and a sampled zstd estimate with explicit uncertainty in decimal and binary units.",
+          arguments: [
+            {
+              name: "--all",
+              type: "boolean",
+              required: true,
+              description: "Measure every configured backend",
+            },
+            {
+              name: "--compression-estimate",
+              type: "boolean",
+              description: "Read deterministic image samples and estimate zstd level-3 size",
+            },
+          ],
+        },
+        {
+          name: "create",
+          summary: "Create or resume one versioned full-volume backup set",
+          audience: "operator",
+          mutates: true,
+          guidance:
+            "All owned profiles on the selected backend must be detached and pass read-only e2fsck. Each complete image is compressed independently. Age authenticated encryption is the default and needs at least one recipient; plaintext requires explicit --unencrypted. manifest.json is published last, so rerunning an interrupted command safely resumes it.",
+          arguments: [
+            {
+              name: "--backend",
+              type: "string",
+              required: true,
+              description: "Configured host backend ID",
+            },
+            {
+              name: "--destination",
+              type: "string",
+              format: "path",
+              direction: "out",
+              required: true,
+              description: "New or matching incomplete backup-set directory on that host",
+            },
+            {
+              name: "--recipient",
+              type: "string",
+              repeatable: true,
+              description: "Age X25519 recipient; required unless --unencrypted is explicit",
+            },
+            {
+              name: "--unencrypted",
+              type: "boolean",
+              description: "Explicitly store compressed plaintext images",
+            },
+            {
+              name: "--dry-run",
+              type: "boolean",
+              description: "Verify inventory and clean detached filesystems without writing a set",
+            },
+          ],
+          constraints: [
+            {
+              kind: "conflicts",
+              arguments: ["--recipient", "--unencrypted"],
+            },
+          ],
+        },
+        {
+          name: "list",
+          summary: "List complete backup sets in one host directory",
+          audience: "operator",
+          mutates: false,
+          arguments: [
+            {
+              name: "--backend",
+              type: "string",
+              required: true,
+              description: "Configured host backend ID",
+            },
+            {
+              name: "--destination",
+              type: "string",
+              format: "path",
+              direction: "in",
+              required: true,
+              description: "Backup-set collection directory on that host",
+            },
+          ],
+        },
+        {
+          name: "inspect",
+          summary: "Validate and describe one complete backup set",
+          audience: "operator",
+          mutates: false,
+          arguments: [
+            {
+              name: "--backend",
+              type: "string",
+              required: true,
+              description: "Configured host backend ID",
+            },
+            {
+              name: "--set",
+              type: "string",
+              format: "path",
+              direction: "in",
+              required: true,
+              description: "Complete backup-set directory on that host",
+            },
+          ],
+        },
+        {
+          name: "restore",
+          summary: "Restore profiles into fresh destination volume IDs",
+          audience: "operator",
+          mutates: true,
+          guidance:
+            "The destination must not already contain the logical profile names. Restore creates ignored staging volumes, verifies digest and e2fsck, then atomically publishes only the sanitized profile name and ownership tags. It never restores slots, leases, targets, credentials, SSH keys, or connection descriptors.",
+          arguments: [
+            {
+              name: "--backend",
+              type: "string",
+              required: true,
+              description: "Configured host backend ID",
+            },
+            {
+              name: "--set",
+              type: "string",
+              format: "path",
+              direction: "in",
+              required: true,
+              description: "Complete backup-set directory on that host",
+            },
+            {
+              name: "--identity",
+              type: "string",
+              format: "path",
+              direction: "in",
+              description: "Absolute age identity path on the destination host",
+            },
+            {
+              name: "--dry-run",
+              type: "boolean",
+              description: "Validate the set and destination-name plan without creating volumes",
+            },
+          ],
         },
       ],
     },

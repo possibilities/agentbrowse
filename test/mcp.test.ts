@@ -140,7 +140,15 @@ describe("which commands become tools", () => {
   test("no operator or internal leaf is exposed, mcp and provider included", () => {
     const exposed = new Set(TOOLS.map((tool) => tool.name));
     const hidden = LEAVES.filter(({ leaf }) => leaf.audience !== "agent");
-    expect(hidden.map(({ path }) => path).sort()).toEqual(["mcp", "provider"]);
+    expect(hidden.map(({ path }) => path).sort()).toEqual([
+      "backup create",
+      "backup inspect",
+      "backup list",
+      "backup measure",
+      "backup restore",
+      "mcp",
+      "provider",
+    ]);
     for (const { path } of hidden) expect(exposed.has(path.replace(/ /g, "_"))).toBe(false);
   });
 

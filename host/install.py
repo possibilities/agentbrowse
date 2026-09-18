@@ -59,7 +59,7 @@ def install():
             raise RuntimeError("the Mac host requires Apple silicon")
         if not shutil.which("brew"):
             raise RuntimeError("install Homebrew through Funk first")
-        for package in ("caddy", "e2fsprogs"):
+        for package in ("caddy", "e2fsprogs", "age"):
             probe = subprocess.run(["brew", "list", "--versions", package], capture_output=True)
             if probe.returncode:
                 run("brew", "install", package)
@@ -71,7 +71,7 @@ def install():
         if not Path("/dev/kvm").exists():
             raise RuntimeError("enable hardware virtualization: /dev/kvm is missing")
         run("apt-get", "update")
-        run("apt-get", "install", "-y", "python3", "curl", "e2fsprogs", "erofs-utils", "iptables", "nftables")
+        run("apt-get", "install", "-y", "python3", "curl", "age", "e2fsprogs", "erofs-utils", "iptables", "nftables")
         root = Path("/var/lib/agentbrowse-hypeman")
         destination = Path("/usr/local/lib/agentbrowse")
 
@@ -93,7 +93,13 @@ def install():
             run(sys.executable, destination / "agentbrowse-hypeman", "enable")
     receipt = root / "host-install.json"
     pending = root / "pending-host-install.json"
-    files = ("agentbrowse-hypeman", "hypeman-relay.py", "install.py", "migrate-profiles.py")
+    files = (
+        "agentbrowse-hypeman",
+        "hypeman-relay.py",
+        "install.py",
+        "migrate-profiles.py",
+        "profile-backup.py",
+    )
     digests = {name: hashlib.sha256((SOURCE / name).read_bytes()).hexdigest() for name in files}
     expected = {"version": 1, "files": digests, "destination": str(destination)}
     if not pending.exists() and receipt.exists() and json.loads(receipt.read_text()) == expected and all(

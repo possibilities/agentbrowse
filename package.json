@@ -31,8 +31,9 @@
     "lint": "biome check .",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:python": "python3 -m unittest discover -s test -p '*_test.py'",
     "check:ts": "bun run lint && bun run typecheck && bun run test",
-    "check": "bun run check:ts && zig build test"
+    "check": "bun run check:ts && bun run test:python && zig build test"
   },
   "peerDependencies": {
     "@opentui/core": ">=0.5.6 <0.6.0"

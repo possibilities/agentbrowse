@@ -12,6 +12,12 @@ Hypeman volumes. `profile export NAME FILE.tar.zst` captures an idle profile;
 Kernel. See [profile lifecycle and transfer](docs/profiles.md) for shutdown,
 interrupted imports, and the forward-only relocation of existing volumes.
 
+Disaster recovery uses a separate complete-volume format. Start with the read-only
+`agentbrowse backup measure --all --compression-estimate --json` capacity gate,
+then create, inspect, and restore versioned sets with `agentbrowse backup`. These
+sets use age authenticated encryption by default and restore fresh Hypeman volume
+IDs while preserving logical profile names. See [storage recovery](docs/storage-recovery.md).
+
 ## Install
 
 ```sh

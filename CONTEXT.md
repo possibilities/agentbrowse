@@ -13,6 +13,13 @@ through Kernel's `/configure` endpoint to a new Browser profile; the live volume
 remains the source of durable state.
 _Avoid: storage state, cookie export, profile database._
 
+**Profile volume backup** — A versioned host-recovery set containing independently
+compressed, complete images of detached AgentBrowse-owned Hypeman profile volumes.
+Its manifest is published only after every image is durable and verified. Restore
+creates new volume IDs and new backend bindings while preserving logical profile
+names; it never restores target, slot, lease, credential, key, or connection state.
+_Avoid: Profile archive, profile export, filesystem copy._
+
 **Browser target** — One named Hypeman VM running Kernel's headful image on the configured host, exposing
 both a Chrome DevTools Protocol endpoint and the services needed for Live View.
 Its numeric slot deterministically assigns its host ports.

@@ -46,7 +46,13 @@ try:
         try:
             with tempfile.TemporaryFile() as archive:
                 with tarfile.open(fileobj=archive, mode="w") as bundle:
-                    for name in ("install.py", "agentbrowse-hypeman", "hypeman-relay.py", "migrate-profiles.py"):
+                    for name in (
+                        "install.py",
+                        "agentbrowse-hypeman",
+                        "hypeman-relay.py",
+                        "migrate-profiles.py",
+                        "profile-backup.py",
+                    ):
                         bundle.add(root / "host" / name, arcname=name)
                 archive.seek(0)
                 run(ssh + ["tar -xf - -C " + remote], stdin=archive)

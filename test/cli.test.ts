@@ -136,3 +136,72 @@ test("unknown command and extra destroy flags are usage faults", () => {
     UsageError,
   );
 });
+
+test("backup commands preserve measurement, encryption, inspection, and restore intent", () => {
+  expect(parseArgs(["backup", "measure", "--all", "--compression-estimate", "--json"])).toEqual({
+    command: "backup",
+    action: "measure",
+    all: true,
+    compressionEstimate: true,
+    json: true,
+  });
+  expect(
+    parseArgs([
+      "backup",
+      "create",
+      "--backend",
+      "artbird",
+      "--destination",
+      "/backups/set-1",
+      "--recipient",
+      "age1first",
+      "--recipient",
+      "age1second",
+      "--dry-run",
+    ]),
+  ).toEqual({
+    command: "backup",
+    action: "create",
+    backend: "artbird",
+    destination: "/backups/set-1",
+    recipients: ["age1first", "age1second"],
+    unencrypted: false,
+    dryRun: true,
+    json: false,
+  });
+  expect(
+    parseArgs([
+      "backup",
+      "restore",
+      "--backend",
+      "local",
+      "--set",
+      "/backups/set-1",
+      "--identity",
+      "/keys/backup.txt",
+      "--dry-run",
+    ]),
+  ).toEqual({
+    command: "backup",
+    action: "restore",
+    backend: "local",
+    set: "/backups/set-1",
+    identity: "/keys/backup.txt",
+    dryRun: true,
+    json: false,
+  });
+  expect(() => parseArgs(["backup", "measure", "--compression-estimate"])).toThrow(UsageError);
+  expect(() =>
+    parseArgs([
+      "backup",
+      "create",
+      "--backend",
+      "local",
+      "--destination",
+      "/tmp/set",
+      "--recipient",
+      "age1example",
+      "--unencrypted",
+    ]),
+  ).toThrow(UsageError);
+});

@@ -15,9 +15,9 @@ scripts/install-host
 scripts/install-host --remote artbird
 ```
 
-The Mac requires Homebrew; the installer acquires missing caddy/e2fsprogs.
+The Mac requires Homebrew; the installer acquires missing caddy/e2fsprogs/age.
 The Linux host requires working SSH, passwordless sudo for installation and
-lifecycle, Debian APT, Tailscale and hardware virtualization (`/dev/kvm`).
+lifecycle, Debian APT (including age), Tailscale and hardware virtualization (`/dev/kvm`).
 Artbird provides generic host setup; AgentBrowse owns these workload prerequisites.
 The installer persists Linux IPv4 forwarding in its owned
 `/etc/sysctl.d/70-agentbrowse-hypeman.conf`; networking must survive a reboot
@@ -37,6 +37,10 @@ The Linux helper is `/usr/local/bin/agentbrowse-hypeman`, linked to root-owned
 `disable`, `status`, `pull IMAGE` and an authenticated `api` operation. `status`
 can include connection details; do not publish raw output. Browser launch never
 starts infrastructure or pulls images.
+
+The same installation places `profile-backup.py` beside the host helper. The public
+`agentbrowse backup` command invokes it locally or through the configured remote SSH
+host; backup and restore paths therefore refer to the selected host's filesystem.
 
 The host uses bounded 2x sparse-disk reservation overcommit; memory is not
 overcommitted. New profiles default to 1 GiB (configurable); migrated Apple
