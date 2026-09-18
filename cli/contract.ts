@@ -166,12 +166,21 @@ const ERROR_CODES: readonly ContractErrorCode[] = [
     meaning: "The requested export file already exists.",
     recovery: "Choose a new archive path.",
   },
-  { code: "invalid_profile_archive", meaning: "The file is not a Kernel tar.zst profile archive." },
+  {
+    code: "invalid_profile_archive",
+    meaning: "The file is not a Kernel tar.zst profile archive.",
+  },
   {
     code: "profile_import_pending",
     meaning: "An import has not completed; launches cannot use this profile.",
     recovery:
       "Destroy its temporary target if present, then retry the import or delete the new profile.",
+  },
+  {
+    code: "profile_restore_pending",
+    meaning: "A full-volume restore has reserved this logical profile name.",
+    recovery:
+      "Retry backup restore with the same set, or explicitly release it after abandoning owned host staging.",
   },
   {
     code: "profile_not_quiescent",
@@ -745,7 +754,7 @@ export const CONTRACT: Contract = {
           audience: "operator",
           mutates: true,
           guidance:
-            "All owned profiles on the selected backend must be detached and pass read-only e2fsck. Each complete image is compressed independently. Age authenticated encryption is the default and needs at least one recipient; plaintext requires explicit --unencrypted. manifest.json is published last, so rerunning an interrupted command safely resumes it.",
+            "All owned profiles on the selected backend must be detached and pass read-only e2fsck. Each complete image is compressed independently. Age authenticated encryption is the default and needs at least one recipient; plaintext requires explicit --unencrypted. The authenticated manifest is published last, so rerunning an interrupted command safely resumes it.",
           arguments: [
             {
               name: "--backend",
@@ -805,6 +814,18 @@ export const CONTRACT: Contract = {
               required: true,
               description: "Backup-set collection directory on that host",
             },
+            {
+              name: "--identity",
+              type: "string",
+              format: "path",
+              direction: "in",
+              description: "Age identity needed to authenticate and show encrypted set details",
+            },
+            {
+              name: "--allow-unencrypted",
+              type: "boolean",
+              description: "Explicitly permit plaintext set manifests",
+            },
           ],
         },
         {
@@ -826,6 +847,18 @@ export const CONTRACT: Contract = {
               direction: "in",
               required: true,
               description: "Complete backup-set directory on that host",
+            },
+            {
+              name: "--identity",
+              type: "string",
+              format: "path",
+              direction: "in",
+              description: "Age identity needed to authenticate an encrypted manifest",
+            },
+            {
+              name: "--allow-unencrypted",
+              type: "boolean",
+              description: "Explicitly permit a plaintext set manifest",
             },
           ],
         },
@@ -857,6 +890,17 @@ export const CONTRACT: Contract = {
               format: "path",
               direction: "in",
               description: "Absolute age identity path on the destination host",
+            },
+            {
+              name: "--allow-unencrypted",
+              type: "boolean",
+              description: "Explicitly permit restore from a plaintext set",
+            },
+            {
+              name: "--release-reservations",
+              type: "boolean",
+              description:
+                "Delete incomplete owned staging and release this set's local reservations",
             },
             {
               name: "--dry-run",

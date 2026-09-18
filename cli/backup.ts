@@ -32,6 +32,8 @@ export type ParsedBackup =
       action: "list";
       backend: string;
       destination: string;
+      identity?: string;
+      allowUnencrypted: boolean;
       json: boolean;
     }
   | {
@@ -39,6 +41,8 @@ export type ParsedBackup =
       action: "inspect";
       backend: string;
       set: string;
+      identity?: string;
+      allowUnencrypted: boolean;
       json: boolean;
     }
   | {
@@ -47,6 +51,8 @@ export type ParsedBackup =
       backend: string;
       set: string;
       identity?: string;
+      allowUnencrypted: boolean;
+      releaseReservations: boolean;
       dryRun: boolean;
       json: boolean;
     };
@@ -64,7 +70,11 @@ function shellQuote(value: string): string {
 }
 
 async function defaultProcess(command: readonly string[]): Promise<ProcessResult> {
-  const child = Bun.spawn([...command], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn([...command], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
@@ -243,6 +253,15 @@ async function bindingFindings(
           backend: binding.backend,
         });
       }
+      if (binding.pendingRestore) {
+        findings.push({
+          severity: "error",
+          code: "profile_restore_pending",
+          profile: binding.profile,
+          backend: binding.backend,
+          setDigest: binding.pendingRestore,
+        });
+      }
     } catch (error) {
       findings.push({
         severity: "error",
@@ -300,7 +319,10 @@ export async function runBackup(
           "profile_backup_failed",
           `${config.backends[index]!.id}: profile backup helper omitted reconciliation findings`,
         );
-      return values.map((finding) => ({ backend: config.backends[index]!.id, finding }));
+      return values.map((finding) => ({
+        backend: config.backends[index]!.id,
+        finding,
+      }));
     });
     const findings = [...hostFindings, ...(await bindingFindings(reports, env))];
     const profileCount = reports.reduce((sum, report) => {
@@ -340,11 +362,57 @@ export async function runBackup(
     );
   }
   if (parsed.action === "list") {
-    return await invoke(selected, ["list", "--destination", parsed.destination], runner);
+    return await invoke(
+      selected,
+      [
+        "list",
+        "--destination",
+        parsed.destination,
+        ...(parsed.identity === undefined ? [] : ["--identity", parsed.identity]),
+        ...(parsed.allowUnencrypted ? ["--allow-unencrypted"] : []),
+      ],
+      runner,
+    );
   }
   if (parsed.action === "inspect") {
-    return await invoke(selected, ["inspect", "--set", parsed.set], runner);
+    return await invoke(
+      selected,
+      [
+        "inspect",
+        "--set",
+        parsed.set,
+        ...(parsed.identity === undefined ? [] : ["--identity", parsed.identity]),
+        ...(parsed.allowUnencrypted ? ["--allow-unencrypted"] : []),
+      ],
+      runner,
+    );
   }
+  const inspect = await invoke(
+    selected,
+    [
+      "inspect",
+      "--set",
+      parsed.set,
+      ...(parsed.identity === undefined ? [] : ["--identity", parsed.identity]),
+      ...(parsed.allowUnencrypted ? ["--allow-unencrypted"] : []),
+    ],
+    runner,
+  );
+  const setDigest = inspect.setDigest;
+  const profileEntries = inspect.profiles;
+  if (
+    typeof setDigest !== "string" ||
+    !/^[0-9a-f]{64}$/.test(setDigest) ||
+    !Array.isArray(profileEntries) ||
+    !profileEntries.every(
+      (entry) => entry !== null && typeof entry === "object" && typeof entry.profile === "string",
+    )
+  ) {
+    throw new CliError("profile_backup_failed", `${selected.id}: invalid inspected backup set`);
+  }
+  const profiles = profileEntries.map((entry) => (entry as { profile: string }).profile);
+  const bindings = new ProfileBindingStore(stateDir(env));
+  if (!parsed.dryRun) await bindings.reserveRestore(profiles, selected.id, setDigest);
   const result = await invoke(
     selected,
     [
@@ -352,11 +420,28 @@ export async function runBackup(
       "--set",
       parsed.set,
       ...(parsed.identity === undefined ? [] : ["--identity", parsed.identity]),
+      ...(parsed.allowUnencrypted ? ["--allow-unencrypted"] : []),
+      "--expected-set-digest",
+      setDigest,
+      ...(parsed.releaseReservations ? ["--release"] : []),
       ...(parsed.dryRun ? ["--dry-run"] : []),
     ],
     runner,
   );
   if (!parsed.dryRun) {
+    if (parsed.releaseReservations) {
+      if (
+        !Array.isArray(result.released) ||
+        result.released.length !== profiles.length ||
+        result.released.some((name, index) => name !== profiles[index])
+      )
+        throw new CliError(
+          "profile_backup_failed",
+          `${selected.id}: restore helper released an unexpected profile set`,
+        );
+      await bindings.releaseRestore(profiles, selected.id, setDigest);
+      return { ...result, bindingsReleased: profiles };
+    }
     if (
       !Array.isArray(result.complete) ||
       !result.complete.every((name) => typeof name === "string")
@@ -366,10 +451,16 @@ export async function runBackup(
         `${selected.id}: restore helper omitted its completed logical profiles`,
       );
     }
-    const bindings = new ProfileBindingStore(stateDir(env));
-    for (const profile of result.complete as string[]) {
-      await bindings.bindProfile(profile, selected.id);
-    }
+    const completed = result.complete as string[];
+    if (
+      completed.length !== profiles.length ||
+      completed.some((name, index) => name !== profiles[index])
+    )
+      throw new CliError(
+        "profile_backup_failed",
+        `${selected.id}: restore helper completed an unexpected profile set`,
+      );
+    await bindings.completeRestore(profiles, selected.id, setDigest);
     return { ...result, bindingsCreated: result.complete };
   }
   return result;

@@ -14,6 +14,7 @@ BACKUP = runpy.run_path(str(SOURCE))
 class FakeHypeman:
     def __init__(self, root, backend, volumes=None, instances=None):
         self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
         self.backend = backend
         self.volumes = list(volumes or [])
         self.instances = list(instances or [])
@@ -68,6 +69,11 @@ class FakeHypeman:
             (directory / "data.raw").write_bytes(b"")
             self.volumes.append(volume)
             return volume
+        if method == "DELETE" and path.startswith("/volumes/"):
+            identity = path.rsplit("/", 1)[1]
+            self.volumes = [volume for volume in self.volumes if volume["id"] != identity]
+            shutil.rmtree(self.root / "data/volumes" / identity)
+            return None
         raise RuntimeError("unexpected synthetic API request: %s %s" % (method, path))
 
 
@@ -145,7 +151,7 @@ class ProfileBackupTest(unittest.TestCase):
             source.api(), source_root, "source", backup_set, [], True, False
         )
         self.assertTrue(created["complete"])
-        manifest = BACKUP["inspect_set"](backup_set)
+        manifest = BACKUP["inspect_set"](backup_set, None, True)
         self.assertEqual(manifest["format"], "agentbrowse-hypeman-profile-backup")
         self.assertEqual(manifest["encryption"]["method"], "none-explicit")
         entry = manifest["profiles"][0]
@@ -166,7 +172,7 @@ class ProfileBackupTest(unittest.TestCase):
         destination_root = self.base / "destination"
         destination = FakeHypeman(destination_root, "destination")
         restored = BACKUP["restore"](
-            destination.api(), destination_root, "destination", backup_set, None, False
+            destination.api(), destination_root, "destination", backup_set, None, True, False
         )
         self.assertEqual(restored["complete"], ["research"])
         self.assertNotEqual(destination.volumes[0]["id"], volume["id"])
@@ -190,7 +196,7 @@ class ProfileBackupTest(unittest.TestCase):
         interrupted["complete"] = False
         receipt.write_text(json.dumps(interrupted))
         repeated = BACKUP["restore"](
-            destination.api(), destination_root, "destination", backup_set, None, False
+            destination.api(), destination_root, "destination", backup_set, None, True, False
         )
         self.assertEqual(repeated["complete"], ["research"])
         self.assertEqual(len(destination.volumes), 1)
@@ -216,8 +222,64 @@ class ProfileBackupTest(unittest.TestCase):
                     self.base / "encrypted-set",
                     ["age1example"],
                     False,
-                    False,
+                    True,
                 )
+        finally:
+            if old_age is None:
+                os.environ.pop("AGENTBROWSE_AGE", None)
+            else:
+                os.environ["AGENTBROWSE_AGE"] = old_age
+
+    def test_encrypted_manifest_authenticates_policy_and_downgrade_fails_closed(self):
+        age = self.base / "age"
+        age.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "if '-d' in sys.argv:\n"
+            " data=pathlib.Path(sys.argv[-1]).read_bytes(); sys.stdout.buffer.write(data[8:])\n"
+            "else:\n"
+            " sys.stdout.buffer.write(b'FAKE-AGE'+sys.stdin.buffer.read())\n"
+        )
+        age.chmod(0o755)
+        identity = self.base / "identity.txt"
+        identity.write_text("synthetic identity")
+        old_age = os.environ.get("AGENTBROWSE_AGE")
+        os.environ["AGENTBROWSE_AGE"] = str(age)
+        try:
+            root = self.base / "source"
+            volume, instances = source_volume(root)
+            hypeman = FakeHypeman(root, "test", [volume], instances)
+            backup_set = self.base / "encrypted"
+            BACKUP["backup"](
+                hypeman.api(), root, "test", backup_set, ["age1synthetic"], False, False
+            )
+            self.assertTrue((backup_set / "manifest.json.age").is_file())
+            self.assertFalse((backup_set / "manifest.json").exists())
+            listed = BACKUP["list_sets"](backup_set.parent)
+            self.assertTrue(listed["sets"][0]["locked"])
+            with self.assertRaisesRegex(RuntimeError, "requires an age --identity"):
+                BACKUP["inspect_set"](backup_set)
+            manifest = BACKUP["inspect_set"](backup_set, str(identity), False)
+            self.assertEqual(manifest["encryption"]["method"], "age-x25519")
+            destination_root = self.base / "destination"
+            destination = FakeHypeman(destination_root, "destination")
+            dry_run = BACKUP["restore"](
+                destination.api(), destination_root, "destination", backup_set,
+                str(identity), False, True
+            )
+            self.assertTrue(dry_run["dryRun"])
+            self.assertEqual(destination.volumes, [])
+            with self.assertRaisesRegex(RuntimeError, "different source or encryption options"):
+                BACKUP["backup"](
+                    hypeman.api(), root, "test", backup_set,
+                    ["age1different"], False, False
+                )
+
+            (backup_set / "manifest.json.age").unlink()
+            manifest.pop("setDigest")
+            (backup_set / "manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(RuntimeError, "explicit --allow-unencrypted"):
+                BACKUP["inspect_set"](backup_set)
         finally:
             if old_age is None:
                 os.environ.pop("AGENTBROWSE_AGE", None)
@@ -234,7 +296,65 @@ class ProfileBackupTest(unittest.TestCase):
         with archive.open("ab") as stream:
             stream.write(b"changed")
         with self.assertRaisesRegex(RuntimeError, "integrity"):
+            BACKUP["inspect_set"](backup_set, None, True)
+
+    def test_plaintext_requires_explicit_restore_acknowledgement(self):
+        root = self.base / "source"
+        volume, instances = source_volume(root)
+        hypeman = FakeHypeman(root, "test", [volume], instances)
+        backup_set = self.base / "set"
+        BACKUP["backup"](hypeman.api(), root, "test", backup_set, [], True, False)
+        with self.assertRaisesRegex(RuntimeError, "explicit --allow-unencrypted"):
             BACKUP["inspect_set"](backup_set)
+
+    def test_intermediate_symlink_and_decompression_overrun_are_rejected(self):
+        root = self.base / "source"
+        volume, instances = source_volume(root)
+        hypeman = FakeHypeman(root, "test", [volume], instances)
+        backup_set = self.base / "real/set"
+        BACKUP["backup"](hypeman.api(), root, "test", backup_set, [], True, False)
+        link = self.base / "linked"
+        link.symlink_to(self.base / "real", target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, "symlinked path component"):
+            BACKUP["inspect_set"](link / "set", None, True)
+
+        manifest_path = backup_set / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["profiles"][0]["archive"]["rawBytes"] = 1
+        manifest_path.write_text(json.dumps(manifest))
+        destination_root = self.base / "destination"
+        destination = FakeHypeman(destination_root, "destination")
+        with self.assertRaisesRegex(RuntimeError, "exceeds its recorded size"):
+            BACKUP["restore"](
+                destination.api(), destination_root, "destination", backup_set,
+                None, True, False
+            )
+        staging = destination_root / "data/volumes/restored-1/restore.raw"
+        self.assertFalse(staging.exists())
+        inspected = BACKUP["inspect_set"](backup_set, None, True)
+        released = BACKUP["restore"](
+            destination.api(), destination_root, "destination", backup_set,
+            None, True, False, inspected["setDigest"], True
+        )
+        self.assertEqual(released["released"], ["research"])
+        self.assertEqual(destination.volumes, [])
+
+    def test_restore_preserves_large_zero_runs_as_sparse_extents(self):
+        source_root = self.base / "source"
+        volume, instances = source_volume(source_root)
+        source_raw = source_root / "data/volumes/source-1/data.raw"
+        with source_raw.open("r+b") as stream:
+            stream.truncate(64 * 1024 * 1024)
+        source = FakeHypeman(source_root, "test", [volume], instances)
+        backup_set = self.base / "set"
+        BACKUP["backup"](source.api(), source_root, "test", backup_set, [], True, False)
+        destination_root = self.base / "destination"
+        destination = FakeHypeman(destination_root, "destination")
+        BACKUP["restore"](
+            destination.api(), destination_root, "destination", backup_set, None, True, False
+        )
+        raw = destination_root / "data/volumes/restored-1/data.raw"
+        self.assertLess(raw.stat().st_blocks * 512, raw.stat().st_size)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ export interface ProfileBinding {
   readonly backend: string;
   readonly target: Target | null;
   readonly pendingImport?: true;
+  readonly pendingRestore?: string;
 }
 
 export function requireReadyProfile(binding: ProfileBinding | undefined): void {
@@ -22,6 +23,12 @@ export function requireReadyProfile(binding: ProfileBinding | undefined): void {
       "profile_import_pending",
       `Browser profile ${binding.profile} has an unfinished import`,
       "destroy its temporary target if present, then retry profile import with the intended archive, or explicitly delete the new profile",
+    );
+  if (binding?.pendingRestore)
+    throw new CliError(
+      "profile_restore_pending",
+      `Browser profile ${binding.profile} has an unfinished full-volume restore`,
+      "retry backup restore with the same set, or use its explicit reservation release after abandoning host staging",
     );
 }
 
@@ -68,9 +75,83 @@ export class ProfileBindingStore {
           "use the profile's bound backend so its cookies and authentication remain available",
         );
       }
-      const binding = { profile: target.profile, backend: target.backend, target };
+      const binding = {
+        profile: target.profile,
+        backend: target.backend,
+        target,
+      };
       await this.write(binding);
       return binding;
+    });
+  }
+
+  async reserveRestore(
+    profiles: readonly string[],
+    backend: string,
+    setDigest: string,
+  ): Promise<void> {
+    validateBackendId(backend);
+    if (!/^[0-9a-f]{64}$/.test(setDigest))
+      throw new CliError("profile_backup_failed", "invalid backup set digest");
+    const names = [...new Set(profiles)].sort();
+    for (const profile of names) validateName(profile);
+    await this.withProfileLocks(names, async () => {
+      const existing = await Promise.all(names.map((profile) => this.read(profile)));
+      for (const [index, binding] of existing.entries()) {
+        const profile = names[index]!;
+        if (
+          binding !== undefined &&
+          (binding.backend !== backend || binding.pendingRestore !== setDigest)
+        ) {
+          throw new CliError("profile_exists", `Browser profile ${profile} already exists`);
+        }
+      }
+      for (const profile of names) {
+        await this.write({
+          profile,
+          backend,
+          target: null,
+          pendingRestore: setDigest,
+        });
+      }
+    });
+  }
+
+  async completeRestore(
+    profiles: readonly string[],
+    backend: string,
+    setDigest: string,
+  ): Promise<void> {
+    await this.finishRestore(profiles, backend, setDigest, false);
+  }
+
+  async releaseRestore(
+    profiles: readonly string[],
+    backend: string,
+    setDigest: string,
+  ): Promise<void> {
+    await this.finishRestore(profiles, backend, setDigest, true);
+  }
+
+  private async finishRestore(
+    profiles: readonly string[],
+    backend: string,
+    setDigest: string,
+    remove: boolean,
+  ): Promise<void> {
+    validateBackendId(backend);
+    const names = [...new Set(profiles)].sort();
+    await this.withProfileLocks(names, async () => {
+      for (const profile of names) {
+        const binding = await this.read(profile);
+        if (binding?.backend !== backend || binding.pendingRestore !== setDigest) {
+          throw new CliError("profile_backup_failed", `restore reservation changed for ${profile}`);
+        }
+      }
+      for (const profile of names) {
+        if (remove) await rm(this.path(profile), { force: true });
+        else await this.write({ profile, backend, target: null });
+      }
     });
   }
 
@@ -212,6 +293,17 @@ export class ProfileBindingStore {
       await rm(path, { recursive: true, force: true });
     }
   }
+
+  private async withProfileLocks<T>(
+    profiles: readonly string[],
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const acquire = async (index: number): Promise<T> =>
+      index === profiles.length
+        ? await operation()
+        : await this.withProfileLock(profiles[index]!, () => acquire(index + 1));
+    return await acquire(0);
+  }
 }
 
 async function profileBindingLockOwnerIsAlive(path: string): Promise<boolean> {
@@ -248,10 +340,19 @@ export function parseProfileBinding(source: string): ProfileBinding {
   validateBackendAsBinding(backend);
   if (value.pendingImport !== undefined && value.pendingImport !== true)
     throw invalidBinding("profile import state is invalid");
+  if (
+    value.pendingRestore !== undefined &&
+    (typeof value.pendingRestore !== "string" || !/^[0-9a-f]{64}$/.test(value.pendingRestore))
+  )
+    throw invalidBinding("profile restore state is invalid");
+  if (value.pendingImport === true && value.pendingRestore !== undefined)
+    throw invalidBinding("profile cannot have two pending operations");
   const importing = value.pendingImport === true ? { pendingImport: true as const } : {};
-  if (value.target === null) return { profile, backend, target: null, ...importing };
-  if (value.pendingImport === true)
-    throw invalidBinding("an importing profile cannot have a published target");
+  const restoring =
+    typeof value.pendingRestore === "string" ? { pendingRestore: value.pendingRestore } : {};
+  if (value.target === null) return { profile, backend, target: null, ...importing, ...restoring };
+  if (value.pendingImport === true || value.pendingRestore !== undefined)
+    throw invalidBinding("a pending profile cannot have a published target");
   if (!isObject(value.target)) throw invalidBinding("profile binding target is invalid");
   const name = requiredString(value.target, "name");
   const container = requiredString(value.target, "container");
@@ -275,6 +376,7 @@ export function renderProfileBinding(binding: ProfileBinding): string {
       profile: binding.profile,
       backend: binding.backend,
       ...(binding.pendingImport ? { pendingImport: true } : {}),
+      ...(binding.pendingRestore ? { pendingRestore: binding.pendingRestore } : {}),
       target:
         binding.target === null
           ? null

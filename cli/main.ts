@@ -147,6 +147,8 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
   let identity: string | undefined;
   const recipients: string[] = [];
   let unencrypted = false;
+  let allowUnencrypted = false;
+  let releaseReservations = false;
   let dryRun = false;
   for (let index = 2; index < args.length; index += 1) {
     const option = args[index]!;
@@ -156,6 +158,8 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
     else if (option === "--identity") identity = takeValue(args, index++, option);
     else if (option === "--recipient") recipients.push(takeValue(args, index++, option));
     else if (option === "--unencrypted") unencrypted = true;
+    else if (option === "--allow-unencrypted") allowUnencrypted = true;
+    else if (option === "--release-reservations") releaseReservations = true;
     else if (option === "--dry-run") dryRun = true;
     else throw new UsageError(`unknown option for backup ${action}: ${option}`);
   }
@@ -163,7 +167,7 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
   if (action === "create") {
     if (destination === undefined)
       throw new UsageError("backup create requires --destination ABSOLUTE_SET_PATH");
-    if (set !== undefined || identity !== undefined)
+    if (set !== undefined || identity !== undefined || allowUnencrypted || releaseReservations)
       throw new UsageError("backup create does not accept --set or --identity");
     if (unencrypted && recipients.length > 0)
       throw new UsageError("backup create --unencrypted conflicts with --recipient");
@@ -183,24 +187,46 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
   if (action === "list") {
     if (destination === undefined)
       throw new UsageError("backup list requires --destination ABSOLUTE_COLLECTION_PATH");
-    if (set !== undefined || identity !== undefined || dryRun)
-      throw new UsageError("backup list accepts only --backend and --destination");
-    return { command: "backup", action, backend, destination, json };
+    if (set !== undefined || dryRun || releaseReservations)
+      throw new UsageError(
+        "backup list accepts only --backend, --destination, --identity, and --allow-unencrypted",
+      );
+    return {
+      command: "backup",
+      action,
+      backend,
+      destination,
+      ...(identity === undefined ? {} : { identity }),
+      allowUnencrypted,
+      json,
+    };
   }
   if (set === undefined) throw new UsageError(`backup ${action} requires --set ABSOLUTE_SET_PATH`);
   if (destination !== undefined)
     throw new UsageError(`backup ${action} does not accept --destination`);
   if (action === "inspect") {
-    if (identity !== undefined || dryRun)
-      throw new UsageError("backup inspect accepts only --backend and --set");
-    return { command: "backup", action, backend, set, json };
+    if (dryRun || releaseReservations)
+      throw new UsageError("backup inspect does not accept --dry-run or --release-reservations");
+    return {
+      command: "backup",
+      action,
+      backend,
+      set,
+      ...(identity === undefined ? {} : { identity }),
+      allowUnencrypted,
+      json,
+    };
   }
+  if (releaseReservations && dryRun)
+    throw new UsageError("backup restore --release-reservations conflicts with --dry-run");
   return {
     command: "backup",
     action,
     backend,
     set,
     ...(identity === undefined ? {} : { identity }),
+    allowUnencrypted,
+    releaseReservations,
     dryRun,
     json,
   };
@@ -262,10 +288,22 @@ export function parseArgs(argv: readonly string[]): Parsed {
     if (action === "prepare") {
       if (args.length === 3) return { command, action, session, json };
       if (args.length === 5 && args[3] === "--profile")
-        return { command, action, session, profile: takeValue(args, 3, "--profile"), json };
+        return {
+          command,
+          action,
+          session,
+          profile: takeValue(args, 3, "--profile"),
+          json,
+        };
     }
     if (action === "release" && args.length === 5 && args[3] === "--lease")
-      return { command, action, session, lease: takeValue(args, 3, "--lease"), json };
+      return {
+        command,
+        action,
+        session,
+        lease: takeValue(args, 3, "--lease"),
+        json,
+      };
     if (action === "stage") {
       const path = args[3];
       if (!path || path.startsWith("--"))

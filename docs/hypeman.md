@@ -15,9 +15,9 @@ scripts/install-host
 scripts/install-host --remote artbird
 ```
 
-The Mac requires Homebrew; the installer acquires missing caddy/e2fsprogs/age.
+The Mac requires Homebrew; the installer acquires missing caddy/e2fsprogs/age/zstd.
 The Linux host requires working SSH, passwordless sudo for installation and
-lifecycle, Debian APT (including age), Tailscale and hardware virtualization (`/dev/kvm`).
+lifecycle, Debian APT (including age and zstd), Tailscale and hardware virtualization (`/dev/kvm`).
 Artbird provides generic host setup; AgentBrowse owns these workload prerequisites.
 The installer persists Linux IPv4 forwarding in its owned
 `/etc/sysctl.d/70-agentbrowse-hypeman.conf`; networking must survive a reboot

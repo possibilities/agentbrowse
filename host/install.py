@@ -59,7 +59,7 @@ def install():
             raise RuntimeError("the Mac host requires Apple silicon")
         if not shutil.which("brew"):
             raise RuntimeError("install Homebrew through Funk first")
-        for package in ("caddy", "e2fsprogs", "age"):
+        for package in ("caddy", "e2fsprogs", "age", "zstd"):
             probe = subprocess.run(["brew", "list", "--versions", package], capture_output=True)
             if probe.returncode:
                 run("brew", "install", package)
@@ -71,7 +71,7 @@ def install():
         if not Path("/dev/kvm").exists():
             raise RuntimeError("enable hardware virtualization: /dev/kvm is missing")
         run("apt-get", "update")
-        run("apt-get", "install", "-y", "python3", "curl", "age", "e2fsprogs", "erofs-utils", "iptables", "nftables")
+        run("apt-get", "install", "-y", "python3", "curl", "age", "zstd", "e2fsprogs", "erofs-utils", "iptables", "nftables")
         root = Path("/var/lib/agentbrowse-hypeman")
         destination = Path("/usr/local/lib/agentbrowse")
 

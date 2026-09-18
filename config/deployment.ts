@@ -20,6 +20,8 @@ export interface HypemanBackendConfig {
   readonly video?: BrowserVideoConfig;
 }
 
+export const MAX_VOLUME_GIB = 8_589_934_591;
+
 export type BackendConfig = HypemanBackendConfig;
 
 export interface BrowserVideoConfig {
@@ -490,6 +492,7 @@ function parseHypemanBackend(
     portOffset > 8536 ||
     cpus < 1 ||
     profileSizeGb < 1 ||
+    profileSizeGb > MAX_VOLUME_GIB ||
     !/^[1-9][0-9]*(M|G|MB|GB|MiB|GiB)$/.test(memory)
   )
     throw invalidConfiguration(`${location} has invalid resource or port settings`);

@@ -79,20 +79,27 @@ agentbrowse backup create --backend artbird \
   --recipient age1example
 agentbrowse backup list --backend artbird --destination /mnt/private/profile-backups
 agentbrowse backup inspect --backend artbird \
-  --set /mnt/private/profile-backups/2026-09-18
+  --set /mnt/private/profile-backups/2026-09-18 \
+  --identity /mnt/private/keys/profile-backup.agekey
 ```
 
-Each profile image is compressed and encrypted independently. A set without
-`manifest.json` is incomplete and safe to resume with the identical command.
+Each profile image is compressed and encrypted independently. Encrypted sets publish
+their authenticated policy and recovery metadata as `manifest.json.age`; plaintext
+sets publish `manifest.json`. A set without either manifest is incomplete and safe
+to resume with the identical backend, inventory, and recipients.
 The helper refuses attached, changed, inconsistent, or unclean filesystems.
 Use `--unencrypted` only as an explicit decision to store authentication state in
 compressed plaintext. The installer provides the established `age` tool; a missing
 binary or recipient is a concrete failure and AgentBrowse never substitutes custom
-cryptography.
+cryptography. Inspecting or restoring a plaintext set additionally requires
+`--allow-unencrypted`, so loss or substitution of an encrypted manifest cannot
+silently downgrade recovery.
 
 Restore requires an empty destination namespace for every logical profile. It uses
 new volume IDs, verifies each image before publication, and writes new local backend
-bindings only after host success. The age identity path is on the destination host.
+bindings only after host success. Before the host creates a volume, the client
+reserves every logical name under the authenticated set digest. The age identity path
+is on the destination host, and dry-run validates it and the encrypted manifest.
 
 ```sh
 agentbrowse backup restore --backend local \
@@ -102,6 +109,11 @@ agentbrowse backup restore --backend local \
   --set /Volumes/Recovery/profile-backups/2026-09-18 \
   --identity /Volumes/Recovery/keys/profile-backup.agekey
 ```
+
+Retry the same command after interruption. To abandon an incomplete restore, use the
+same set and identity with `--release-reservations`; the host first removes only
+detached staging volumes whose ownership and receipt still match, then the client
+releases the logical-name reservations. Completed restores cannot be released.
 
 The backup records only recovery metadata and complete volume images. Slots, target
 and VM identities, session leases, credentials, SSH keys, and connection descriptors

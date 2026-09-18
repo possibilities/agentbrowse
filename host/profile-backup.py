@@ -8,6 +8,7 @@ connection descriptors.
 """
 import argparse
 import datetime
+import fcntl
 import hashlib
 import json
 import math
@@ -17,10 +18,12 @@ import platform
 import re
 import runpy
 import shutil
+import stat
 import statistics
 import subprocess
 import sys
 import uuid
+from contextlib import contextmanager
 
 
 FORMAT = "agentbrowse-hypeman-profile-backup"
@@ -30,15 +33,86 @@ PROFILE = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 VOLUME_ID = re.compile(r"[A-Za-z0-9_-]+\Z")
 CHUNK_BYTES = 1024 * 1024
 SAMPLE_CHUNKS = 16
+MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_VOLUME_GIB = (2 ** 63 - 1) // (1024 ** 3)
 
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def assert_no_symlink_components(path, allow_missing=False):
+    """Reject links anywhere in a privileged path, including its ancestors."""
+    path = Path(path)
+    if not path.is_absolute():
+        raise RuntimeError("privileged path must be absolute")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        try:
+            os.lstat(current)
+        except FileNotFoundError:
+            if allow_missing:
+                return
+            raise RuntimeError("required path is missing: " + str(current))
+        # macOS exposes these fixed, root-owned compatibility aliases. Treat
+        # them as filesystem roots; all components below them remain checked.
+        trusted_aliases = {"/var": "/private/var", "/tmp": "/private/tmp"}
+        trusted_alias = (
+            platform.system() == "Darwin"
+            and str(current) in trusted_aliases
+            and os.path.realpath(current) == trusted_aliases[str(current)]
+            and os.lstat(current).st_uid == 0
+        )
+        if os.path.islink(current) and not trusted_alias:
+            raise RuntimeError("symlinked path component is unsafe: " + str(current))
+
+
+@contextmanager
+def operation_lock(path):
+    assert_no_symlink_components(path.parent, allow_missing=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    assert_no_symlink_components(path.parent)
+    if path.is_symlink():
+        raise RuntimeError("unsafe operation lock path")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError("unsafe operation lock path")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def write_private_bytes(path, value):
+    assert_no_symlink_components(path.parent, allow_missing=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    assert_no_symlink_components(path.parent)
+    temporary = path.with_name(".%s.%d.%s.tmp" % (path.name, os.getpid(), uuid.uuid4().hex))
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+        os.chmod(path, 0o600)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def write_private(api, path, value):
     del api  # Keep the call shape shared with other host tools; durability is local here.
+    assert_no_symlink_components(path.parent, allow_missing=True)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    assert_no_symlink_components(path.parent)
     os.chmod(path.parent, 0o700)
     temporary = path.with_name(".%s.%d.%s.tmp" % (path.name, os.getpid(), uuid.uuid4().hex))
     try:
@@ -127,7 +201,12 @@ def profile_from_volume(volume, backend):
     if not VOLUME_ID.fullmatch(str(volume.get("id", ""))):
         raise RuntimeError("unsafe profile volume identity")
     size_gib = volume.get("size_gb")
-    if not isinstance(size_gib, int) or isinstance(size_gib, bool) or size_gib < 1:
+    if (
+        not isinstance(size_gib, int)
+        or isinstance(size_gib, bool)
+        or size_gib < 1
+        or size_gib > MAX_VOLUME_GIB
+    ):
         raise RuntimeError("profile volume has invalid reserved capacity")
     return profile
 
@@ -177,8 +256,9 @@ def load_inventory(api, root, backend):
             directory = root / "data/volumes" / volume["id"]
             metadata_path = directory / "metadata.json"
             raw = directory / "data.raw"
-            if directory.is_symlink() or metadata_path.is_symlink() or raw.is_symlink():
-                raise RuntimeError("profile volume contains a symlinked storage path")
+            assert_no_symlink_components(directory)
+            assert_no_symlink_components(metadata_path)
+            assert_no_symlink_components(raw)
             metadata = json.loads(metadata_path.read_text())
             if (
                 metadata.get("id") != volume["id"]
@@ -437,9 +517,64 @@ def start_archive(source, temporary, recipients, unencrypted):
         compressed.unlink(missing_ok=True)
 
 
+def age_command_for(recipients):
+    command = [executable("age", "AGENTBROWSE_AGE")]
+    for recipient in recipients:
+        command += ["-r", recipient]
+    return command
+
+
+def validate_encryption(recipients, unencrypted):
+    executable("zstd", "AGENTBROWSE_ZSTD")
+    if unencrypted:
+        return
+    if not recipients:
+        raise RuntimeError(
+            "authenticated encryption is the default; pass at least one age --recipient "
+            "(or explicitly acknowledge plaintext with --unencrypted)"
+        )
+    result = subprocess.run(
+        age_command_for(sorted(set(recipients))),
+        input=b"",
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode:
+        raise RuntimeError("age recipient validation failed: " + result.stderr.decode()[-300:])
+
+
+def publish_manifest(path, manifest, recipients, unencrypted):
+    encoded = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        raise RuntimeError("backup manifest exceeds its safe size limit")
+    if unencrypted:
+        write_private_bytes(path / "manifest.json", encoded)
+        return path / "manifest.json"
+    temporary = path / (".manifest.%s.tmp" % uuid.uuid4().hex)
+    try:
+        result = subprocess.run(
+            age_command_for(recipients), input=encoded, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        if result.returncode:
+            raise RuntimeError("backup manifest encryption failed: " + result.stderr.decode()[-300:])
+        write_private_bytes(temporary, result.stdout)
+        temporary.replace(path / "manifest.json.age")
+        directory = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return path / "manifest.json.age"
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def backup(api, root, backend, destination, recipients, unencrypted, dry_run):
-    if not destination.is_absolute() or destination.is_symlink():
-        raise RuntimeError("backup set path must be absolute and must not be a symlink")
+    if not destination.is_absolute():
+        raise RuntimeError("backup set path must be absolute")
+    assert_no_symlink_components(destination, allow_missing=True)
+    recipients = sorted(set(recipients))
+    validate_encryption(recipients, unencrypted)
     profiles, findings = load_inventory(api, root, backend)
     if findings:
         raise RuntimeError("profile inventory has reconciliation findings; run backup measure")
@@ -455,125 +590,129 @@ def backup(api, root, backend, destination, recipients, unencrypted, dry_run):
         for row in profiles:
             assert_clean_detached(api, root, row)
         return plan
-    if not unencrypted and not recipients:
-        raise RuntimeError(
-            "authenticated encryption is the default; pass at least one age --recipient "
-            "(or explicitly acknowledge plaintext with --unencrypted)"
-        )
-    executable("zstd", "AGENTBROWSE_ZSTD")
-    if not unencrypted:
-        executable("age", "AGENTBROWSE_AGE")
-    if destination.exists() and (destination / "manifest.json").exists():
-        manifest = inspect_set(destination)
-        if manifest["source"]["backend"] != backend:
-            raise RuntimeError("completed backup set belongs to another backend")
-        requested_encryption = {
-            "method": "none-explicit" if unencrypted else "age-x25519",
-            "recipients": [] if unencrypted else sorted(set(recipients)),
-        }
-        if manifest.get("encryption") != requested_encryption:
-            raise RuntimeError("completed backup set used different encryption options")
-        if [entry["profile"] for entry in manifest["profiles"]] != [
-            row["profile"] for row in profiles
-        ]:
-            raise RuntimeError("completed backup set no longer matches the source inventory")
-        for row, entry in zip(profiles, manifest["profiles"]):
-            before = assert_clean_detached(api, root, row)
-            if entry["source"] != source_record(row, backend, before):
-                raise RuntimeError("completed backup set no longer matches its source volume")
-        return {**plan, "complete": True, "resumed": True}
     destination.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(destination, 0o700)
-    profiles_directory = destination / "profiles"
-    profiles_directory.mkdir(mode=0o700, exist_ok=True)
-    entries = []
-    for row in profiles:
-        before = assert_clean_detached(api, root, row)
-        directory = profiles_directory / row["profile"]
-        directory.mkdir(mode=0o700, exist_ok=True)
-        archive_name = "data.raw.zst" + ("" if unencrypted else ".age")
-        archive = directory / archive_name
-        receipt = directory / "entry.json"
-        expected_source = source_record(row, backend, before)
-        if receipt.exists():
-            entry = json.loads(receipt.read_text())
-            if entry.get("source") != expected_source or not archive.is_file():
-                raise RuntimeError("backup resume receipt conflicts with current source")
-            stored_hash, stored_size = sha256_file(archive)
-            if (
-                stored_hash != entry["archive"]["sha256"]
-                or stored_size != entry["archive"]["bytes"]
-            ):
-                raise RuntimeError("backup archive changed after publication")
-            if (
-                row["metadataBytes"]
-                != (
-                    root / "data/volumes" / row["volume"]["id"] / "metadata.json"
-                ).read_bytes()
-                or not detached(api, root, row["volume"]["id"])
-            ):
-                raise RuntimeError("profile changed or became attached during backup resume")
-            entries.append(entry)
-            continue
-        temporary = directory / (archive_name + ".partial")
-        compressed_temporary = temporary.with_name(temporary.name + ".zstd")
-        for stale in (temporary, compressed_temporary, archive):
-            if stale.is_symlink():
-                raise RuntimeError("unsafe backup staging path")
-            if stale.exists():
-                if not stale.is_file():
-                    raise RuntimeError("unsafe backup staging path")
-                stale.unlink()
-        raw_hash, raw_size = start_archive(
-            row["raw"], temporary, recipients, unencrypted
-        )
-        if (
-            fingerprint(row["raw"]) != before
-            or row["metadataBytes"]
-            != (
-                root / "data/volumes" / row["volume"]["id"] / "metadata.json"
-            ).read_bytes()
-            or not detached(api, root, row["volume"]["id"])
-        ):
-            raise RuntimeError("profile changed or became attached during backup")
-        temporary.replace(archive)
-        stored_hash, stored_size = sha256_file(archive)
-        entry = {
+    with operation_lock(destination / ".backup.lock"):
+        assert_no_symlink_components(destination)
+        requested = {
             "version": 1,
-            "profile": row["profile"],
-            "source": expected_source,
-            "filesystem": {"type": "ext4", "check": "e2fsck-fn-clean"},
-            "archive": {
-                "path": "profiles/%s/%s" % (row["profile"], archive_name),
-                "bytes": stored_size,
-                "sha256": stored_hash,
-                "rawBytes": raw_size,
-                "rawSha256": raw_hash,
-                "compression": "zstd-level-3",
-                "encryption": "none-explicit" if unencrypted else "age-x25519",
+            "backend": backend,
+            "profiles": [row["profile"] for row in profiles],
+            "encryption": {
+                "method": "none-explicit" if unencrypted else "age-x25519",
+                "recipients": [] if unencrypted else recipients,
             },
         }
-        write_private(api, receipt, entry)
-        entries.append(entry)
-    manifest = {
-        "format": FORMAT,
-        "version": FORMAT_VERSION,
-        "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "source": {
-            "backend": backend,
-            "platform": platform.system().lower(),
-            "hypeman": "0.3.0",
-            "profileSchema": PROFILE_SCHEMA_VERSION,
-        },
-        "encryption": {
-            "method": "none-explicit" if unencrypted else "age-x25519",
-            "recipients": [] if unencrypted else sorted(set(recipients)),
-        },
-        "profiles": entries,
-    }
-    # Publication point: an absent manifest always means the set is incomplete.
-    write_private(api, destination / "manifest.json", manifest)
-    return {**plan, "complete": True, "resumed": False}
+        state_path = destination / "backup-state.json"
+        assert_no_symlink_components(state_path, allow_missing=True)
+        state = json.loads(state_path.read_text()) if state_path.exists() else requested
+        if any(state.get(key) != requested[key] for key in requested):
+            raise RuntimeError("backup resume used different source or encryption options")
+        if not state_path.exists():
+            write_private(api, state_path, state)
+        manifest_path = destination / ("manifest.json" if unencrypted else "manifest.json.age")
+        other_manifest = destination / ("manifest.json.age" if unencrypted else "manifest.json")
+        if other_manifest.exists():
+            raise RuntimeError("backup set publication conflicts with requested encryption")
+        if manifest_path.exists():
+            actual_manifest_hash = sha256_file(manifest_path)[0]
+            if state.get("manifestSha256") not in (None, actual_manifest_hash):
+                raise RuntimeError("published backup manifest changed")
+            for row in profiles:
+                before = assert_clean_detached(api, root, row)
+                receipt = destination / "profiles" / row["profile"] / "entry.json"
+                assert_no_symlink_components(receipt)
+                entry = json.loads(receipt.read_text())
+                if (
+                    not receipt.is_file()
+                    or entry.get("source") != source_record(row, backend, before)
+                    or row["metadataBytes"]
+                    != (root / "data/volumes" / row["volume"]["id"] / "metadata.json").read_bytes()
+                ):
+                    raise RuntimeError("completed backup set no longer matches its source volume")
+                validate_entry_path(destination, entry)
+            if state.get("manifestSha256") is None:
+                state["manifestSha256"] = actual_manifest_hash
+                write_private(api, state_path, state)
+            return {**plan, "complete": True, "resumed": True}
+        profiles_directory = destination / "profiles"
+        profiles_directory.mkdir(mode=0o700, exist_ok=True)
+        assert_no_symlink_components(profiles_directory)
+        entries = []
+        for row in profiles:
+            before = assert_clean_detached(api, root, row)
+            directory = profiles_directory / row["profile"]
+            directory.mkdir(mode=0o700, exist_ok=True)
+            assert_no_symlink_components(directory)
+            archive_name = "data.raw.zst" + ("" if unencrypted else ".age")
+            archive = directory / archive_name
+            receipt = directory / "entry.json"
+            assert_no_symlink_components(receipt, allow_missing=True)
+            expected_source = source_record(row, backend, before)
+            if receipt.exists():
+                entry = json.loads(receipt.read_text())
+                assert_no_symlink_components(archive)
+                if (
+                    entry.get("source") != expected_source
+                    or entry.get("archive", {}).get("encryption") != requested["encryption"]["method"]
+                    or not archive.is_file()
+                ):
+                    raise RuntimeError("backup resume receipt conflicts with current source or encryption")
+                stored_hash, stored_size = sha256_file(archive)
+                if (stored_hash, stored_size) != (entry["archive"]["sha256"], entry["archive"]["bytes"]):
+                    raise RuntimeError("backup archive changed after publication")
+                if (
+                    row["metadataBytes"]
+                    != (root / "data/volumes" / row["volume"]["id"] / "metadata.json").read_bytes()
+                    or not detached(api, root, row["volume"]["id"])
+                ):
+                    raise RuntimeError("profile changed or became attached during backup resume")
+                entries.append(entry)
+                continue
+            temporary = directory / (archive_name + ".partial")
+            compressed_temporary = temporary.with_name(temporary.name + ".zstd")
+            for stale in (temporary, compressed_temporary, archive):
+                if stale.is_symlink() or (stale.exists() and not stale.is_file()):
+                    raise RuntimeError("unsafe backup staging path")
+                stale.unlink(missing_ok=True)
+            try:
+                raw_hash, raw_size = start_archive(row["raw"], temporary, recipients, unencrypted)
+                if (
+                    fingerprint(row["raw"]) != before
+                    or row["metadataBytes"]
+                    != (root / "data/volumes" / row["volume"]["id"] / "metadata.json").read_bytes()
+                    or not detached(api, root, row["volume"]["id"])
+                ):
+                    raise RuntimeError("profile changed or became attached during backup")
+                temporary.replace(archive)
+            finally:
+                temporary.unlink(missing_ok=True)
+                compressed_temporary.unlink(missing_ok=True)
+            stored_hash, stored_size = sha256_file(archive)
+            entry = {
+                "version": 1, "profile": row["profile"], "source": expected_source,
+                "filesystem": {"type": "ext4", "check": "e2fsck-fn-clean"},
+                "archive": {
+                    "path": "profiles/%s/%s" % (row["profile"], archive_name),
+                    "bytes": stored_size, "sha256": stored_hash, "rawBytes": raw_size,
+                    "rawSha256": raw_hash, "compression": "zstd-level-3",
+                    "encryption": requested["encryption"]["method"],
+                },
+            }
+            write_private(api, receipt, entry)
+            entries.append(entry)
+        manifest = {
+            "format": FORMAT, "version": FORMAT_VERSION,
+            "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "source": {"backend": backend, "platform": platform.system().lower(),
+                       "hypeman": "0.3.0", "profileSchema": PROFILE_SCHEMA_VERSION},
+            "encryption": requested["encryption"], "profiles": entries,
+        }
+        # Publication point: only the complete authoritative manifest is renamed into place.
+        published = publish_manifest(destination, manifest, recipients, unencrypted)
+        state["manifestSha256"] = sha256_file(published)[0]
+        write_private(api, state_path, state)
+        return {**plan, "complete": True, "resumed": False}
 
 
 def validate_entry_path(root, entry):
@@ -599,7 +738,7 @@ def validate_entry_path(root, entry):
         or not isinstance(volume.get("sizeGiB"), int)
         or isinstance(volume.get("sizeGiB"), bool)
         or volume["sizeGiB"] < 1
-        or volume["sizeGiB"] > 1024
+        or volume["sizeGiB"] > MAX_VOLUME_GIB
         or not isinstance(archive_record, dict)
     ):
         raise RuntimeError("backup entry recovery metadata is invalid")
@@ -616,7 +755,8 @@ def validate_entry_path(root, entry):
         if not re.fullmatch(r"[0-9a-f]{64}", str(archive_record.get(key, ""))):
             raise RuntimeError("backup entry has an invalid digest")
     path = root / expected
-    if path.is_symlink() or not path.is_file():
+    assert_no_symlink_components(path)
+    if not path.is_file():
         raise RuntimeError("backup archive is missing or unsafe")
     digest, size = sha256_file(path)
     if digest != entry["archive"].get("sha256") or size != entry["archive"].get("bytes"):
@@ -624,13 +764,63 @@ def validate_entry_path(root, entry):
     return path
 
 
-def inspect_set(path):
-    if not path.is_absolute() or path.is_symlink():
-        raise RuntimeError("backup set path must be absolute and must not be a symlink")
-    manifest_path = path / "manifest.json"
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        raise RuntimeError("backup set is incomplete: manifest.json is absent")
-    manifest = json.loads(manifest_path.read_text())
+def decrypt_manifest(path, identity):
+    if not identity:
+        raise RuntimeError("encrypted backup inspection or restore requires an age --identity file")
+    identity_path = Path(identity)
+    if not identity_path.is_absolute():
+        raise RuntimeError("age identity path must be absolute on the host")
+    assert_no_symlink_components(identity_path)
+    if not identity_path.is_file():
+        raise RuntimeError("age identity must be a regular file")
+    process = subprocess.Popen(
+        [executable("age", "AGENTBROWSE_AGE"), "-d", "-i", str(identity_path), str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    output = process.stdout.read(MAX_MANIFEST_BYTES + 1)
+    if len(output) > MAX_MANIFEST_BYTES:
+        process.kill()
+        process.wait()
+        process.stdout.close()
+        process.stderr.close()
+        raise RuntimeError("decrypted backup manifest exceeds its safe size limit")
+    stderr = process.stderr.read()
+    code = process.wait()
+    process.stdout.close()
+    process.stderr.close()
+    if code:
+        raise RuntimeError("backup manifest authentication failed: " + stderr.decode()[-300:])
+    return output
+
+
+def manifest_digest(manifest):
+    value = dict(manifest)
+    value.pop("setDigest", None)
+    return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def inspect_set(path, identity=None, allow_unencrypted=False):
+    if not path.is_absolute():
+        raise RuntimeError("backup set path must be absolute")
+    assert_no_symlink_components(path)
+    encrypted = path / "manifest.json.age"
+    plaintext = path / "manifest.json"
+    if encrypted.exists() and plaintext.exists():
+        raise RuntimeError("backup set has conflicting publication manifests")
+    if encrypted.exists():
+        assert_no_symlink_components(encrypted)
+        encoded = decrypt_manifest(encrypted, identity)
+    elif plaintext.exists():
+        if not allow_unencrypted:
+            raise RuntimeError("plaintext backup restore requires explicit --allow-unencrypted")
+        assert_no_symlink_components(plaintext)
+        if plaintext.stat().st_size > MAX_MANIFEST_BYTES:
+            raise RuntimeError("backup manifest exceeds its safe size limit")
+        encoded = plaintext.read_bytes()
+    else:
+        raise RuntimeError("backup set is incomplete: authoritative manifest is absent")
+    manifest = json.loads(encoded)
     if manifest.get("format") != FORMAT or manifest.get("version") != FORMAT_VERSION:
         raise RuntimeError("unsupported backup set format")
     profiles = manifest.get("profiles")
@@ -646,17 +836,38 @@ def inspect_set(path):
         names.append(entry["profile"])
     if names != sorted(set(names)):
         raise RuntimeError("backup manifest profile order or uniqueness is invalid")
+    expected_method = "age-x25519" if encrypted.exists() else "none-explicit"
+    if manifest.get("encryption", {}).get("method") != expected_method:
+        raise RuntimeError("authenticated manifest encryption policy is invalid")
+    manifest["setDigest"] = manifest_digest(manifest)
     return manifest
 
 
-def list_sets(destination):
-    if not destination.is_absolute() or destination.is_symlink() or not destination.is_dir():
-        raise RuntimeError("backup collection must be an absolute, non-symlink directory")
+def list_sets(destination, identity=None, allow_unencrypted=False):
+    if not destination.is_absolute():
+        raise RuntimeError("backup collection must be absolute")
+    assert_no_symlink_components(destination)
+    if not destination.is_dir():
+        raise RuntimeError("backup collection must be a directory")
     sets = []
     for child in sorted(destination.iterdir()):
-        if child.is_symlink() or not child.is_dir() or not (child / "manifest.json").is_file():
+        if child.is_symlink() or not child.is_dir() or not (
+            (child / "manifest.json").is_file() or (child / "manifest.json.age").is_file()
+        ):
             continue
-        manifest = inspect_set(child)
+        if (child / "manifest.json.age").is_file() and not identity:
+            sets.append(
+                {
+                    "path": str(child),
+                    "createdAt": None,
+                    "sourceBackend": None,
+                    "profileCount": None,
+                    "encryption": "age-x25519",
+                    "locked": True,
+                }
+            )
+            continue
+        manifest = inspect_set(child, identity, allow_unencrypted)
         sets.append(
             {
                 "path": str(child),
@@ -664,6 +875,7 @@ def list_sets(destination):
                 "sourceBackend": manifest["source"]["backend"],
                 "profileCount": len(manifest["profiles"]),
                 "encryption": manifest["encryption"]["method"],
+                "locked": False,
             }
         )
     return {"sets": sets, "count": len(sets)}
@@ -694,6 +906,7 @@ def extract_archive(archive, output, entry, identity):
     compressed.close()
     digest = hashlib.sha256()
     size = 0
+    expected_size = entry["archive"]["rawBytes"]
     try:
         with output.open("xb") as stream:
             os.chmod(output, 0o600)
@@ -701,11 +914,30 @@ def extract_archive(archive, output, entry, identity):
                 block = zstd.stdout.read(CHUNK_BYTES)
                 if not block:
                     break
-                stream.write(block)
+                if size + len(block) > expected_size:
+                    zstd.kill()
+                    if age:
+                        age.kill()
+                    raise RuntimeError("decompressed profile image exceeds its recorded size")
+                if block.count(0) == len(block):
+                    stream.seek(len(block), os.SEEK_CUR)
+                else:
+                    stream.write(block)
                 digest.update(block)
                 size += len(block)
+            stream.truncate(size)
             stream.flush()
             os.fsync(stream.fileno())
+    except BaseException:
+        if zstd.poll() is None:
+            zstd.kill()
+        zstd.wait()
+        if age and age.poll() is None:
+            age.kill()
+        if age:
+            age.wait()
+        output.unlink(missing_ok=True)
+        raise
     finally:
         zstd.stdout.close()
     zstd_code = zstd.wait()
@@ -726,20 +958,32 @@ def destination_tags(profile, backend):
     }
 
 
-def restore(api, root, backend, source, identity, dry_run):
-    manifest = inspect_set(source)
-    if not dry_run:
-        executable("zstd", "AGENTBROWSE_ZSTD")
-        e2fsck_path()
-        if manifest.get("encryption", {}).get("method") == "age-x25519":
-            if not identity:
-                raise RuntimeError("encrypted backup restore requires an age --identity file")
-            identity_path = Path(identity)
-            if not identity_path.is_absolute():
-                raise RuntimeError("age identity path must be absolute on the destination host")
-            if identity_path.is_symlink() or not identity_path.is_file():
-                raise RuntimeError("age identity must be a regular non-symlink file")
-            executable("age", "AGENTBROWSE_AGE")
+def staging_tags(profile, backend, set_digest):
+    return {
+        "dev.agentbrowse.managed": "true",
+        "dev.agentbrowse.backend": backend,
+        "dev.agentbrowse.role": "profile-restore-staging",
+        "dev.agentbrowse.restore.profile": profile,
+        "dev.agentbrowse.restore.set": set_digest,
+    }
+
+
+def restore(api, root, backend, source, identity, allow_unencrypted, dry_run,
+            expected_set_digest=None, release=False):
+    assert_no_symlink_components(root)
+    with operation_lock(root / "profile-restores" / ".restore.lock"):
+        return restore_locked(api, root, backend, source, identity, allow_unencrypted,
+                              dry_run, expected_set_digest, release)
+
+
+def restore_locked(api, root, backend, source, identity, allow_unencrypted, dry_run,
+                   expected_set_digest, release):
+    manifest = inspect_set(source, identity, allow_unencrypted)
+    set_digest = manifest["setDigest"]
+    if expected_set_digest and expected_set_digest != set_digest:
+        raise RuntimeError("backup set changed after logical profile reservation")
+    executable("zstd", "AGENTBROWSE_ZSTD")
+    e2fsck_path()
     api["owned"](root)
     volumes = api["request"](root, "GET", "/volumes")
     instances = api["request"](root, "GET", "/instances")
@@ -747,14 +991,45 @@ def restore(api, root, backend, source, identity, dry_run):
     by_name = {volume["name"]: volume for volume in volumes}
     if len(by_name) != len(volumes):
         raise RuntimeError("destination contains duplicate Hypeman volume names")
-    set_digest = hashlib.sha256(canonical(manifest).encode()).hexdigest()
     receipts = root / "profile-restores" / set_digest
+    if release:
+        released = []
+        for entry in manifest["profiles"]:
+            profile = entry["profile"]
+            receipt_path = receipts / (profile + ".json")
+            assert_no_symlink_components(receipt_path, allow_missing=True)
+            if not receipt_path.exists():
+                released.append(profile)
+                continue
+            saved = json.loads(receipt_path.read_text())
+            if (
+                saved.get("version") != 1
+                or saved.get("profile") != profile
+                or saved.get("setDigest") != set_digest
+                or not VOLUME_ID.fullmatch(str(saved.get("volumeId", "")))
+            ):
+                raise RuntimeError("restore receipt conflicts with this backup set")
+            if saved.get("complete"):
+                raise RuntimeError("cannot release a completed restore: " + profile)
+            volume = next((v for v in volumes if v.get("id") == saved.get("volumeId")), None)
+            if volume:
+                if (
+                    volume.get("tags") != staging_tags(profile, backend, set_digest)
+                    or volume["id"] in attached
+                    or not detached(api, root, volume["id"])
+                ):
+                    raise RuntimeError("restore staging ownership changed: " + profile)
+                api["request"](root, "DELETE", "/volumes/" + volume["id"])
+            receipt_path.unlink()
+            released.append(profile)
+        return {"released": released, "setDigest": set_digest, "dryRun": False}
     plans = []
     for entry in manifest["profiles"]:
         profile = entry["profile"]
         name = "agentbrowse-profile-" + profile
         if name in by_name:
             receipt_path = receipts / (profile + ".json")
+            assert_no_symlink_components(receipt_path, allow_missing=True)
             saved = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
             if (
                 not saved
@@ -773,6 +1048,7 @@ def restore(api, root, backend, source, identity, dry_run):
         "destinationBackend": backend,
         "profiles": plans,
         "dryRun": dry_run,
+        "setDigest": set_digest,
     }
     if dry_run:
         return result
@@ -781,11 +1057,16 @@ def restore(api, root, backend, source, identity, dry_run):
     for entry in manifest["profiles"]:
         profile = entry["profile"]
         receipt_path = receipts / (profile + ".json")
+        assert_no_symlink_components(receipt_path, allow_missing=True)
         saved = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
         if saved and saved.get("complete"):
             directory = root / "data/volumes" / saved["volumeId"]
-            metadata = json.loads((directory / "metadata.json").read_text())
+            metadata_path = directory / "metadata.json"
             raw = directory / "data.raw"
+            assert_no_symlink_components(directory)
+            assert_no_symlink_components(metadata_path)
+            assert_no_symlink_components(raw)
+            metadata = json.loads(metadata_path.read_text())
             if (
                 metadata.get("name") != "agentbrowse-profile-" + profile
                 or metadata.get("tags") != destination_tags(profile, backend)
@@ -804,14 +1085,18 @@ def restore(api, root, backend, source, identity, dry_run):
             volume = next((v for v in volumes if v.get("id") == saved.get("volumeId")), None)
             if not volume:
                 raise RuntimeError("incomplete restore destination volume is missing")
+            published_after_interruption = (
+                by_name.get("agentbrowse-profile-" + profile, {}).get("id") == volume.get("id")
+                and volume.get("tags") == destination_tags(profile, backend)
+            )
+            if (
+                volume.get("tags") != staging_tags(profile, backend, set_digest)
+                and not published_after_interruption
+            ):
+                raise RuntimeError("restore staging ownership changed: " + profile)
         else:
             staging_name = "agentbrowse-restore-" + uuid.uuid4().hex
-            staging_tags = {
-                "dev.agentbrowse.managed": "true",
-                "dev.agentbrowse.backend": backend,
-                "dev.agentbrowse.role": "profile-restore-staging",
-                "dev.agentbrowse.restore.profile": profile,
-            }
+            tags = staging_tags(profile, backend, set_digest)
             volume = api["request"](
                 root,
                 "POST",
@@ -819,7 +1104,7 @@ def restore(api, root, backend, source, identity, dry_run):
                 {
                     "name": staging_name,
                     "size_gb": entry["source"]["volume"]["sizeGiB"],
-                    "tags": staging_tags,
+                    "tags": tags,
                 },
             )
             volumes.append(volume)
@@ -836,21 +1121,28 @@ def restore(api, root, backend, source, identity, dry_run):
         directory = root / "data/volumes" / volume["id"]
         raw = directory / "data.raw"
         staging = directory / "restore.raw"
-        if raw.is_symlink() or staging.is_symlink():
-            raise RuntimeError("unsafe restore destination path")
+        assert_no_symlink_components(directory)
+        assert_no_symlink_components(raw)
+        assert_no_symlink_components(staging, allow_missing=True)
         raw_hash, raw_size = sha256_file(raw)
         expected_hash = entry["archive"]["rawSha256"]
         expected_size = entry["archive"]["rawBytes"]
         if (raw_hash, raw_size) != (expected_hash, expected_size):
             if staging.exists():
+                if not staging.is_file():
+                    raise RuntimeError("unsafe restore staging path")
                 staging.unlink()
-            extract_archive(validate_entry_path(source, entry), staging, entry, identity)
-            check_filesystem(staging)
-            staging.replace(raw)
+            try:
+                extract_archive(validate_entry_path(source, entry), staging, entry, identity)
+                check_filesystem(staging)
+                staging.replace(raw)
+            finally:
+                staging.unlink(missing_ok=True)
         if sha256_file(raw) != (expected_hash, expected_size):
             raise RuntimeError("installed restore image failed its final digest check")
         check_filesystem(raw)
         metadata_path = directory / "metadata.json"
+        assert_no_symlink_components(metadata_path)
         metadata = json.loads(metadata_path.read_text())
         if (
             metadata.get("id") != volume["id"]
@@ -883,11 +1175,18 @@ def parser():
     create.add_argument("--dry-run", action="store_true")
     listing = commands.add_parser("list")
     listing.add_argument("--destination", type=Path, required=True)
+    listing.add_argument("--identity")
+    listing.add_argument("--allow-unencrypted", action="store_true")
     inspect = commands.add_parser("inspect")
     inspect.add_argument("--set", dest="backup_set", type=Path, required=True)
+    inspect.add_argument("--identity")
+    inspect.add_argument("--allow-unencrypted", action="store_true")
     restore_parser = commands.add_parser("restore")
     restore_parser.add_argument("--set", dest="backup_set", type=Path, required=True)
     restore_parser.add_argument("--identity")
+    restore_parser.add_argument("--allow-unencrypted", action="store_true")
+    restore_parser.add_argument("--expected-set-digest")
+    restore_parser.add_argument("--release", action="store_true")
     restore_parser.add_argument("--dry-run", action="store_true")
     return result
 
@@ -908,12 +1207,13 @@ def main(argv=None):
             args.dry_run,
         )
     elif args.command == "list":
-        output = list_sets(args.destination)
+        output = list_sets(args.destination, args.identity, args.allow_unencrypted)
     elif args.command == "inspect":
-        output = inspect_set(args.backup_set)
+        output = inspect_set(args.backup_set, args.identity, args.allow_unencrypted)
     else:
         output = restore(
-            api, args.root, args.backend, args.backup_set, args.identity, args.dry_run
+            api, args.root, args.backend, args.backup_set, args.identity,
+            args.allow_unencrypted, args.dry_run, args.expected_set_digest, args.release
         )
     print(json.dumps(output, sort_keys=True), flush=True)
 

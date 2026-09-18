@@ -187,6 +187,8 @@ test("backup commands preserve measurement, encryption, inspection, and restore 
     backend: "local",
     set: "/backups/set-1",
     identity: "/keys/backup.txt",
+    allowUnencrypted: false,
+    releaseReservations: false,
     dryRun: true,
     json: false,
   });

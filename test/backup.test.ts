@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -42,7 +42,10 @@ function fixture() {
   );
   return {
     directory,
-    env: { AGENTBROWSE_CONFIG: config, AGENTBROWSE_STATE_DIR: join(directory, "state") },
+    env: {
+      AGENTBROWSE_CONFIG: config,
+      AGENTBROWSE_STATE_DIR: join(directory, "state"),
+    },
   };
 }
 
@@ -158,7 +161,11 @@ test("create forwards age recipients and dry-run without interpreting host paths
     env,
     async (command) => {
       observed = command;
-      return { exitCode: 0, stdout: '{"complete":false,"dryRun":true}', stderr: "" };
+      return {
+        exitCode: 0,
+        stdout: '{"complete":false,"dryRun":true}',
+        stderr: "",
+      };
     },
   );
   expect(observed[6]).toContain("'/mnt/private backup/2026-09-18'");
@@ -176,19 +183,109 @@ test("successful restore writes new logical backend bindings without runtime ide
       backend: "local",
       set: "/backups/set-1",
       identity: "/keys/backup.agekey",
+      allowUnencrypted: false,
+      releaseReservations: false,
       dryRun: false,
       json: true,
     },
     env,
-    async () => ({
-      exitCode: 0,
-      stdout: '{"complete":["research"],"newVolumeIds":true}',
-      stderr: "",
-    }),
+    async (command) =>
+      command.includes("inspect")
+        ? {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              setDigest: "a".repeat(64),
+              profiles: [{ profile: "research" }],
+            }),
+            stderr: "",
+          }
+        : {
+            exitCode: 0,
+            stdout: '{"complete":["research"],"newVolumeIds":true}',
+            stderr: "",
+          },
   );
   expect(result.bindingsCreated).toEqual(["research"]);
   const binding = JSON.parse(readFileSync(join(directory, "state/profiles/research.json"), "utf8"));
-  expect(binding).toMatchObject({ profile: "research", backend: "local", target: null });
+  expect(binding).toMatchObject({
+    profile: "research",
+    backend: "local",
+    target: null,
+  });
   expect(binding).not.toHaveProperty("slot");
   expect(binding).not.toHaveProperty("lease");
+});
+
+test("restore reserves all logical names before host mutation and retains them for retry", async () => {
+  const { directory, env } = fixture();
+  let calls = 0;
+  await expect(
+    runBackup(
+      {
+        command: "backup",
+        action: "restore",
+        backend: "local",
+        set: "/backups/plain",
+        allowUnencrypted: true,
+        releaseReservations: false,
+        dryRun: false,
+        json: true,
+      },
+      env,
+      async (command) => {
+        calls += 1;
+        if (command.includes("inspect"))
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              setDigest: "b".repeat(64),
+              profiles: [{ profile: "alpha" }, { profile: "beta" }],
+            }),
+            stderr: "",
+          };
+        for (const profile of ["alpha", "beta"]) {
+          const receipt = JSON.parse(
+            readFileSync(join(directory, `state/profiles/${profile}.json`), "utf8"),
+          );
+          expect(receipt.pendingRestore).toBe("b".repeat(64));
+        }
+        return { exitCode: 1, stdout: "", stderr: "synthetic interruption" };
+      },
+    ),
+  ).rejects.toThrow("synthetic interruption");
+  expect(calls).toBe(2);
+  expect(
+    JSON.parse(readFileSync(join(directory, "state/profiles/alpha.json"), "utf8")).pendingRestore,
+  ).toBe("b".repeat(64));
+
+  const released = await runBackup(
+    {
+      command: "backup",
+      action: "restore",
+      backend: "local",
+      set: "/backups/plain",
+      allowUnencrypted: true,
+      releaseReservations: true,
+      dryRun: false,
+      json: true,
+    },
+    env,
+    async (command) =>
+      command.includes("inspect")
+        ? {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              setDigest: "b".repeat(64),
+              profiles: [{ profile: "alpha" }, { profile: "beta" }],
+            }),
+            stderr: "",
+          }
+        : {
+            exitCode: 0,
+            stdout: JSON.stringify({ released: ["alpha", "beta"] }),
+            stderr: "",
+          },
+  );
+  expect(released.bindingsReleased).toEqual(["alpha", "beta"]);
+  expect(existsSync(join(directory, "state/profiles/alpha.json"))).toBe(false);
 });
