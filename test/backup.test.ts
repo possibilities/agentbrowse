@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { backupHostCommand, runBackup } from "../cli/backup.ts";
+import { ProfileBindingStore } from "../cli/profile-binding.ts";
 import type { HypemanBackendConfig } from "../config/deployment.ts";
 
 const temporaryDirectories: string[] = [];
@@ -184,6 +185,7 @@ test("successful restore writes new logical backend bindings without runtime ide
       set: "/backups/set-1",
       identity: "/keys/backup.agekey",
       allowUnencrypted: false,
+      expectedSetDigest: "a".repeat(64),
       releaseReservations: false,
       dryRun: false,
       json: true,
@@ -227,6 +229,7 @@ test("restore reserves all logical names before host mutation and retains them f
         backend: "local",
         set: "/backups/plain",
         allowUnencrypted: true,
+        expectedSetDigest: "b".repeat(64),
         releaseReservations: false,
         dryRun: false,
         json: true,
@@ -265,6 +268,7 @@ test("restore reserves all logical names before host mutation and retains them f
       backend: "local",
       set: "/backups/plain",
       allowUnencrypted: true,
+      expectedSetDigest: "b".repeat(64),
       releaseReservations: true,
       dryRun: false,
       json: true,
@@ -288,4 +292,28 @@ test("restore reserves all logical names before host mutation and retains them f
   );
   expect(released.bindingsReleased).toEqual(["alpha", "beta"]);
   expect(existsSync(join(directory, "state/profiles/alpha.json"))).toBe(false);
+});
+
+test("restore binding finalization resumes from a digest-bound operation journal", async () => {
+  const { directory, env } = fixture();
+  const digest = "c".repeat(64);
+  const store = new ProfileBindingStore(join(directory, "state"));
+  await store.reserveRestore(["alpha", "beta"], "local", digest);
+
+  const alphaPath = join(directory, "state/profiles/alpha.json");
+  const alpha = JSON.parse(readFileSync(alphaPath, "utf8"));
+  delete alpha.pendingRestore;
+  alpha.restoredFrom = digest;
+  writeFileSync(alphaPath, `${JSON.stringify(alpha, null, 2)}\n`);
+  const journalPath = join(directory, `state/restore-operations/${digest}.json`);
+  const journal = JSON.parse(readFileSync(journalPath, "utf8"));
+  journal.completed = ["alpha"];
+  writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
+
+  await store.reserveRestore(["alpha", "beta"], "local", digest);
+  await store.completeRestore(["alpha", "beta"], "local", digest);
+  expect(await store.read("alpha")).toMatchObject({ restoredFrom: digest, target: null });
+  expect(await store.read("beta")).toMatchObject({ restoredFrom: digest, target: null });
+  expect(JSON.parse(readFileSync(journalPath, "utf8")).completed).toEqual(["alpha", "beta"]);
+  expect(env.AGENTBROWSE_STATE_DIR).toBe(join(directory, "state"));
 });

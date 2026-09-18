@@ -19,6 +19,7 @@ class FakeHypeman:
         self.volumes = list(volumes or [])
         self.instances = list(instances or [])
         self.next_id = 1
+        self.fail_after_create_once = False
 
     def api(self):
         return {
@@ -68,6 +69,9 @@ class FakeHypeman:
             (directory / "metadata.json").write_text(json.dumps(metadata))
             (directory / "data.raw").write_bytes(b"")
             self.volumes.append(volume)
+            if self.fail_after_create_once:
+                self.fail_after_create_once = False
+                raise RuntimeError("synthetic lost create response")
             return volume
         if method == "DELETE" and path.startswith("/volumes/"):
             identity = path.rsplit("/", 1)[1]
@@ -151,6 +155,7 @@ class ProfileBackupTest(unittest.TestCase):
             source.api(), source_root, "source", backup_set, [], True, False
         )
         self.assertTrue(created["complete"])
+        self.assertRegex(created["setDigest"], r"^[0-9a-f]{64}$")
         manifest = BACKUP["inspect_set"](backup_set, None, True)
         self.assertEqual(manifest["format"], "agentbrowse-hypeman-profile-backup")
         self.assertEqual(manifest["encryption"]["method"], "none-explicit")
@@ -172,7 +177,8 @@ class ProfileBackupTest(unittest.TestCase):
         destination_root = self.base / "destination"
         destination = FakeHypeman(destination_root, "destination")
         restored = BACKUP["restore"](
-            destination.api(), destination_root, "destination", backup_set, None, True, False
+            destination.api(), destination_root, "destination", backup_set, None, True, False,
+            BACKUP["inspect_set"](backup_set, None, True)["setDigest"]
         )
         self.assertEqual(restored["complete"], ["research"])
         self.assertNotEqual(destination.volumes[0]["id"], volume["id"])
@@ -196,7 +202,8 @@ class ProfileBackupTest(unittest.TestCase):
         interrupted["complete"] = False
         receipt.write_text(json.dumps(interrupted))
         repeated = BACKUP["restore"](
-            destination.api(), destination_root, "destination", backup_set, None, True, False
+            destination.api(), destination_root, "destination", backup_set, None, True, False,
+            BACKUP["inspect_set"](backup_set, None, True)["setDigest"]
         )
         self.assertEqual(repeated["complete"], ["research"])
         self.assertEqual(len(destination.volumes), 1)
@@ -236,9 +243,13 @@ class ProfileBackupTest(unittest.TestCase):
             "#!/usr/bin/env python3\n"
             "import pathlib, sys\n"
             "if '-d' in sys.argv:\n"
-            " data=pathlib.Path(sys.argv[-1]).read_bytes(); sys.stdout.buffer.write(data[8:])\n"
+            " identity=pathlib.Path(sys.argv[sys.argv.index('-i')+1]).read_text()\n"
+            " if identity != 'synthetic identity': sys.exit(2)\n"
+            " data=pathlib.Path(sys.argv[-1]).read_bytes()[8:]\n"
+            " sys.stdout.buffer.write(bytes(value ^ 0xa5 for value in data))\n"
             "else:\n"
-            " sys.stdout.buffer.write(b'FAKE-AGE'+sys.stdin.buffer.read())\n"
+            " data=sys.stdin.buffer.read()\n"
+            " sys.stdout.buffer.write(b'FAKE-AGE'+bytes(value ^ 0xa5 for value in data))\n"
         )
         age.chmod(0o755)
         identity = self.base / "identity.txt"
@@ -259,16 +270,41 @@ class ProfileBackupTest(unittest.TestCase):
             self.assertTrue(listed["sets"][0]["locked"])
             with self.assertRaisesRegex(RuntimeError, "requires an age --identity"):
                 BACKUP["inspect_set"](backup_set)
+            wrong_identity = self.base / "wrong-identity.txt"
+            wrong_identity.write_text("wrong")
+            with self.assertRaisesRegex(RuntimeError, "authentication failed"):
+                BACKUP["inspect_set"](backup_set, str(wrong_identity), False)
             manifest = BACKUP["inspect_set"](backup_set, str(identity), False)
             self.assertEqual(manifest["encryption"]["method"], "age-x25519")
+            self.assertEqual(
+                BACKUP["inspect_set"](
+                    backup_set, str(identity), False, manifest["setDigest"]
+                )["setDigest"],
+                manifest["setDigest"],
+            )
+            with self.assertRaisesRegex(RuntimeError, "externally retained"):
+                BACKUP["inspect_set"](
+                    backup_set, str(identity), False, "0" * 64
+                )
+            outer = (backup_set / "backup-state.json").read_text()
+            outer += "\n".join(
+                path.read_text() for path in backup_set.glob("profiles/*/resume.json")
+            )
+            self.assertNotIn("research", outer)
+            self.assertNotIn("source-1", outer)
+            self.assertEqual(list(backup_set.rglob("*.partial")), [])
+            self.assertEqual(list(backup_set.rglob("*.zstd")), [])
+            encrypted_archive = next(backup_set.glob("profiles/*/data.raw.zst.age"))
+            self.assertNotIn(b"synthetic-profile", encrypted_archive.read_bytes())
             destination_root = self.base / "destination"
             destination = FakeHypeman(destination_root, "destination")
             dry_run = BACKUP["restore"](
                 destination.api(), destination_root, "destination", backup_set,
-                str(identity), False, True
+                str(identity), False, True, manifest["setDigest"]
             )
             self.assertTrue(dry_run["dryRun"])
             self.assertEqual(destination.volumes, [])
+            self.assertFalse((destination_root / "profile-restores").exists())
             with self.assertRaisesRegex(RuntimeError, "different source or encryption options"):
                 BACKUP["backup"](
                     hypeman.api(), root, "test", backup_set,
@@ -307,6 +343,63 @@ class ProfileBackupTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "explicit --allow-unencrypted"):
             BACKUP["inspect_set"](backup_set)
 
+    def test_backup_refuses_foreign_nonempty_destination(self):
+        root = self.base / "source"
+        volume, instances = source_volume(root)
+        hypeman = FakeHypeman(root, "test", [volume], instances)
+        destination = self.base / "foreign"
+        destination.mkdir()
+        (destination / "unrelated.txt").write_text("keep")
+        with self.assertRaisesRegex(RuntimeError, "nonempty backup destination"):
+            BACKUP["backup"](
+                hypeman.api(), root, "test", destination, [], True, False
+            )
+        self.assertEqual((destination / "unrelated.txt").read_text(), "keep")
+
+        shutil.rmtree(destination)
+        destination.mkdir()
+        state = destination / "backup-state.json"
+        state.write_text(json.dumps({"forged": True}))
+        os.chmod(state, 0o600)
+        with self.assertRaisesRegex(RuntimeError, "unexpected fields"):
+            BACKUP["backup"](
+                hypeman.api(), root, "test", destination, [], True, False
+            )
+
+    def test_streaming_encryption_failure_removes_recoverable_partial_bytes(self):
+        age = self.base / "age-cat"
+        age.write_text("#!/bin/sh\ncat\n")
+        age.chmod(0o755)
+        zstd = self.base / "zstd-fail"
+        zstd.write_text("#!/bin/sh\ncat\nexit 1\n")
+        zstd.chmod(0o755)
+        old_age = os.environ.get("AGENTBROWSE_AGE")
+        old_zstd = os.environ.get("AGENTBROWSE_ZSTD")
+        os.environ["AGENTBROWSE_AGE"] = str(age)
+        os.environ["AGENTBROWSE_ZSTD"] = str(zstd)
+        try:
+            root = self.base / "source"
+            volume, instances = source_volume(root)
+            source = FakeHypeman(root, "test", [volume], instances)
+            backup_set = self.base / "set"
+            with self.assertRaisesRegex(RuntimeError, "compression or encryption failed"):
+                BACKUP["backup"](
+                    source.api(), root, "test", backup_set,
+                    ["age1synthetic"], False, False
+                )
+            self.assertEqual(list(backup_set.rglob("*.partial")), [])
+            self.assertEqual(list(backup_set.rglob("*.zstd")), [])
+            self.assertFalse((backup_set / "manifest.json.age").exists())
+        finally:
+            if old_age is None:
+                os.environ.pop("AGENTBROWSE_AGE", None)
+            else:
+                os.environ["AGENTBROWSE_AGE"] = old_age
+            if old_zstd is None:
+                os.environ.pop("AGENTBROWSE_ZSTD", None)
+            else:
+                os.environ["AGENTBROWSE_ZSTD"] = old_zstd
+
     def test_intermediate_symlink_and_decompression_overrun_are_rejected(self):
         root = self.base / "source"
         volume, instances = source_volume(root)
@@ -327,7 +420,7 @@ class ProfileBackupTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exceeds its recorded size"):
             BACKUP["restore"](
                 destination.api(), destination_root, "destination", backup_set,
-                None, True, False
+                None, True, False, BACKUP["inspect_set"](backup_set, None, True)["setDigest"]
             )
         staging = destination_root / "data/volumes/restored-1/restore.raw"
         self.assertFalse(staging.exists())
@@ -351,10 +444,76 @@ class ProfileBackupTest(unittest.TestCase):
         destination_root = self.base / "destination"
         destination = FakeHypeman(destination_root, "destination")
         BACKUP["restore"](
-            destination.api(), destination_root, "destination", backup_set, None, True, False
+            destination.api(), destination_root, "destination", backup_set, None, True, False,
+            BACKUP["inspect_set"](backup_set, None, True)["setDigest"]
         )
         raw = destination_root / "data/volumes/restored-1/data.raw"
         self.assertLess(raw.stat().st_blocks * 512, raw.stat().st_size)
+
+    def test_sparse_writer_holes_zero_extents_smaller_than_one_mebibyte(self):
+        class RecordingStream:
+            def __init__(self):
+                self.operations = []
+
+            def seek(self, count, direction):
+                self.operations.append(("seek", count, direction))
+
+            def write(self, value):
+                self.operations.append(("write", bytes(value)))
+
+        stream = RecordingStream()
+        BACKUP["write_sparse_extent"](stream, b"\0" * 4096)
+        BACKUP["write_sparse_extent"](stream, b"x" * 4096)
+        self.assertEqual(stream.operations[0], ("seek", 4096, os.SEEK_CUR))
+        self.assertEqual(stream.operations[1], ("write", b"x" * 4096))
+
+    def test_restore_reconciles_create_that_committed_before_response_loss(self):
+        source_root = self.base / "source"
+        volume, instances = source_volume(source_root)
+        source = FakeHypeman(source_root, "test", [volume], instances)
+        backup_set = self.base / "set"
+        BACKUP["backup"](source.api(), source_root, "test", backup_set, [], True, False)
+        manifest = BACKUP["inspect_set"](backup_set, None, True)
+        destination_root = self.base / "destination"
+        destination = FakeHypeman(destination_root, "destination")
+        destination.fail_after_create_once = True
+        with self.assertRaisesRegex(RuntimeError, "lost create response"):
+            BACKUP["restore"](
+                destination.api(), destination_root, "destination", backup_set,
+                None, True, False, manifest["setDigest"]
+            )
+        self.assertEqual(len(destination.volumes), 1)
+        restored = BACKUP["restore"](
+            destination.api(), destination_root, "destination", backup_set,
+            None, True, False, manifest["setDigest"]
+        )
+        self.assertEqual(restored["complete"], ["research"])
+        self.assertEqual(len(destination.volumes), 1)
+
+    def test_dry_run_decrypts_and_verifies_payload_without_creating_a_volume(self):
+        source_root = self.base / "source"
+        volume, instances = source_volume(source_root)
+        source = FakeHypeman(source_root, "test", [volume], instances)
+        backup_set = self.base / "set"
+        BACKUP["backup"](source.api(), source_root, "test", backup_set, [], True, False)
+        manifest_path = backup_set / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        archive = backup_set / manifest["profiles"][0]["archive"]["path"]
+        archive.write_bytes(b"not-zstd")
+        digest, size = BACKUP["sha256_file"](archive)
+        manifest["profiles"][0]["archive"]["sha256"] = digest
+        manifest["profiles"][0]["archive"]["bytes"] = size
+        manifest_path.write_text(json.dumps(manifest))
+        expected = BACKUP["manifest_digest"](manifest)
+        destination_root = self.base / "destination"
+        destination = FakeHypeman(destination_root, "destination")
+        with self.assertRaisesRegex(RuntimeError, "decryption or decompression"):
+            BACKUP["restore"](
+                destination.api(), destination_root, "destination", backup_set,
+                None, True, True, expected
+            )
+        self.assertEqual(destination.volumes, [])
+        self.assertFalse((destination_root / "profile-restores").exists())
 
 
 if __name__ == "__main__":

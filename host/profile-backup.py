@@ -22,6 +22,7 @@ import stat
 import statistics
 import subprocess
 import sys
+import tempfile
 import uuid
 from contextlib import contextmanager
 
@@ -35,10 +36,15 @@ CHUNK_BYTES = 1024 * 1024
 SAMPLE_CHUNKS = 16
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_VOLUME_GIB = (2 ** 63 - 1) // (1024 ** 3)
+SPARSE_BLOCK_BYTES = 4096
 
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def value_digest(value):
+    return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
 def assert_no_symlink_components(path, allow_missing=False):
@@ -470,16 +476,29 @@ def verify_compressed(zstd_command, archive, expected_hash, expected_size):
 
 def start_archive(source, temporary, recipients, unencrypted):
     zstd_command = executable("zstd", "AGENTBROWSE_ZSTD")
-    age_command = None if unencrypted else executable("age", "AGENTBROWSE_AGE")
-    compressed = temporary.with_name(temporary.name + ".zstd")
+    age = None
+    zstd = None
     try:
-        with compressed.open("xb") as output:
-            os.chmod(compressed, 0o600)
+        with temporary.open("xb") as output:
+            os.chmod(temporary, 0o600)
+            if unencrypted:
+                compressed_output = output
+            else:
+                age = subprocess.Popen(
+                    age_command_for(recipients),
+                    stdin=subprocess.PIPE,
+                    stdout=output,
+                    stderr=subprocess.PIPE,
+                )
+                compressed_output = age.stdin
             zstd = subprocess.Popen(
                 [zstd_command, "-q", "-T2", "-3", "--check", "-c"],
                 stdin=subprocess.PIPE,
-                stdout=output,
+                stdout=compressed_output,
+                stderr=subprocess.PIPE,
             )
+            if age:
+                age.stdin.close()
             digest = hashlib.sha256()
             size = 0
             try:
@@ -493,28 +512,36 @@ def start_archive(source, temporary, recipients, unencrypted):
                         zstd.stdin.write(block)
             finally:
                 zstd.stdin.close()
-            if zstd.wait():
-                raise RuntimeError("profile image compression failed")
+            zstd_stderr = zstd.stderr.read()
+            zstd_code = zstd.wait()
+            age_stderr = age.stderr.read() if age else b""
+            age_code = age.wait() if age else 0
+            zstd.stderr.close()
+            if age:
+                age.stderr.close()
+            if zstd_code or age_code:
+                raise RuntimeError(
+                    "profile image compression or encryption failed: "
+                    + (zstd_stderr + age_stderr).decode(errors="replace")[-300:]
+                )
             output.flush()
             os.fsync(output.fileno())
         raw_hash = digest.hexdigest()
-        verify_compressed(zstd_command, compressed, raw_hash, size)
         if unencrypted:
-            compressed.replace(temporary)
-        else:
-            command = [age_command]
-            for recipient in recipients:
-                command += ["-r", recipient]
-            with compressed.open("rb") as source_stream, temporary.open("xb") as output:
-                os.chmod(temporary, 0o600)
-                result = subprocess.run(command, stdin=source_stream, stdout=output)
-                if result.returncode:
-                    raise RuntimeError("profile archive encryption failed")
-                output.flush()
-                os.fsync(output.fileno())
+            verify_compressed(zstd_command, temporary, raw_hash, size)
         return raw_hash, size
-    finally:
-        compressed.unlink(missing_ok=True)
+    except BaseException:
+        for process in (zstd, age):
+            if process and process.poll() is None:
+                process.kill()
+            if process:
+                process.wait()
+        if zstd and zstd.stderr:
+            zstd.stderr.close()
+        if age and age.stderr:
+            age.stderr.close()
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def age_command_for(recipients):
@@ -590,24 +617,52 @@ def backup(api, root, backend, destination, recipients, unencrypted, dry_run):
         for row in profiles:
             assert_clean_detached(api, root, row)
         return plan
+    existed = destination.exists()
+    if existed:
+        if not destination.is_dir():
+            raise RuntimeError("backup destination is not a directory")
+        existing_names = {child.name for child in destination.iterdir()}
+        if existing_names and "backup-state.json" not in existing_names:
+            raise RuntimeError("refusing nonempty backup destination without an owned state receipt")
     destination.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(destination, 0o700)
-    with operation_lock(destination / ".backup.lock"):
+    lock_name = ".agentbrowse-backup-%s.lock" % hashlib.sha256(str(destination).encode()).hexdigest()
+    with operation_lock(destination.parent / lock_name):
         assert_no_symlink_components(destination)
+        inventory = [source_record(row, backend) for row in profiles]
         requested = {
-            "version": 1,
-            "backend": backend,
-            "profiles": [row["profile"] for row in profiles],
+            "format": FORMAT,
+            "version": 2,
+            "stateKind": "private-backup-operation",
+            "backendSha256": hashlib.sha256(backend.encode()).hexdigest(),
+            "inventorySha256": value_digest(inventory),
             "encryption": {
                 "method": "none-explicit" if unencrypted else "age-x25519",
-                "recipients": [] if unencrypted else recipients,
+                "recipientSha256": []
+                if unencrypted
+                else [hashlib.sha256(value.encode()).hexdigest() for value in recipients],
             },
         }
         state_path = destination / "backup-state.json"
         assert_no_symlink_components(state_path, allow_missing=True)
+        if not state_path.exists() and any(destination.iterdir()):
+            raise RuntimeError("refusing nonempty backup destination without an owned state receipt")
+        if state_path.exists():
+            details = state_path.stat()
+            if (
+                not state_path.is_file()
+                or details.st_uid != os.geteuid()
+                or stat.S_IMODE(details.st_mode) & 0o077
+            ):
+                raise RuntimeError("backup destination state receipt is not private and owned")
         state = json.loads(state_path.read_text()) if state_path.exists() else requested
+        allowed_state_keys = set(requested) | {"manifestSha256", "setDigest"}
+        if set(state) - allowed_state_keys:
+            raise RuntimeError("backup destination state receipt has unexpected fields")
         if any(state.get(key) != requested[key] for key in requested):
             raise RuntimeError("backup resume used different source or encryption options")
+        if state_path.exists() and state.get("stateKind") != "private-backup-operation":
+            raise RuntimeError("backup destination state receipt is not AgentBrowse-owned")
         if not state_path.exists():
             write_private(api, state_path, state)
         manifest_path = destination / ("manifest.json" if unencrypted else "manifest.json.age")
@@ -618,48 +673,63 @@ def backup(api, root, backend, destination, recipients, unencrypted, dry_run):
             actual_manifest_hash = sha256_file(manifest_path)[0]
             if state.get("manifestSha256") not in (None, actual_manifest_hash):
                 raise RuntimeError("published backup manifest changed")
-            for row in profiles:
+            for index, row in enumerate(profiles):
                 before = assert_clean_detached(api, root, row)
-                receipt = destination / "profiles" / row["profile"] / "entry.json"
+                receipt = destination / "profiles" / ("%06d" % index) / "resume.json"
                 assert_no_symlink_components(receipt)
-                entry = json.loads(receipt.read_text())
+                resume = json.loads(receipt.read_text())
+                expected_source = source_record(row, backend, before)
                 if (
                     not receipt.is_file()
-                    or entry.get("source") != source_record(row, backend, before)
+                    or resume.get("sourceSha256") != value_digest(expected_source)
                     or row["metadataBytes"]
                     != (root / "data/volumes" / row["volume"]["id"] / "metadata.json").read_bytes()
                 ):
                     raise RuntimeError("completed backup set no longer matches its source volume")
+                entry = {
+                    "version": 1,
+                    "profile": row["profile"],
+                    "source": expected_source,
+                    "filesystem": {"type": "ext4", "check": "e2fsck-fn-clean"},
+                    "archive": resume["archive"],
+                }
                 validate_entry_path(destination, entry)
             if state.get("manifestSha256") is None:
                 state["manifestSha256"] = actual_manifest_hash
                 write_private(api, state_path, state)
-            return {**plan, "complete": True, "resumed": True}
+            if not re.fullmatch(r"[0-9a-f]{64}", str(state.get("setDigest", ""))):
+                raise RuntimeError("completed backup state lacks its retained set digest")
+            return {
+                **plan,
+                "complete": True,
+                "resumed": True,
+                "setDigest": state["setDigest"],
+            }
         profiles_directory = destination / "profiles"
         profiles_directory.mkdir(mode=0o700, exist_ok=True)
         assert_no_symlink_components(profiles_directory)
         entries = []
-        for row in profiles:
+        for index, row in enumerate(profiles):
             before = assert_clean_detached(api, root, row)
-            directory = profiles_directory / row["profile"]
+            directory = profiles_directory / ("%06d" % index)
             directory.mkdir(mode=0o700, exist_ok=True)
             assert_no_symlink_components(directory)
             archive_name = "data.raw.zst" + ("" if unencrypted else ".age")
             archive = directory / archive_name
-            receipt = directory / "entry.json"
+            receipt = directory / "resume.json"
             assert_no_symlink_components(receipt, allow_missing=True)
             expected_source = source_record(row, backend, before)
             if receipt.exists():
-                entry = json.loads(receipt.read_text())
+                resume = json.loads(receipt.read_text())
                 assert_no_symlink_components(archive)
                 if (
-                    entry.get("source") != expected_source
-                    or entry.get("archive", {}).get("encryption") != requested["encryption"]["method"]
+                    resume.get("sourceSha256") != value_digest(expected_source)
+                    or resume.get("archive", {}).get("encryption") != requested["encryption"]["method"]
                     or not archive.is_file()
                 ):
                     raise RuntimeError("backup resume receipt conflicts with current source or encryption")
                 stored_hash, stored_size = sha256_file(archive)
-                if (stored_hash, stored_size) != (entry["archive"]["sha256"], entry["archive"]["bytes"]):
+                if (stored_hash, stored_size) != (resume["archive"]["sha256"], resume["archive"]["bytes"]):
                     raise RuntimeError("backup archive changed after publication")
                 if (
                     row["metadataBytes"]
@@ -667,7 +737,15 @@ def backup(api, root, backend, destination, recipients, unencrypted, dry_run):
                     or not detached(api, root, row["volume"]["id"])
                 ):
                     raise RuntimeError("profile changed or became attached during backup resume")
-                entries.append(entry)
+                entries.append(
+                    {
+                        "version": 1,
+                        "profile": row["profile"],
+                        "source": expected_source,
+                        "filesystem": {"type": "ext4", "check": "e2fsck-fn-clean"},
+                        "archive": resume["archive"],
+                    }
+                )
                 continue
             temporary = directory / (archive_name + ".partial")
             compressed_temporary = temporary.with_name(temporary.name + ".zstd")
@@ -689,17 +767,22 @@ def backup(api, root, backend, destination, recipients, unencrypted, dry_run):
                 temporary.unlink(missing_ok=True)
                 compressed_temporary.unlink(missing_ok=True)
             stored_hash, stored_size = sha256_file(archive)
+            archive_record = {
+                "path": "profiles/%06d/%s" % (index, archive_name),
+                "bytes": stored_size, "sha256": stored_hash, "rawBytes": raw_size,
+                "rawSha256": raw_hash, "compression": "zstd-level-3",
+                "encryption": requested["encryption"]["method"],
+            }
             entry = {
                 "version": 1, "profile": row["profile"], "source": expected_source,
                 "filesystem": {"type": "ext4", "check": "e2fsck-fn-clean"},
-                "archive": {
-                    "path": "profiles/%s/%s" % (row["profile"], archive_name),
-                    "bytes": stored_size, "sha256": stored_hash, "rawBytes": raw_size,
-                    "rawSha256": raw_hash, "compression": "zstd-level-3",
-                    "encryption": requested["encryption"]["method"],
-                },
+                "archive": archive_record,
             }
-            write_private(api, receipt, entry)
+            write_private(
+                api,
+                receipt,
+                {"version": 1, "sourceSha256": value_digest(expected_source), "archive": archive_record},
+            )
             entries.append(entry)
         manifest = {
             "format": FORMAT, "version": FORMAT_VERSION,
@@ -709,23 +792,25 @@ def backup(api, root, backend, destination, recipients, unencrypted, dry_run):
             "encryption": requested["encryption"], "profiles": entries,
         }
         # Publication point: only the complete authoritative manifest is renamed into place.
+        state["setDigest"] = manifest_digest(manifest)
+        write_private(api, state_path, state)
         published = publish_manifest(destination, manifest, recipients, unencrypted)
         state["manifestSha256"] = sha256_file(published)[0]
         write_private(api, state_path, state)
-        return {**plan, "complete": True, "resumed": False}
+        return {**plan, "complete": True, "resumed": False, "setDigest": state["setDigest"]}
 
 
 def validate_entry_path(root, entry):
     profile = entry.get("profile", "")
     if not PROFILE.fullmatch(profile):
         raise RuntimeError("backup entry has an invalid logical profile name")
-    expected = "profiles/%s/%s" % (
-        profile,
+    archive_name = (
         "data.raw.zst.age"
         if entry.get("archive", {}).get("encryption") == "age-x25519"
-        else "data.raw.zst",
+        else "data.raw.zst"
     )
-    if entry.get("archive", {}).get("path") != expected:
+    expected = entry.get("archive", {}).get("path", "")
+    if not re.fullmatch(r"profiles/[0-9]{6}/" + re.escape(archive_name), str(expected)):
         raise RuntimeError("backup entry has an unsafe archive path")
     source = entry.get("source")
     volume = source.get("volume") if isinstance(source, dict) else None
@@ -800,7 +885,7 @@ def manifest_digest(manifest):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
-def inspect_set(path, identity=None, allow_unencrypted=False):
+def inspect_set(path, identity=None, allow_unencrypted=False, expected_set_digest=None):
     if not path.is_absolute():
         raise RuntimeError("backup set path must be absolute")
     assert_no_symlink_components(path)
@@ -827,12 +912,14 @@ def inspect_set(path, identity=None, allow_unencrypted=False):
     if not isinstance(profiles, list):
         raise RuntimeError("backup manifest profiles are invalid")
     names = []
-    for entry in profiles:
+    for index, entry in enumerate(profiles):
         if not isinstance(entry, dict) or entry.get("version") != 1:
             raise RuntimeError("backup manifest entry is invalid")
         validate_entry_path(path, entry)
         if entry["archive"]["encryption"] != manifest.get("encryption", {}).get("method"):
             raise RuntimeError("backup manifest encryption metadata disagrees with an entry")
+        if not entry["archive"]["path"].startswith("profiles/%06d/" % index):
+            raise RuntimeError("backup manifest archive order is invalid")
         names.append(entry["profile"])
     if names != sorted(set(names)):
         raise RuntimeError("backup manifest profile order or uniqueness is invalid")
@@ -840,6 +927,8 @@ def inspect_set(path, identity=None, allow_unencrypted=False):
     if manifest.get("encryption", {}).get("method") != expected_method:
         raise RuntimeError("authenticated manifest encryption policy is invalid")
     manifest["setDigest"] = manifest_digest(manifest)
+    if expected_set_digest and manifest["setDigest"] != expected_set_digest:
+        raise RuntimeError("backup manifest does not match the externally retained set digest")
     return manifest
 
 
@@ -881,6 +970,13 @@ def list_sets(destination, identity=None, allow_unencrypted=False):
     return {"sets": sets, "count": len(sets)}
 
 
+def write_sparse_extent(stream, extent):
+    if not any(extent):
+        stream.seek(len(extent), os.SEEK_CUR)
+    else:
+        stream.write(extent)
+
+
 def extract_archive(archive, output, entry, identity):
     encryption = entry["archive"]["encryption"]
     if encryption == "age-x25519":
@@ -891,6 +987,7 @@ def extract_archive(archive, output, entry, identity):
         age = subprocess.Popen(
             [executable("age", "AGENTBROWSE_AGE"), "-d", "-i", identity, str(archive)],
             stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         compressed = age.stdout
     elif encryption == "none-explicit":
@@ -902,6 +999,7 @@ def extract_archive(archive, output, entry, identity):
         [executable("zstd", "AGENTBROWSE_ZSTD"), "-q", "-d", "-c"],
         stdin=compressed,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     compressed.close()
     digest = hashlib.sha256()
@@ -910,6 +1008,7 @@ def extract_archive(archive, output, entry, identity):
     try:
         with output.open("xb") as stream:
             os.chmod(output, 0o600)
+            pending = bytearray()
             while True:
                 block = zstd.stdout.read(CHUNK_BYTES)
                 if not block:
@@ -919,12 +1018,16 @@ def extract_archive(archive, output, entry, identity):
                     if age:
                         age.kill()
                     raise RuntimeError("decompressed profile image exceeds its recorded size")
-                if block.count(0) == len(block):
-                    stream.seek(len(block), os.SEEK_CUR)
-                else:
-                    stream.write(block)
+                pending.extend(block)
+                complete = len(pending) // SPARSE_BLOCK_BYTES * SPARSE_BLOCK_BYTES
+                for offset in range(0, complete, SPARSE_BLOCK_BYTES):
+                    extent = pending[offset : offset + SPARSE_BLOCK_BYTES]
+                    write_sparse_extent(stream, extent)
+                del pending[:complete]
                 digest.update(block)
                 size += len(block)
+            if pending:
+                write_sparse_extent(stream, pending)
             stream.truncate(size)
             stream.flush()
             os.fsync(stream.fileno())
@@ -936,14 +1039,24 @@ def extract_archive(archive, output, entry, identity):
             age.kill()
         if age:
             age.wait()
+            age.stderr.close()
+        zstd.stderr.close()
         output.unlink(missing_ok=True)
         raise
     finally:
         zstd.stdout.close()
     zstd_code = zstd.wait()
     age_code = age.wait() if age else 0
+    zstd_stderr = zstd.stderr.read()
+    age_stderr = age.stderr.read() if age else b""
+    zstd.stderr.close()
+    if age:
+        age.stderr.close()
     if zstd_code or age_code:
-        raise RuntimeError("backup decryption or decompression failed")
+        raise RuntimeError(
+            "backup decryption or decompression failed: "
+            + (zstd_stderr + age_stderr).decode(errors="replace")[-300:]
+        )
     if digest.hexdigest() != entry["archive"]["rawSha256"] or size != entry["archive"]["rawBytes"]:
         raise RuntimeError("restored profile image digest does not match the backup")
 
@@ -968,9 +1081,17 @@ def staging_tags(profile, backend, set_digest):
     }
 
 
+def staging_name(profile, set_digest):
+    suffix = hashlib.sha256((set_digest + "\0" + profile).encode()).hexdigest()[:24]
+    return "agentbrowse-restore-" + suffix
+
+
 def restore(api, root, backend, source, identity, allow_unencrypted, dry_run,
             expected_set_digest=None, release=False):
     assert_no_symlink_components(root)
+    if dry_run:
+        return restore_locked(api, root, backend, source, identity, allow_unencrypted,
+                              True, expected_set_digest, False)
     with operation_lock(root / "profile-restores" / ".restore.lock"):
         return restore_locked(api, root, backend, source, identity, allow_unencrypted,
                               dry_run, expected_set_digest, release)
@@ -978,7 +1099,9 @@ def restore(api, root, backend, source, identity, allow_unencrypted, dry_run,
 
 def restore_locked(api, root, backend, source, identity, allow_unencrypted, dry_run,
                    expected_set_digest, release):
-    manifest = inspect_set(source, identity, allow_unencrypted)
+    if not expected_set_digest:
+        raise RuntimeError("restore requires an externally retained --expected-set-digest")
+    manifest = inspect_set(source, identity, allow_unencrypted, expected_set_digest)
     set_digest = manifest["setDigest"]
     if expected_set_digest and expected_set_digest != set_digest:
         raise RuntimeError("backup set changed after logical profile reservation")
@@ -999,6 +1122,15 @@ def restore_locked(api, root, backend, source, identity, allow_unencrypted, dry_
             receipt_path = receipts / (profile + ".json")
             assert_no_symlink_components(receipt_path, allow_missing=True)
             if not receipt_path.exists():
+                volume = by_name.get(staging_name(profile, set_digest))
+                if volume is not None:
+                    if (
+                        volume.get("tags") != staging_tags(profile, backend, set_digest)
+                        or volume["id"] in attached
+                        or not detached(api, root, volume["id"])
+                    ):
+                        raise RuntimeError("restore staging ownership changed: " + profile)
+                    api["request"](root, "DELETE", "/volumes/" + volume["id"])
                 released.append(profile)
                 continue
             saved = json.loads(receipt_path.read_text())
@@ -1040,7 +1172,13 @@ def restore_locked(api, root, backend, source, identity, allow_unencrypted, dry_
                 raise RuntimeError("destination profile already exists: " + profile)
             action = "already-restored" if saved.get("complete") else "resume-publish"
         else:
-            action = "create-fresh-volume"
+            candidate = by_name.get(staging_name(profile, set_digest))
+            if candidate is not None:
+                if candidate.get("tags") != staging_tags(profile, backend, set_digest):
+                    raise RuntimeError("deterministic restore staging name is foreign: " + profile)
+                action = "resume-staging-volume"
+            else:
+                action = "create-fresh-volume"
         plans.append({"profile": profile, "name": name, "action": action})
     result = {
         "source": str(source),
@@ -1051,6 +1189,12 @@ def restore_locked(api, root, backend, source, identity, allow_unencrypted, dry_
         "setDigest": set_digest,
     }
     if dry_run:
+        with tempfile.TemporaryDirectory(prefix="agentbrowse-restore-validation-") as temporary:
+            temporary = Path(temporary)
+            for index, entry in enumerate(manifest["profiles"]):
+                output = temporary / ("%06d.raw" % index)
+                extract_archive(validate_entry_path(source, entry), output, entry, identity)
+                check_filesystem(output)
         return result
     receipts.mkdir(parents=True, exist_ok=True, mode=0o700)
     completed = []
@@ -1095,19 +1239,24 @@ def restore_locked(api, root, backend, source, identity, allow_unencrypted, dry_
             ):
                 raise RuntimeError("restore staging ownership changed: " + profile)
         else:
-            staging_name = "agentbrowse-restore-" + uuid.uuid4().hex
+            volume_name = staging_name(profile, set_digest)
             tags = staging_tags(profile, backend, set_digest)
-            volume = api["request"](
-                root,
-                "POST",
-                "/volumes",
-                {
-                    "name": staging_name,
-                    "size_gb": entry["source"]["volume"]["sizeGiB"],
-                    "tags": tags,
-                },
-            )
-            volumes.append(volume)
+            volume = by_name.get(volume_name)
+            if volume is not None and volume.get("tags") != tags:
+                raise RuntimeError("deterministic restore staging name is foreign: " + profile)
+            if volume is None:
+                volume = api["request"](
+                    root,
+                    "POST",
+                    "/volumes",
+                    {
+                        "name": volume_name,
+                        "size_gb": entry["source"]["volume"]["sizeGiB"],
+                        "tags": tags,
+                    },
+                )
+                volumes.append(volume)
+                by_name[volume_name] = volume
             saved = {
                 "version": 1,
                 "setDigest": set_digest,
@@ -1181,11 +1330,12 @@ def parser():
     inspect.add_argument("--set", dest="backup_set", type=Path, required=True)
     inspect.add_argument("--identity")
     inspect.add_argument("--allow-unencrypted", action="store_true")
+    inspect.add_argument("--expected-set-digest")
     restore_parser = commands.add_parser("restore")
     restore_parser.add_argument("--set", dest="backup_set", type=Path, required=True)
     restore_parser.add_argument("--identity")
     restore_parser.add_argument("--allow-unencrypted", action="store_true")
-    restore_parser.add_argument("--expected-set-digest")
+    restore_parser.add_argument("--expected-set-digest", required=True)
     restore_parser.add_argument("--release", action="store_true")
     restore_parser.add_argument("--dry-run", action="store_true")
     return result
@@ -1209,7 +1359,12 @@ def main(argv=None):
     elif args.command == "list":
         output = list_sets(args.destination, args.identity, args.allow_unencrypted)
     elif args.command == "inspect":
-        output = inspect_set(args.backup_set, args.identity, args.allow_unencrypted)
+        output = inspect_set(
+            args.backup_set,
+            args.identity,
+            args.allow_unencrypted,
+            args.expected_set_digest,
+        )
     else:
         output = restore(
             api, args.root, args.backend, args.backup_set, args.identity,

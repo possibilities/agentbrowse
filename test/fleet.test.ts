@@ -578,6 +578,18 @@ test("concurrent import retries cannot overwrite a profile that just became read
   });
 });
 
+test("ordinary profile deletion cannot race a pending full-volume restore", async () => {
+  const directory = runtimeDir();
+  const backend = new FleetBackend("local");
+  const browsers = fleet([backend], directory);
+  await browsers.bindings.reserveRestore(["research"], "local", "d".repeat(64));
+
+  await expect(browsers.deleteProfile("research")).rejects.toMatchObject({
+    code: "profile_restore_pending",
+  });
+  expect(backend.events).toEqual([]);
+});
+
 test("full backend is skipped before a new profile is bound or created", async () => {
   const full = new FleetBackend("full");
   full.capacityError = new CliError("backend_capacity_exhausted", "disk full");

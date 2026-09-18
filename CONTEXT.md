@@ -15,10 +15,11 @@ _Avoid: storage state, cookie export, profile database._
 
 **Profile volume backup** — A versioned host-recovery set containing independently
 compressed, complete images of detached AgentBrowse-owned Hypeman profile volumes.
-Its authenticated manifest is published only after every image is durable and
-verified. Restore reserves logical names before host mutation, then creates new
-volume IDs and new backend bindings while preserving those names; it never restores
-target, slot, lease, credential, key, or connection state.
+Its encrypted manifest is published only after every image is durable and verified;
+an externally retained manifest digest authenticates its producer. Restore reserves
+logical names before host mutation, then creates new volume IDs and new backend
+bindings while preserving those names; it never restores target, slot, lease,
+credential, key, or connection state.
 _Avoid: Profile archive, profile export, filesystem copy._
 
 **Browser target** — One named Hypeman VM running Kernel's headful image on the configured host, exposing

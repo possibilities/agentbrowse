@@ -10,6 +10,10 @@ policy. Explicit plaintext sets instead publish `manifest.json` and require
 encrypted manifest fail closed rather than silently downgrade to plaintext.
 Per-profile receipts and a private operation-policy receipt make an interrupted set
 resumable only with the same backend, profile inventory, recipients, and policy.
+Because an age recipient is public and cannot authenticate who produced ciphertext,
+create also returns the canonical manifest `setDigest`. Operators retain that digest
+outside the backup destination and restore requires it. A replacement producer cannot
+make a different manifest match that external anchor.
 
 Backup accepts only exact AgentBrowse ownership metadata, an unattached volume, an
 unchanged image fingerprint, and a clean read-only e2fsck result. The manifest keeps
@@ -29,10 +33,29 @@ sequence idempotent after interruption. An explicit reservation release first as
 the host to delete only incomplete, detached, exactly owned staging volumes; it
 refuses a completed restore.
 
+Encrypted images stream directly from zstd into age; no recoverable compressed
+plaintext staging file exists. Opaque ordinal archive paths and minimized resume
+receipts keep logical profile names, source volume identity, and recovery metadata
+inside the encrypted manifest. Restore staging names and ownership tags derive from
+the set digest and profile, so a retry reconciles a create that committed before its
+response or receipt. The client records a set-digest-bound operation journal and
+restore provenance on each binding, making partial multi-profile finalization
+idempotent. Ordinary profile launch, export, import, and deletion refuse pending
+restore bindings.
+
 Host operations serialize per set or restore root, reject symlinks in privileged
 path components, bound decrypted manifests and decompressed images, and keep zero
 runs sparse where the filesystem supports holes. Capacity is limited by the signed
 64-bit byte range consistently in configuration and recovery validation.
+Dry-run decrypts, decompresses, hashes, and read-only-checks every image in temporary
+storage before any destination volume or binding mutation.
+
+Path checks reject observed symlink components and leaf symlinks, and sensitive file
+creation uses exclusive/no-follow operations where available. A residual check/use
+race remains if another privileged process can rename an ancestor directory between
+validation and a later pathname operation. Backup destinations and Hypeman roots must
+therefore remain exclusively administered while the serialized operation runs; an
+unprivileged writer must not control any ancestor.
 
 `agentbrowse backup measure --all --compression-estimate --json` is the read-only
 capacity gate. It reconciles host API/disk metadata and local profile bindings and

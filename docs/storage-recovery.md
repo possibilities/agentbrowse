@@ -76,11 +76,12 @@ agentbrowse backup create --backend artbird \
   --recipient age1example --dry-run
 agentbrowse backup create --backend artbird \
   --destination /mnt/private/profile-backups/2026-09-18 \
-  --recipient age1example
+  --recipient age1example --json
 agentbrowse backup list --backend artbird --destination /mnt/private/profile-backups
 agentbrowse backup inspect --backend artbird \
   --set /mnt/private/profile-backups/2026-09-18 \
-  --identity /mnt/private/keys/profile-backup.agekey
+  --identity /mnt/private/keys/profile-backup.agekey \
+  --expected-set-digest RETAINED_SHA256
 ```
 
 Each profile image is compressed and encrypted independently. Encrypted sets publish
@@ -94,6 +95,15 @@ binary or recipient is a concrete failure and AgentBrowse never substitutes cust
 cryptography. Inspecting or restoring a plaintext set additionally requires
 `--allow-unencrypted`, so loss or substitution of an encrypted manifest cannot
 silently downgrade recovery.
+The successful create result includes `setDigest`. Store that digest in a separate
+operator record, password manager, or other trusted location outside the backup set.
+Age recipients are public, so ciphertext authentication alone does not establish the
+producer. Restore requires the separately retained digest.
+
+Encrypted archives stream directly from zstd into age. The outer directory uses
+opaque archive ordinals and minimized resume receipts; logical names, original volume
+IDs, source metadata, and recovery policy remain in the encrypted manifest. Existing
+nonempty destinations without AgentBrowse's exact private state receipt are refused.
 
 Restore requires an empty destination namespace for every logical profile. It uses
 new volume IDs, verifies each image before publication, and writes new local backend
@@ -104,16 +114,20 @@ is on the destination host, and dry-run validates it and the encrypted manifest.
 ```sh
 agentbrowse backup restore --backend local \
   --set /Volumes/Recovery/profile-backups/2026-09-18 \
-  --identity /Volumes/Recovery/keys/profile-backup.agekey --dry-run
+  --identity /Volumes/Recovery/keys/profile-backup.agekey \
+  --expected-set-digest RETAINED_SHA256 --dry-run
 agentbrowse backup restore --backend local \
   --set /Volumes/Recovery/profile-backups/2026-09-18 \
-  --identity /Volumes/Recovery/keys/profile-backup.agekey
+  --identity /Volumes/Recovery/keys/profile-backup.agekey \
+  --expected-set-digest RETAINED_SHA256
 ```
 
 Retry the same command after interruption. To abandon an incomplete restore, use the
 same set and identity with `--release-reservations`; the host first removes only
 detached staging volumes whose ownership and receipt still match, then the client
 releases the logical-name reservations. Completed restores cannot be released.
+Dry-run performs complete decryption, zstd, digest, and read-only filesystem checks
+without creating destination volumes or local binding reservations.
 
 The backup records only recovery metadata and complete volume images. Slots, target
 and VM identities, session leases, credentials, SSH keys, and connection descriptors

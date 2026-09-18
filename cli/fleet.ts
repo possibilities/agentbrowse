@@ -188,6 +188,7 @@ export class BrowserFleet {
     validateName(name);
     const binding = await this.bindings.read(name);
     if (binding !== undefined) {
+      if (binding.pendingRestore) requireReadyProfile(binding);
       const farm = this.requireFarm(binding.backend);
       await farm.probeAvailability();
       const result = await farm.deleteProfile(name, true);

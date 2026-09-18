@@ -754,7 +754,7 @@ export const CONTRACT: Contract = {
           audience: "operator",
           mutates: true,
           guidance:
-            "All owned profiles on the selected backend must be detached and pass read-only e2fsck. Each complete image is compressed independently. Age authenticated encryption is the default and needs at least one recipient; plaintext requires explicit --unencrypted. The authenticated manifest is published last, so rerunning an interrupted command safely resumes it.",
+            "All owned profiles on the selected backend must be detached and pass read-only e2fsck. Each image streams from zstd into age. Age encryption is the default and needs at least one recipient; plaintext requires explicit --unencrypted. Retain the returned setDigest outside the backup destination as the producer-authenticity anchor.",
           arguments: [
             {
               name: "--backend",
@@ -819,7 +819,7 @@ export const CONTRACT: Contract = {
               type: "string",
               format: "path",
               direction: "in",
-              description: "Age identity needed to authenticate and show encrypted set details",
+              description: "Age identity needed to decrypt and show encrypted set details",
             },
             {
               name: "--allow-unencrypted",
@@ -853,12 +853,17 @@ export const CONTRACT: Contract = {
               type: "string",
               format: "path",
               direction: "in",
-              description: "Age identity needed to authenticate an encrypted manifest",
+              description: "Age identity needed to decrypt an encrypted manifest",
             },
             {
               name: "--allow-unencrypted",
               type: "boolean",
               description: "Explicitly permit a plaintext set manifest",
+            },
+            {
+              name: "--expected-set-digest",
+              type: "string",
+              description: "Externally retained SHA-256 digest used to authenticate the producer",
             },
           ],
         },
@@ -868,7 +873,7 @@ export const CONTRACT: Contract = {
           audience: "operator",
           mutates: true,
           guidance:
-            "The destination must not already contain the logical profile names. Restore creates ignored staging volumes, verifies digest and e2fsck, then atomically publishes only the sanitized profile name and ownership tags. It never restores slots, leases, targets, credentials, SSH keys, or connection descriptors.",
+            "Supply the setDigest retained separately when the backup was created. Restore validates every decrypted image and filesystem during dry-run, reserves all logical names, then uses deterministic staging volumes and operation journals for crash recovery. It never restores slots, leases, targets, credentials, SSH keys, or connection descriptors.",
           arguments: [
             {
               name: "--backend",
@@ -895,6 +900,12 @@ export const CONTRACT: Contract = {
               name: "--allow-unencrypted",
               type: "boolean",
               description: "Explicitly permit restore from a plaintext set",
+            },
+            {
+              name: "--expected-set-digest",
+              type: "string",
+              required: true,
+              description: "Externally retained SHA-256 digest authenticating this backup producer",
             },
             {
               name: "--release-reservations",

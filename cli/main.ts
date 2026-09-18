@@ -145,6 +145,7 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
   let destination: string | undefined;
   let set: string | undefined;
   let identity: string | undefined;
+  let expectedSetDigest: string | undefined;
   const recipients: string[] = [];
   let unencrypted = false;
   let allowUnencrypted = false;
@@ -156,6 +157,8 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
     else if (option === "--destination") destination = takeValue(args, index++, option);
     else if (option === "--set") set = takeValue(args, index++, option);
     else if (option === "--identity") identity = takeValue(args, index++, option);
+    else if (option === "--expected-set-digest")
+      expectedSetDigest = takeValue(args, index++, option);
     else if (option === "--recipient") recipients.push(takeValue(args, index++, option));
     else if (option === "--unencrypted") unencrypted = true;
     else if (option === "--allow-unencrypted") allowUnencrypted = true;
@@ -164,10 +167,18 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
     else throw new UsageError(`unknown option for backup ${action}: ${option}`);
   }
   if (backend === undefined) throw new UsageError(`backup ${action} requires --backend ID`);
+  if (expectedSetDigest !== undefined && !/^[0-9a-f]{64}$/.test(expectedSetDigest))
+    throw new UsageError("--expected-set-digest must be a lowercase SHA-256 digest");
   if (action === "create") {
     if (destination === undefined)
       throw new UsageError("backup create requires --destination ABSOLUTE_SET_PATH");
-    if (set !== undefined || identity !== undefined || allowUnencrypted || releaseReservations)
+    if (
+      set !== undefined ||
+      identity !== undefined ||
+      expectedSetDigest !== undefined ||
+      allowUnencrypted ||
+      releaseReservations
+    )
       throw new UsageError("backup create does not accept --set or --identity");
     if (unencrypted && recipients.length > 0)
       throw new UsageError("backup create --unencrypted conflicts with --recipient");
@@ -187,7 +198,7 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
   if (action === "list") {
     if (destination === undefined)
       throw new UsageError("backup list requires --destination ABSOLUTE_COLLECTION_PATH");
-    if (set !== undefined || dryRun || releaseReservations)
+    if (set !== undefined || expectedSetDigest !== undefined || dryRun || releaseReservations)
       throw new UsageError(
         "backup list accepts only --backend, --destination, --identity, and --allow-unencrypted",
       );
@@ -214,9 +225,12 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
       set,
       ...(identity === undefined ? {} : { identity }),
       allowUnencrypted,
+      ...(expectedSetDigest === undefined ? {} : { expectedSetDigest }),
       json,
     };
   }
+  if (expectedSetDigest === undefined)
+    throw new UsageError("backup restore requires --expected-set-digest SHA256");
   if (releaseReservations && dryRun)
     throw new UsageError("backup restore --release-reservations conflicts with --dry-run");
   return {
@@ -226,6 +240,7 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
     set,
     ...(identity === undefined ? {} : { identity }),
     allowUnencrypted,
+    expectedSetDigest,
     releaseReservations,
     dryRun,
     json,

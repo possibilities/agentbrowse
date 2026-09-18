@@ -43,6 +43,7 @@ export type ParsedBackup =
       set: string;
       identity?: string;
       allowUnencrypted: boolean;
+      expectedSetDigest?: string;
       json: boolean;
     }
   | {
@@ -52,6 +53,7 @@ export type ParsedBackup =
       set: string;
       identity?: string;
       allowUnencrypted: boolean;
+      expectedSetDigest: string;
       releaseReservations: boolean;
       dryRun: boolean;
       json: boolean;
@@ -383,6 +385,9 @@ export async function runBackup(
         parsed.set,
         ...(parsed.identity === undefined ? [] : ["--identity", parsed.identity]),
         ...(parsed.allowUnencrypted ? ["--allow-unencrypted"] : []),
+        ...(parsed.expectedSetDigest === undefined
+          ? []
+          : ["--expected-set-digest", parsed.expectedSetDigest]),
       ],
       runner,
     );
@@ -395,6 +400,8 @@ export async function runBackup(
       parsed.set,
       ...(parsed.identity === undefined ? [] : ["--identity", parsed.identity]),
       ...(parsed.allowUnencrypted ? ["--allow-unencrypted"] : []),
+      "--expected-set-digest",
+      parsed.expectedSetDigest,
     ],
     runner,
   );
@@ -403,6 +410,7 @@ export async function runBackup(
   if (
     typeof setDigest !== "string" ||
     !/^[0-9a-f]{64}$/.test(setDigest) ||
+    setDigest !== parsed.expectedSetDigest ||
     !Array.isArray(profileEntries) ||
     !profileEntries.every(
       (entry) => entry !== null && typeof entry === "object" && typeof entry.profile === "string",
@@ -422,7 +430,7 @@ export async function runBackup(
       ...(parsed.identity === undefined ? [] : ["--identity", parsed.identity]),
       ...(parsed.allowUnencrypted ? ["--allow-unencrypted"] : []),
       "--expected-set-digest",
-      setDigest,
+      parsed.expectedSetDigest,
       ...(parsed.releaseReservations ? ["--release"] : []),
       ...(parsed.dryRun ? ["--dry-run"] : []),
     ],

@@ -179,6 +179,8 @@ test("backup commands preserve measurement, encryption, inspection, and restore 
       "/backups/set-1",
       "--identity",
       "/keys/backup.txt",
+      "--expected-set-digest",
+      "a".repeat(64),
       "--dry-run",
     ]),
   ).toEqual({
@@ -188,11 +190,15 @@ test("backup commands preserve measurement, encryption, inspection, and restore 
     set: "/backups/set-1",
     identity: "/keys/backup.txt",
     allowUnencrypted: false,
+    expectedSetDigest: "a".repeat(64),
     releaseReservations: false,
     dryRun: true,
     json: false,
   });
   expect(() => parseArgs(["backup", "measure", "--compression-estimate"])).toThrow(UsageError);
+  expect(() =>
+    parseArgs(["backup", "restore", "--backend", "local", "--set", "/backups/set-1"]),
+  ).toThrow("requires --expected-set-digest");
   expect(() =>
     parseArgs([
       "backup",
