@@ -22,6 +22,16 @@ identity, capacity, hashes, and image size. It deliberately omits profile bindin
 targets, slots, session leases, connection descriptors, credentials, and SSH keys.
 This format remains distinct from Kernel's native tar.zst Profile archive.
 
+A Hypeman root may contain profiles owned by more than one exact backend ID. Backup
+partitions that root by fully validated ownership metadata: a set includes only the
+requested backend and may ignore another backend only after its managed-profile tags,
+logical name, volume identity, capacity, and API/disk metadata all validate for that
+other backend. Familiar names with incomplete or malformed ownership still fail
+reconciliation. A logical profile name repeated anywhere in the shared root also
+fails, including a collision across two otherwise valid backends. Each backend is
+published as its own authenticated set and manifest; a dated directory may group
+those sets for transport without becoming another backup format.
+
 Before any host mutation, restore authenticates the manifest and reserves every
 logical profile binding under the manifest digest. Restore creates an ignored
 staging volume with a new Hypeman ID. It decrypts and
@@ -70,3 +80,9 @@ capacity gate. It reconciles host API/disk metadata and local profile bindings a
 reports reserved, logical, allocated, expected compressed, and uncertainty bytes in
 decimal and binary units. Compression is a stratified zstd level-3 sample estimate;
 its stated interval is planning evidence, not a promise about a completed archive.
+
+When a host predates the installed backup helper, the checkout may stream only
+`profile-backup.py` to `python3 -` over the existing SSH and sudo boundary. This
+does not install packages, replace the Hypeman helper or service, or restart targets;
+the streamed helper still uses the host's installed Hypeman API helper and refuses
+missing recovery dependencies.

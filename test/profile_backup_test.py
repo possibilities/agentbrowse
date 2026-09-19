@@ -81,8 +81,7 @@ class FakeHypeman:
         raise RuntimeError("unexpected synthetic API request: %s %s" % (method, path))
 
 
-def source_volume(root, backend="test", profile="research", attached=False):
-    identity = "source-1"
+def source_volume(root, backend="test", profile="research", attached=False, identity="source-1"):
     tags = {
         "dev.agentbrowse.managed": "true",
         "dev.agentbrowse.backend": backend,
@@ -144,6 +143,104 @@ class ProfileBackupTest(unittest.TestCase):
             result["compressionEstimate"]["method"], "stratified-zstd-level-3-v1"
         )
         self.assertGreater(result["totals"]["bytes"]["expectedCompressed"], 0)
+        with self.assertRaisesRegex(RuntimeError, "invalid profile backup backend"):
+            BACKUP["measure"](hypeman.api(), root, "Artbird", False)
+
+    def test_mixed_backend_root_partitions_complete_profiles_into_independent_sets(self):
+        root = self.base / "source"
+        volumes = []
+        for index in range(24):
+            volume, _ = source_volume(
+                root,
+                backend="artbird",
+                profile="artbird-%02d" % index,
+                identity="artbird-%02d" % index,
+            )
+            volumes.append(volume)
+        legacy, _ = source_volume(
+            root,
+            backend="hypeman-artbird",
+            profile="legacy-demo",
+            identity="legacy-demo",
+        )
+        volumes.append(legacy)
+        hypeman = FakeHypeman(root, "artbird", volumes)
+
+        artbird = BACKUP["measure"](hypeman.api(), root, "artbird", False)
+        legacy_report = BACKUP["measure"](hypeman.api(), root, "hypeman-artbird", False)
+        self.assertEqual(artbird["profileCount"], 24)
+        self.assertEqual(legacy_report["profileCount"], 1)
+        self.assertEqual(artbird["reconciliationFindings"], [])
+        self.assertEqual(legacy_report["reconciliationFindings"], [])
+
+        artbird_set = self.base / "sets/artbird"
+        legacy_set = self.base / "sets/hypeman-artbird"
+        self.assertTrue(
+            BACKUP["backup"](hypeman.api(), root, "artbird", artbird_set, [], True, False)[
+                "complete"
+            ]
+        )
+        self.assertTrue(
+            BACKUP["backup"](
+                hypeman.api(), root, "hypeman-artbird", legacy_set, [], True, False
+            )["complete"]
+        )
+        artbird_manifest = BACKUP["inspect_set"](artbird_set, None, True)
+        legacy_manifest = BACKUP["inspect_set"](legacy_set, None, True)
+        self.assertEqual(artbird_manifest["source"]["backend"], "artbird")
+        self.assertEqual(len(artbird_manifest["profiles"]), 24)
+        self.assertEqual(legacy_manifest["source"]["backend"], "hypeman-artbird")
+        self.assertEqual(
+            [entry["profile"] for entry in legacy_manifest["profiles"]], ["legacy-demo"]
+        )
+
+    def test_mixed_backend_filter_stays_fail_closed_for_ambiguous_ownership_and_names(self):
+        root = self.base / "source"
+        selected, _ = source_volume(
+            root, backend="artbird", profile="shared", identity="selected"
+        )
+        collision, _ = source_volume(
+            root, backend="hypeman-artbird", profile="shared", identity="collision"
+        )
+        malformed, _ = source_volume(
+            root, backend="other", profile="malformed", identity="malformed"
+        )
+        malformed["tags"].pop("dev.agentbrowse.backend")
+        metadata_path = root / "data/volumes/malformed/metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["tags"] = malformed["tags"]
+        metadata_path.write_text(json.dumps(metadata))
+        hypeman = FakeHypeman(root, "artbird", [selected, collision, malformed])
+
+        result = BACKUP["measure"](hypeman.api(), root, "artbird", False)
+        self.assertEqual(
+            sorted(finding["code"] for finding in result["reconciliationFindings"]),
+            ["duplicate_profile_volume", "volume_reconciliation_failed"],
+        )
+        with self.assertRaisesRegex(RuntimeError, "reconciliation findings"):
+            BACKUP["backup"](
+                hypeman.api(), root, "artbird", self.base / "blocked", [], True, True
+            )
+
+    def test_dry_run_ignores_only_a_valid_attached_foreign_backend_profile(self):
+        root = self.base / "source"
+        selected, _ = source_volume(root, backend="artbird", identity="selected")
+        foreign, instances = source_volume(
+            root,
+            backend="hypeman-artbird",
+            profile="legacy-demo",
+            attached=True,
+            identity="foreign",
+        )
+        hypeman = FakeHypeman(root, "artbird", [selected, foreign], instances)
+
+        result = BACKUP["backup"](
+            hypeman.api(), root, "artbird", self.base / "dry-run", [], True, True
+        )
+        self.assertTrue(result["dryRun"])
+        self.assertEqual(result["profileCount"], 1)
+        self.assertEqual(result["profiles"], ["research"])
+        self.assertFalse((self.base / "dry-run").exists())
 
     def test_plaintext_backup_is_manifest_last_resumable_and_restores_a_new_volume_id(self):
         source_root = self.base / "source"

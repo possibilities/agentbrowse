@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Run this checkout's profile-backup helper on one existing remote Hypeman host."""
+
+import argparse
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / "host/profile-backup.py"
+REMOTE_ROOT = "/var/lib/agentbrowse-hypeman"
+REMOTE_HELPER = "/usr/local/lib/agentbrowse/agentbrowse-hypeman"
+SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+BACKEND = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
+COMMANDS = {"measure", "create", "list", "inspect", "restore"}
+RESERVED = {"--root", "--helper", "--backend"}
+
+
+def remote_command(remote, backend, arguments):
+    if not SAFE_NAME.fullmatch(remote):
+        raise ValueError("remote must be a plain SSH host alias")
+    if not BACKEND.fullmatch(backend):
+        raise ValueError("backend must match [a-z][a-z0-9-]{0,31}")
+    if not arguments or arguments[0] not in COMMANDS:
+        raise ValueError("helper arguments must start with a profile-backup command")
+    if RESERVED.intersection(arguments):
+        raise ValueError("root, helper and backend are fixed by this remote runner")
+    remote_arguments = [
+        "sudo",
+        "-n",
+        "python3",
+        "-",
+        "--root",
+        REMOTE_ROOT,
+        "--helper",
+        REMOTE_HELPER,
+        "--backend",
+        backend,
+        *arguments,
+    ]
+    return [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        remote,
+        shlex.join(remote_arguments),
+    ]
+
+
+def invoke(remote, backend, arguments, run=subprocess.run):
+    command = remote_command(remote, backend, arguments)
+    with SOURCE.open("rb") as source:
+        return run(command, stdin=source, check=True)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--remote", required=True)
+    parser.add_argument("--backend", required=True)
+    parser.add_argument("arguments", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    arguments = args.arguments[1:] if args.arguments[:1] == ["--"] else args.arguments
+    try:
+        invoke(args.remote, args.backend, arguments)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print("AgentBrowse remote profile backup: " + str(error), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

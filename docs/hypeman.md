@@ -41,6 +41,19 @@ starts infrastructure or pulls images.
 The same installation places `profile-backup.py` beside the host helper. The public
 `agentbrowse backup` command invokes it locally or through the configured remote SSH
 host; backup and restore paths therefore refer to the selected host's filesystem.
+For an existing host whose service installation predates that file, invoke only the
+current checkout's portable backup helper without changing the service:
+
+```sh
+scripts/run-profile-backup-helper --remote artbird --backend artbird -- \
+  measure --compression-estimate
+```
+
+The runner streams the helper to remote `python3 -` and fixes the Hypeman root,
+installed API helper, and backend arguments itself. It does not write helper bytes,
+install recovery tools, replace service files, or restart targets. Missing host
+dependencies remain explicit errors. Use `scripts/install-host` when full host
+convergence and its documented restart behavior are intended.
 
 The host uses bounded 2x sparse-disk reservation overcommit; memory is not
 overcommitted. New profiles default to 1 GiB (configurable); migrated Apple

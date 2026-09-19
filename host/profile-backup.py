@@ -31,6 +31,7 @@ FORMAT = "agentbrowse-hypeman-profile-backup"
 FORMAT_VERSION = 1
 PROFILE_SCHEMA_VERSION = "1"
 PROFILE = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
+BACKEND = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 VOLUME_ID = re.compile(r"[A-Za-z0-9_-]+\Z")
 CHUNK_BYTES = 1024 * 1024
 SAMPLE_CHUNKS = 16
@@ -237,6 +238,8 @@ def source_record(row, backend, image_fingerprint=None):
 
 
 def load_inventory(api, root, backend):
+    if not isinstance(backend, str) or not BACKEND.fullmatch(backend):
+        raise RuntimeError("invalid profile backup backend")
     api["owned"](root)
     volumes = api["request"](root, "GET", "/volumes")
     instances = api["request"](root, "GET", "/instances")
@@ -247,6 +250,7 @@ def load_inventory(api, root, backend):
             if identity:
                 attachments.setdefault(identity, []).append(str(instance.get("name", "unknown")))
     profiles = []
+    foreign_profiles = []
     findings = []
     for volume in volumes:
         tags = volume.get("tags") or {}
@@ -258,7 +262,11 @@ def load_inventory(api, root, backend):
         if not owned_role and not familiar_name:
             continue
         try:
-            profile = profile_from_volume(volume, backend)
+            tags = volume.get("tags") or {}
+            declared_backend = tags.get("dev.agentbrowse.backend")
+            if not isinstance(declared_backend, str) or not BACKEND.fullmatch(declared_backend):
+                raise RuntimeError("profile volume has invalid backend ownership")
+            profile = profile_from_volume(volume, declared_backend)
             directory = root / "data/volumes" / volume["id"]
             metadata_path = directory / "metadata.json"
             raw = directory / "data.raw"
@@ -276,17 +284,20 @@ def load_inventory(api, root, backend):
             attached = sorted(attachments.get(volume["id"], []))
             if metadata.get("attachments"):
                 raise RuntimeError("disk metadata records a profile attachment")
-            profiles.append(
-                {
-                    "profile": profile,
-                    "volume": volume,
-                    "metadata": metadata,
-                    "metadataBytes": metadata_path.read_bytes(),
-                    "raw": raw,
-                    "attachedTo": attached,
-                }
-            )
-            if attached:
+            record = {
+                "profile": profile,
+                "backend": declared_backend,
+                "volume": volume,
+                "metadata": metadata,
+                "metadataBytes": metadata_path.read_bytes(),
+                "raw": raw,
+                "attachedTo": attached,
+            }
+            if declared_backend == backend:
+                profiles.append(record)
+            else:
+                foreign_profiles.append(record)
+            if attached and declared_backend == backend:
                 findings.append(
                     {
                         "severity": "error",
@@ -305,14 +316,15 @@ def load_inventory(api, root, backend):
                 }
             )
     profiles.sort(key=lambda row: row["profile"])
-    for left, right in zip(profiles, profiles[1:]):
+    all_profiles = sorted(profiles + foreign_profiles, key=lambda row: row["profile"])
+    for left, right in zip(all_profiles, all_profiles[1:]):
         if left["profile"] == right["profile"]:
             findings.append(
                 {
                     "severity": "error",
                     "code": "duplicate_profile_volume",
                     "profile": left["profile"],
-                    "detail": "more than one owned volume has this logical profile name",
+                    "detail": "more than one owned volume across backends has this logical profile name",
                 }
             )
     return profiles, findings

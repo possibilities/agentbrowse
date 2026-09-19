@@ -84,6 +84,34 @@ agentbrowse backup inspect --backend artbird \
   --expected-set-digest RETAINED_SHA256
 ```
 
+One Hypeman root can carry profiles for multiple exact backend IDs. Measure and
+create one set per backend; a valid attached profile owned by another backend does
+not block the selected set, while the selected backend's profiles must still be
+detached. Malformed ownership and any repeated logical profile name across backends
+remain blocking reconciliation findings. A single dated Greybird bundle is a parent
+directory containing independent sets:
+
+```text
+/Volumes/scratch/agentbrowse-profile-backups/2026-09-19/
+  artbird/
+  hypeman-artbird/
+```
+
+Run each create with a configuration that explicitly declares the matching backend
+ID and stage the child set first on the source host. After its manifest is published,
+copy the complete child into a private `.incoming` directory on Greybird, inspect it
+there with its separately retained `setDigest`, then rename that child into the layout
+above. Retain both digests outside the parent. The parent is a transport bundle, not
+a third manifest or a merged profile set.
+
+If the remote service predates `profile-backup.py`, use the non-installing runner:
+
+```sh
+scripts/run-profile-backup-helper --remote artbird --backend artbird -- \
+  create --destination /var/lib/agentbrowse-hypeman/profile-backups/2026-09-19/artbird \
+  --recipient age1example --dry-run
+```
+
 Each profile image is compressed and encrypted independently. Encrypted sets publish
 their authenticated policy and recovery metadata as `manifest.json.age`; plaintext
 sets publish `manifest.json`. A set without either manifest is incomplete and safe
