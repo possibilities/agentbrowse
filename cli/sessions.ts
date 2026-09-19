@@ -108,13 +108,13 @@ export class ProviderSessions {
     const existing = await this.read(session);
     if (existing) {
       const binding = await this.farm.bindings.read(existing.profile);
-      requireReadyProfile(binding);
-      if (!existing.persistent && binding?.restoredFrom)
+      if (!existing.persistent && (binding?.pendingRestore || binding?.restoredFrom))
         throw new CliError(
           "session_profile_changed",
           `disposable session ${session} no longer owns profile ${existing.profile}`,
-          "release the stale session receipt; the restored profile will be preserved",
+          "release the stale session receipt; the restore reservation or restored profile will be preserved",
         );
+      requireReadyProfile(binding);
       if (profile !== undefined && (!existing.persistent || existing.profile !== profile))
         throw new CliError(
           "session_already_prepared",
@@ -210,7 +210,7 @@ export class ProviderSessions {
           "provider cleanup does not match its session receipt",
         );
       const binding = await this.farm.bindings.read(receipt.profile);
-      if (!receipt.persistent && binding?.restoredFrom) {
+      if (!receipt.persistent && (binding?.pendingRestore || binding?.restoredFrom)) {
         await this.remove(receipt.session);
         return { released: true, profile: receipt.profile, preserved: true };
       }

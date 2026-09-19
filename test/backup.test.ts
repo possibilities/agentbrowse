@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { backupHostCommand, runBackup } from "../cli/backup.ts";
+import type { BrowserFleet } from "../cli/fleet.ts";
 import { ProfileBindingStore } from "../cli/profile-binding.ts";
+import { ProviderSessions } from "../cli/sessions.ts";
 import type { HypemanBackendConfig } from "../config/deployment.ts";
 
 const temporaryDirectories: string[] = [];
@@ -49,6 +51,25 @@ function fixture() {
       AGENTBROWSE_STATE_DIR: join(directory, "state"),
     },
   };
+}
+
+function writePreparedSession(directory: string, session: string, profile: string) {
+  const sessions = join(directory, "state/provider-sessions");
+  const receipt = {
+    version: 1 as const,
+    session,
+    profile,
+    persistent: false,
+    lease: "a".repeat(32),
+    createdAt: new Date(0).toISOString(),
+    target: null,
+  };
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(
+    join(sessions, `${createHash("sha256").update(session).digest("hex")}.json`),
+    `${JSON.stringify(receipt)}\n`,
+  );
+  return receipt;
 }
 
 function hostReport(backend: string, profileCount: number, multiplier: number) {
@@ -298,20 +319,7 @@ test("restore reserves all logical names before host mutation and retains them f
 test("restore refuses a profile held only by a prepared provider session before host mutation", async () => {
   const { directory, env } = fixture();
   const session = "prepared-disposable";
-  const sessions = join(directory, "state/provider-sessions");
-  mkdirSync(sessions, { recursive: true });
-  writeFileSync(
-    join(sessions, `${createHash("sha256").update(session).digest("hex")}.json`),
-    `${JSON.stringify({
-      version: 1,
-      session,
-      profile: "research",
-      persistent: false,
-      lease: "a".repeat(32),
-      createdAt: new Date(0).toISOString(),
-      target: null,
-    })}\n`,
-  );
+  writePreparedSession(directory, session, "research");
   let hostMutations = 0;
 
   await expect(
@@ -348,6 +356,99 @@ test("restore refuses a profile held only by a prepared provider session before 
   expect(existsSync(join(directory, `state/restore-operations/${"e".repeat(64)}.json`))).toBe(
     false,
   );
+});
+
+test("stale disposable cleanup preserves a pending reservation and unwedges restore retry", async () => {
+  const { directory, env } = fixture();
+  const state = join(directory, "state");
+  const digest = "6".repeat(64);
+  const bindings = new ProfileBindingStore(state);
+  await bindings.reserveRestore(["research"], "local", digest);
+  const receipt = writePreparedSession(directory, "legacy-pending-retry", "research");
+  const sessions = new ProviderSessions({ bindings } as BrowserFleet, state);
+  let hostMutations = 0;
+  const parsed = {
+    command: "backup" as const,
+    action: "restore" as const,
+    backend: "local",
+    set: "/backups/plain",
+    allowUnencrypted: true,
+    expectedSetDigest: digest,
+    releaseReservations: false,
+    dryRun: false,
+    json: true,
+  };
+  const runner = async (command: readonly string[]) => {
+    if (command.includes("inspect"))
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ setDigest: digest, profiles: [{ profile: "research" }] }),
+        stderr: "",
+      };
+    hostMutations += 1;
+    return { exitCode: 0, stdout: '{"complete":["research"]}', stderr: "" };
+  };
+
+  await expect(runBackup(parsed, env, runner)).rejects.toMatchObject({ code: "profile_leased" });
+  expect(hostMutations).toBe(0);
+  await expect(sessions.launch(receipt.session)).rejects.toMatchObject({
+    code: "session_profile_changed",
+    recovery: expect.stringContaining("restore reservation"),
+  });
+  expect(await sessions.release(receipt.session, receipt.lease)).toEqual({
+    released: true,
+    profile: "research",
+    preserved: true,
+  });
+  expect(await bindings.read("research")).toMatchObject({ pendingRestore: digest });
+
+  const restored = await runBackup(parsed, env, runner);
+  expect(restored.bindingsCreated).toEqual(["research"]);
+  expect(hostMutations).toBe(1);
+  expect(await bindings.read("research")).toMatchObject({ restoredFrom: digest });
+});
+
+test("stale disposable cleanup unwedges explicit reservation release", async () => {
+  const { directory, env } = fixture();
+  const state = join(directory, "state");
+  const digest = "7".repeat(64);
+  const bindings = new ProfileBindingStore(state);
+  await bindings.reserveRestore(["research"], "local", digest);
+  const receipt = writePreparedSession(directory, "legacy-pending-release", "research");
+  const sessions = new ProviderSessions({ bindings } as BrowserFleet, state);
+  let hostMutations = 0;
+  const parsed = {
+    command: "backup" as const,
+    action: "restore" as const,
+    backend: "local",
+    set: "/backups/plain",
+    allowUnencrypted: true,
+    expectedSetDigest: digest,
+    releaseReservations: true,
+    dryRun: false,
+    json: true,
+  };
+  const runner = async (command: readonly string[]) => {
+    if (command.includes("inspect"))
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ setDigest: digest, profiles: [{ profile: "research" }] }),
+        stderr: "",
+      };
+    hostMutations += 1;
+    return { exitCode: 0, stdout: '{"released":["research"]}', stderr: "" };
+  };
+
+  await expect(runBackup(parsed, env, runner)).rejects.toMatchObject({ code: "profile_leased" });
+  expect(hostMutations).toBe(0);
+  await sessions.release(receipt.session, receipt.lease);
+  expect(await bindings.read("research")).toMatchObject({ pendingRestore: digest });
+
+  const released = await runBackup(parsed, env, runner);
+  expect(released.bindingsReleased).toEqual(["research"]);
+  expect(hostMutations).toBe(1);
+  expect(await bindings.read("research")).toBeUndefined();
+  expect(existsSync(join(state, `restore-operations/${digest}.json`))).toBe(false);
 });
 
 test("restore binding finalization resumes from a digest-bound operation journal", async () => {

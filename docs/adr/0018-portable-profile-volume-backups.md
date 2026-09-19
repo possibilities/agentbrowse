@@ -48,7 +48,8 @@ disposable sessions that do not yet have a profile binding. Restore takes the pr
 session registry lock before the sorted profile-binding locks, rejects every held name,
 and publishes its complete binding reservation before releasing the registry. Session
 prepare, launch, and release use the same lock order. Cleanup from a legacy disposable
-receipt additionally preserves any binding carrying restore provenance.
+receipt additionally preserves any pending restore reservation or binding carrying
+restore provenance.
 
 Host operations serialize per set or restore root, reject symlinks in privileged
 path components, bound decrypted manifests and decompressed images, and keep zero
