@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -292,6 +293,61 @@ test("restore reserves all logical names before host mutation and retains them f
   );
   expect(released.bindingsReleased).toEqual(["alpha", "beta"]);
   expect(existsSync(join(directory, "state/profiles/alpha.json"))).toBe(false);
+});
+
+test("restore refuses a profile held only by a prepared provider session before host mutation", async () => {
+  const { directory, env } = fixture();
+  const session = "prepared-disposable";
+  const sessions = join(directory, "state/provider-sessions");
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(
+    join(sessions, `${createHash("sha256").update(session).digest("hex")}.json`),
+    `${JSON.stringify({
+      version: 1,
+      session,
+      profile: "research",
+      persistent: false,
+      lease: "a".repeat(32),
+      createdAt: new Date(0).toISOString(),
+      target: null,
+    })}\n`,
+  );
+  let hostMutations = 0;
+
+  await expect(
+    runBackup(
+      {
+        command: "backup",
+        action: "restore",
+        backend: "local",
+        set: "/backups/plain",
+        allowUnencrypted: true,
+        expectedSetDigest: "e".repeat(64),
+        releaseReservations: false,
+        dryRun: false,
+        json: true,
+      },
+      env,
+      async (command) => {
+        if (command.includes("inspect"))
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              setDigest: "e".repeat(64),
+              profiles: [{ profile: "research" }],
+            }),
+            stderr: "",
+          };
+        hostMutations += 1;
+        return { exitCode: 0, stdout: '{"complete":["research"]}', stderr: "" };
+      },
+    ),
+  ).rejects.toMatchObject({ code: "profile_leased" });
+  expect(hostMutations).toBe(0);
+  expect(existsSync(join(directory, "state/profiles/research.json"))).toBe(false);
+  expect(existsSync(join(directory, `state/restore-operations/${"e".repeat(64)}.json`))).toBe(
+    false,
+  );
 });
 
 test("restore binding finalization resumes from a digest-bound operation journal", async () => {

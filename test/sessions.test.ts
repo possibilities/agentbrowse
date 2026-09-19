@@ -3,9 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserFleet } from "../cli/fleet.ts";
-import { targetFor } from "../cli/model.ts";
+import { providerProfileName, targetFor } from "../cli/model.ts";
 import { ProfileBindingStore } from "../cli/profile-binding.ts";
-import { MAX_DISPOSABLE_SESSIONS, ProviderSessions } from "../cli/sessions.ts";
+import {
+  MAX_DISPOSABLE_SESSIONS,
+  ProviderSessions,
+  withProviderSessionProfileExclusion,
+} from "../cli/sessions.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -20,6 +24,7 @@ function setup() {
   let shutdownError = false;
   let launchError = false;
   const destroyed: string[] = [];
+  const deleted: string[] = [];
   const destroyedIds: (string | undefined)[] = [];
   const targets = new Map<string, ReturnType<typeof targetFor>>();
   const farm = {
@@ -60,6 +65,7 @@ function setup() {
       await bindings.clearTarget({ name, backend, profile });
     },
     async deleteProfile(profile: string) {
+      deleted.push(profile);
       profiles.delete(profile);
       await bindings.delete(profile, "local");
     },
@@ -67,9 +73,12 @@ function setup() {
   const sessions = new ProviderSessions(farm, dir);
   return {
     sessions,
+    dir,
     farm,
+    bindings,
     profiles,
     destroyed,
+    deleted,
     destroyedIds,
     targets,
     setShutdownError: (v: boolean) => {
@@ -96,6 +105,156 @@ test("ordinary close releases the VM, temporary volume and receipt; reopening st
   expect(second.receipt.lease).not.toBe(first.receipt.lease);
   expect(await sessions.release("research", first.receipt.lease)).toEqual({ released: false });
   expect(await sessions.read("research")).toEqual(second.receipt);
+});
+
+test("restore and prepare serialize so a prepared disposable name blocks restore", async () => {
+  const s = setup();
+  const profile = providerProfileName("race");
+  const originalList = s.farm.listProfiles.bind(s.farm);
+  let entered!: () => void;
+  let unblock!: () => void;
+  const active = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  s.farm.listProfiles = async () => {
+    entered();
+    await gate;
+    return await originalList();
+  };
+
+  const preparing = s.sessions.prepare("race");
+  await active;
+  let restoreMutations = 0;
+  const restoring = withProviderSessionProfileExclusion(s.dir, [profile], async () => {
+    restoreMutations += 1;
+    await s.bindings.reserveRestore([profile], "local", "1".repeat(64));
+  });
+  unblock();
+  const receipt = await preparing;
+  await expect(restoring).rejects.toMatchObject({ code: "profile_leased" });
+  expect(receipt.profile).toBe(profile);
+  expect(restoreMutations).toBe(0);
+  expect(await s.bindings.read(profile)).toBeUndefined();
+});
+
+test("restore reservation wins before a concurrent session prepare or launch", async () => {
+  const s = setup();
+  const profile = providerProfileName("restore-first");
+  let entered!: () => void;
+  let unblock!: () => void;
+  const active = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  const restoring = withProviderSessionProfileExclusion(s.dir, [profile], async () => {
+    await s.bindings.reserveRestore([profile], "local", "2".repeat(64));
+    entered();
+    await gate;
+  });
+  await active;
+  const preparing = s.sessions.prepare("restore-first");
+  unblock();
+  await restoring;
+  await expect(preparing).rejects.toMatchObject({ code: "profile_restore_pending" });
+  await expect(s.sessions.launch("restore-first")).rejects.toMatchObject({
+    code: "profile_restore_pending",
+  });
+  expect(await s.sessions.list()).toEqual([]);
+});
+
+test("an active launch holds the session registry through profile provisioning", async () => {
+  const s = setup();
+  const profile = providerProfileName("launch-race");
+  const originalProvision = s.farm.provisionProfile.bind(s.farm);
+  let entered!: () => void;
+  let unblock!: () => void;
+  const active = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  s.farm.provisionProfile = async (options) => {
+    entered();
+    await gate;
+    return await originalProvision(options);
+  };
+  const launching = s.sessions.launch("launch-race");
+  await active;
+  let restoreMutations = 0;
+  const restoring = withProviderSessionProfileExclusion(s.dir, [profile], async () => {
+    restoreMutations += 1;
+    await s.bindings.reserveRestore([profile], "local", "3".repeat(64));
+  });
+  unblock();
+  await launching;
+  await expect(restoring).rejects.toMatchObject({ code: "profile_leased" });
+  expect(restoreMutations).toBe(0);
+});
+
+test("release finishes disposable deletion before restore can reserve the same name", async () => {
+  const s = setup();
+  const launched = await s.sessions.launch("release-race");
+  const profile = launched.receipt.profile;
+  const originalDestroy = s.farm.destroy.bind(s.farm);
+  let entered!: () => void;
+  let unblock!: () => void;
+  const active = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  s.farm.destroy = async (...args) => {
+    entered();
+    await gate;
+    return await originalDestroy(...args);
+  };
+  const releasing = s.sessions.release("release-race", launched.receipt.lease);
+  await active;
+  const restoring = withProviderSessionProfileExclusion(s.dir, [profile], async () => {
+    await s.bindings.reserveRestore([profile], "local", "4".repeat(64));
+  });
+  unblock();
+  await releasing;
+  await restoring;
+  expect(s.deleted).toEqual([profile]);
+  expect(await s.bindings.read(profile)).toMatchObject({ pendingRestore: "4".repeat(64) });
+});
+
+test("stale disposable cleanup preserves a binding finalized by an older restore race", async () => {
+  const s = setup();
+  const receipt = await s.sessions.prepare("legacy-race");
+  const digest = "5".repeat(64);
+  // Reproduce the state an older client could create without the session registry lock.
+  await s.bindings.reserveRestore([receipt.profile], "local", digest);
+  await s.bindings.completeRestore([receipt.profile], "local", digest);
+  const restoredTarget = targetFor("restored-target", 0, {
+    profile: receipt.profile,
+    backend: "local",
+  });
+  await s.bindings.bindTarget(restoredTarget);
+
+  await expect(s.sessions.launch("legacy-race")).rejects.toMatchObject({
+    code: "session_profile_changed",
+  });
+  expect(await s.sessions.release("legacy-race", receipt.lease)).toEqual({
+    released: true,
+    profile: receipt.profile,
+    preserved: true,
+  });
+  expect(s.deleted).toEqual([]);
+  expect(s.destroyed).toEqual([]);
+  expect(await s.bindings.read(receipt.profile)).toMatchObject({
+    restoredFrom: digest,
+    target: restoredTarget,
+  });
+  expect(await s.sessions.list()).toEqual([]);
 });
 
 test("personal profile has one exclusive task owner; successive tasks retain the same profile", async () => {

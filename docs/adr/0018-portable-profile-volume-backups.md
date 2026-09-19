@@ -43,6 +43,13 @@ restore provenance on each binding, making partial multi-profile finalization
 idempotent. Ordinary profile launch, export, import, and deletion refuse pending
 restore bindings.
 
+Provider session receipts also reserve logical profile names, including prepared
+disposable sessions that do not yet have a profile binding. Restore takes the provider
+session registry lock before the sorted profile-binding locks, rejects every held name,
+and publishes its complete binding reservation before releasing the registry. Session
+prepare, launch, and release use the same lock order. Cleanup from a legacy disposable
+receipt additionally preserves any binding carrying restore provenance.
+
 Host operations serialize per set or restore root, reject symlinks in privileged
 path components, bound decrypted manifests and decompressed images, and keep zero
 runs sparse where the filesystem supports holes. Capacity is limited by the signed

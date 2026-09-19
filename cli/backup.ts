@@ -8,6 +8,7 @@ import {
 import { CliError } from "./errors.ts";
 import { ProfileBindingStore } from "./profile-binding.ts";
 import { stateDir } from "./runtime.ts";
+import { withProviderSessionProfileExclusion } from "./sessions.ts";
 
 export type ParsedBackup =
   | {
@@ -420,7 +421,10 @@ export async function runBackup(
   }
   const profiles = profileEntries.map((entry) => (entry as { profile: string }).profile);
   const bindings = new ProfileBindingStore(stateDir(env));
-  if (!parsed.dryRun) await bindings.reserveRestore(profiles, selected.id, setDigest);
+  if (!parsed.dryRun)
+    await withProviderSessionProfileExclusion(stateDir(env), profiles, async () => {
+      await bindings.reserveRestore(profiles, selected.id, setDigest);
+    });
   const result = await invoke(
     selected,
     [

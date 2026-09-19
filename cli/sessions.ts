@@ -5,7 +5,7 @@ import { CliError } from "./errors.ts";
 import type { CreateResult } from "./farm.ts";
 import type { BrowserFleet } from "./fleet.ts";
 import { providerProfileName, validateName } from "./model.ts";
-import { ProfileBindingStore } from "./profile-binding.ts";
+import { ProfileBindingStore, requireReadyProfile } from "./profile-binding.ts";
 
 export const MAX_DISPOSABLE_SESSIONS = 16;
 export interface SessionReceipt {
@@ -17,6 +17,33 @@ export interface SessionReceipt {
   createdAt: string;
   target: { name: string; backend: string } | null;
 }
+
+export async function withProviderSessionProfileExclusion<T>(
+  stateDir: string,
+  profiles: readonly string[],
+  operation: () => Promise<T>,
+): Promise<T> {
+  const names = new Set(profiles);
+  for (const profile of names) validateName(profile);
+  const locks = new ProfileBindingStore(join(stateDir, "session-locks"));
+  return await locks.withProfileLock("registry", async () => {
+    const directory = join(stateDir, "provider-sessions");
+    const owner = (await listSessionReceipts(directory)).find((receipt) =>
+      names.has(receipt.profile),
+    );
+    if (owner)
+      throw new CliError(
+        "profile_leased",
+        `profile ${owner.profile} is reserved by session ${owner.session}`,
+        "close or release that session before restoring the profile",
+      );
+    // ProviderSessions always acquires registry before any profile binding lock.
+    // Keep that ordering while publishing all restore reservations atomically
+    // against prepare, launch, and release.
+    return await operation();
+  });
+}
+
 type SessionFarm = Pick<
   BrowserFleet,
   "provisionProfile" | "destroy" | "deleteProfile" | "listProfiles" | "list" | "bindings"
@@ -40,58 +67,13 @@ export class ProviderSessions {
     return this.locks.withProfileLock("registry", fn);
   }
   private path(session: string): string {
-    if (!session || session.length > 128 || [...session].some((c) => c.charCodeAt(0) < 32))
-      throw new CliError(
-        "invalid_session",
-        "session must be 1–128 characters without control characters",
-      );
-    return join(this.directory, `${createHash("sha256").update(session).digest("hex")}.json`);
+    return sessionReceiptPath(this.directory, session);
   }
   async read(session: string): Promise<SessionReceipt | undefined> {
-    try {
-      const r = JSON.parse(await readFile(this.path(session), "utf8"));
-      if (
-        r.version !== 1 ||
-        r.session !== session ||
-        typeof r.persistent !== "boolean" ||
-        typeof r.lease !== "string" ||
-        !/^[a-f0-9]{32}$/.test(r.lease) ||
-        typeof r.createdAt !== "string" ||
-        !Number.isFinite(Date.parse(r.createdAt)) ||
-        !(
-          r.target === null ||
-          (typeof r.target?.name === "string" && typeof r.target?.backend === "string")
-        )
-      )
-        throw new Error("invalid receipt");
-      validateName(r.profile);
-      return r as SessionReceipt;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      if (error instanceof CliError) throw error;
-      throw new CliError(
-        "invalid_session_receipt",
-        `cannot read session ${session}: ${(error as Error).message}`,
-      );
-    }
+    return await readSessionReceipt(this.directory, session);
   }
   async list(): Promise<SessionReceipt[]> {
-    let files: string[];
-    try {
-      files = await readdir(this.directory);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw error;
-    }
-    const result: SessionReceipt[] = [];
-    for (const file of files.filter((f) => /^[a-f0-9]{64}\.json$/.test(f))) {
-      const raw = JSON.parse(await readFile(join(this.directory, file), "utf8"));
-      if (typeof raw.session !== "string" || this.path(raw.session) !== join(this.directory, file))
-        throw new CliError("invalid_session_receipt", "session filename and identity disagree");
-      const receipt = await this.read(raw.session);
-      if (receipt) result.push(receipt);
-    }
-    return result;
+    return await listSessionReceipts(this.directory);
   }
   private async write(r: SessionReceipt): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -125,6 +107,14 @@ export class ProviderSessions {
     if (profile !== undefined) validateName(profile);
     const existing = await this.read(session);
     if (existing) {
+      const binding = await this.farm.bindings.read(existing.profile);
+      requireReadyProfile(binding);
+      if (!existing.persistent && binding?.restoredFrom)
+        throw new CliError(
+          "session_profile_changed",
+          `disposable session ${session} no longer owns profile ${existing.profile}`,
+          "release the stale session receipt; the restored profile will be preserved",
+        );
       if (profile !== undefined && (!existing.persistent || existing.profile !== profile))
         throw new CliError(
           "session_already_prepared",
@@ -138,6 +128,7 @@ export class ProviderSessions {
     const legacy = providerProfileName(session);
     const named = profile ?? legacy;
     let home = await this.farm.bindings.read(named);
+    requireReadyProfile(home);
     if (!home) {
       const matches = (await this.farm.listProfiles()).filter((p) => p.name === named);
       if (matches.length > 1)
@@ -219,6 +210,10 @@ export class ProviderSessions {
           "provider cleanup does not match its session receipt",
         );
       const binding = await this.farm.bindings.read(receipt.profile);
+      if (!receipt.persistent && binding?.restoredFrom) {
+        await this.remove(receipt.session);
+        return { released: true, profile: receipt.profile, preserved: true };
+      }
       let target = receipt.target ?? binding?.target;
       if (!target && binding) {
         const matches = (await this.farm.list()).filter((t) => t.profile === receipt.profile);
@@ -245,17 +240,81 @@ export class ProviderSessions {
         );
       }
       if (!receipt.persistent && binding) await this.farm.deleteProfile(receipt.profile);
-      await rm(this.path(session));
-      const directory = await open(this.directory, "r");
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
-      }
+      await this.remove(session);
       return { released: true, profile: receipt.profile, preserved: receipt.persistent };
     });
+  }
+  private async remove(session: string): Promise<void> {
+    await rm(this.path(session));
+    const directory = await open(this.directory, "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   }
   async profileForSession(session: string): Promise<string> {
     return (await this.read(session))?.profile ?? providerProfileName(session);
   }
+}
+
+function sessionReceiptPath(directory: string, session: string): string {
+  if (!session || session.length > 128 || [...session].some((c) => c.charCodeAt(0) < 32))
+    throw new CliError(
+      "invalid_session",
+      "session must be 1–128 characters without control characters",
+    );
+  return join(directory, `${createHash("sha256").update(session).digest("hex")}.json`);
+}
+
+async function readSessionReceipt(
+  directory: string,
+  session: string,
+): Promise<SessionReceipt | undefined> {
+  try {
+    const r = JSON.parse(await readFile(sessionReceiptPath(directory, session), "utf8"));
+    if (
+      r.version !== 1 ||
+      r.session !== session ||
+      typeof r.persistent !== "boolean" ||
+      typeof r.lease !== "string" ||
+      !/^[a-f0-9]{32}$/.test(r.lease) ||
+      typeof r.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(r.createdAt)) ||
+      !(
+        r.target === null ||
+        (typeof r.target?.name === "string" && typeof r.target?.backend === "string")
+      )
+    )
+      throw new Error("invalid receipt");
+    validateName(r.profile);
+    return r as SessionReceipt;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (error instanceof CliError) throw error;
+    throw new CliError(
+      "invalid_session_receipt",
+      `cannot read session ${session}: ${(error as Error).message}`,
+    );
+  }
+}
+
+async function listSessionReceipts(directory: string): Promise<SessionReceipt[]> {
+  let files: string[];
+  try {
+    files = await readdir(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const result: SessionReceipt[] = [];
+  for (const file of files.filter((value) => /^[a-f0-9]{64}\.json$/.test(value))) {
+    const path = join(directory, file);
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    if (typeof raw.session !== "string" || sessionReceiptPath(directory, raw.session) !== path)
+      throw new CliError("invalid_session_receipt", "session filename and identity disagree");
+    const receipt = await readSessionReceipt(directory, raw.session);
+    if (receipt) result.push(receipt);
+  }
+  return result;
 }

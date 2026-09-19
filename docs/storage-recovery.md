@@ -110,6 +110,9 @@ new volume IDs, verifies each image before publication, and writes new local bac
 bindings only after host success. Before the host creates a volume, the client
 reserves every logical name under the authenticated set digest. The age identity path
 is on the destination host, and dry-run validates it and the encrypted manifest.
+Prepared or active provider sessions also hold their profile names, even when a
+disposable session has not created its profile volume yet. Close or release those
+sessions before restoring a set containing the same names.
 
 ```sh
 agentbrowse backup restore --backend local \
