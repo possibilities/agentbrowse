@@ -199,6 +199,54 @@ test("backup commands preserve measurement, encryption, inspection, and restore 
   expect(() =>
     parseArgs(["backup", "restore", "--backend", "local", "--set", "/backups/set-1"]),
   ).toThrow("requires --expected-set-digest");
+  expect(
+    parseArgs([
+      "backup",
+      "restore",
+      "--backend",
+      "artbird",
+      "--set",
+      "/backups/set-1",
+      "--identity",
+      "/keys/backup.txt",
+      "--expected-set-digest",
+      "a".repeat(64),
+      "--reconcile-from-backend",
+      "artbird",
+      "--binding-state-dir",
+      "/private/demo-state",
+      "--expected-reconciliation-digest",
+      "b".repeat(64),
+    ]),
+  ).toEqual({
+    command: "backup",
+    action: "restore",
+    backend: "artbird",
+    set: "/backups/set-1",
+    identity: "/keys/backup.txt",
+    allowUnencrypted: false,
+    expectedSetDigest: "a".repeat(64),
+    releaseReservations: false,
+    reconcileFromBackend: "artbird",
+    expectedReconciliationDigest: "b".repeat(64),
+    bindingStateDirs: ["/private/demo-state"],
+    dryRun: false,
+    json: false,
+  });
+  expect(() =>
+    parseArgs([
+      "backup",
+      "restore",
+      "--backend",
+      "artbird",
+      "--set",
+      "/backups/set-1",
+      "--expected-set-digest",
+      "a".repeat(64),
+      "--reconcile-from-backend",
+      "artbird",
+    ]),
+  ).toThrow("requires --expected-reconciliation-digest");
   expect(() =>
     parseArgs([
       "backup",

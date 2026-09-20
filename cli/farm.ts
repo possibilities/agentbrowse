@@ -103,6 +103,64 @@ async function allocationLockOwnerIsAlive(path: string): Promise<boolean> {
   }
 }
 
+export async function withRuntimeAllocationLock<T>(
+  runtimeDir: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+  const runtimeDetails = await lstat(runtimeDir);
+  if (!runtimeDetails.isDirectory() || runtimeDetails.isSymbolicLink())
+    throw new CliError("allocation_busy", "Browser runtime directory is not an owned directory");
+  await chmod(runtimeDir, 0o700);
+  const path = join(runtimeDir, ".allocation.lock");
+  const deadline = Date.now() + ALLOCATION_LOCK_WAIT_MS;
+
+  while (true) {
+    try {
+      await mkdir(path, { mode: 0o700 });
+      try {
+        await writeFile(join(path, "owner"), `${process.pid}\n`, {
+          flag: "wx",
+          mode: 0o600,
+        });
+      } catch (error) {
+        await rm(path, { recursive: true, force: true });
+        throw error;
+      }
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        const details = await stat(path);
+        if (
+          Date.now() - details.mtimeMs > ALLOCATION_LOCK_STALE_MS &&
+          !(await allocationLockOwnerIsAlive(path))
+        ) {
+          await rm(path, { recursive: true, force: true });
+          continue;
+        }
+      } catch (lockError) {
+        if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw lockError;
+      }
+      if (Date.now() >= deadline) {
+        throw new CliError(
+          "allocation_busy",
+          "another Browser target or profile lifecycle operation is still running",
+          "retry the agentbrowse or agent-browser command",
+        );
+      }
+      await Bun.sleep(50);
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    await rm(path, { recursive: true, force: true });
+  }
+}
+
 function verifyManagedProfile(state: ProfileState, profile: BrowserProfile, backend: string): void {
   if (
     state.volume !== profile.volume ||
@@ -675,54 +733,6 @@ export class BrowserFarm {
   }
 
   private async withAllocationLock<T>(operation: () => Promise<T>): Promise<T> {
-    await mkdir(this.runtimeDir, { recursive: true, mode: 0o700 });
-    await chmod(this.runtimeDir, 0o700);
-    const path = join(this.runtimeDir, ".allocation.lock");
-    const deadline = Date.now() + ALLOCATION_LOCK_WAIT_MS;
-
-    while (true) {
-      try {
-        await mkdir(path, { mode: 0o700 });
-        try {
-          await writeFile(join(path, "owner"), `${process.pid}\n`, {
-            flag: "wx",
-            mode: 0o600,
-          });
-        } catch (error) {
-          await rm(path, { recursive: true, force: true });
-          throw error;
-        }
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        try {
-          const details = await stat(path);
-          if (
-            Date.now() - details.mtimeMs > ALLOCATION_LOCK_STALE_MS &&
-            !(await allocationLockOwnerIsAlive(path))
-          ) {
-            await rm(path, { recursive: true, force: true });
-            continue;
-          }
-        } catch (lockError) {
-          if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw lockError;
-        }
-        if (Date.now() >= deadline) {
-          throw new CliError(
-            "allocation_busy",
-            "another Browser target or profile lifecycle operation is still running",
-            "retry the agentbrowse or agent-browser command",
-          );
-        }
-        await Bun.sleep(50);
-      }
-    }
-
-    try {
-      return await operation();
-    } finally {
-      await rm(path, { recursive: true, force: true });
-    }
+    return await withRuntimeAllocationLock(this.runtimeDir, operation);
   }
 }

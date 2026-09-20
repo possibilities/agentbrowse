@@ -43,6 +43,11 @@ sequence idempotent after interruption. An explicit reservation release first as
 the host to delete only incomplete, detached, exactly owned staging volumes; it
 refuses a completed restore.
 
+After a verified source-host loss, [0019](0019-reconcile-host-loss-bindings-by-exact-receipt.md)
+permits an explicit, dry-run-fenced exception for exact stale client receipts. It
+retains this restore transaction and empty-host-volume rule; ordinary name collisions
+remain refused.
+
 Encrypted images stream directly from zstd into age; no recoverable compressed
 plaintext staging file exists. Opaque ordinal archive paths and minimized resume
 receipts keep logical profile names, source volume identity, and recovery metadata

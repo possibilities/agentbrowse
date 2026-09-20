@@ -7,7 +7,15 @@ import {
 } from "../config/deployment.ts";
 import { CliError } from "./errors.ts";
 import { ProfileBindingStore } from "./profile-binding.ts";
-import { stateDir } from "./runtime.ts";
+import {
+  applyRestoreBindingReconciliation,
+  completeRestoreBindingReconciliation,
+  loadRestoreBindingReconciliation,
+  planRestoreBindingReconciliation,
+  type RestoreBindingReconciliationPlan,
+  releaseRestoreBindingReconciliation,
+} from "./restore-reconciliation.ts";
+import { runtimeDir, stateDir } from "./runtime.ts";
 import { withProviderSessionProfileExclusion } from "./sessions.ts";
 
 export type ParsedBackup =
@@ -56,6 +64,9 @@ export type ParsedBackup =
       allowUnencrypted: boolean;
       expectedSetDigest: string;
       releaseReservations: boolean;
+      reconcileFromBackend?: string;
+      expectedReconciliationDigest?: string;
+      bindingStateDirs?: readonly string[];
       dryRun: boolean;
       json: boolean;
     };
@@ -407,6 +418,7 @@ export async function runBackup(
     runner,
   );
   const setDigest = inspect.setDigest;
+  const sourceBackend = inspect.sourceBackend;
   const profileEntries = inspect.profiles;
   if (
     typeof setDigest !== "string" ||
@@ -421,7 +433,46 @@ export async function runBackup(
   }
   const profiles = profileEntries.map((entry) => (entry as { profile: string }).profile);
   const bindings = new ProfileBindingStore(stateDir(env));
-  if (!parsed.dryRun)
+  let reconciliation: RestoreBindingReconciliationPlan | undefined;
+  if (parsed.reconcileFromBackend !== undefined) {
+    if (sourceBackend !== parsed.reconcileFromBackend)
+      throw new CliError(
+        "profile_backup_failed",
+        `${selected.id}: backup source backend is ${String(sourceBackend)}, not ${parsed.reconcileFromBackend}`,
+        "use the exact source backend reported by the authenticated backup manifest",
+      );
+    reconciliation = parsed.dryRun
+      ? await planRestoreBindingReconciliation(
+          profiles,
+          parsed.reconcileFromBackend,
+          selected.id,
+          setDigest,
+          stateDir(env),
+          parsed.bindingStateDirs ?? [],
+          runtimeDir(env),
+        )
+      : parsed.releaseReservations
+        ? await loadRestoreBindingReconciliation(
+            stateDir(env),
+            parsed.bindingStateDirs ?? [],
+            runtimeDir(env),
+            profiles,
+            parsed.reconcileFromBackend,
+            selected.id,
+            setDigest,
+            parsed.expectedReconciliationDigest!,
+          )
+        : await applyRestoreBindingReconciliation(
+            profiles,
+            parsed.reconcileFromBackend,
+            selected.id,
+            setDigest,
+            stateDir(env),
+            parsed.bindingStateDirs ?? [],
+            runtimeDir(env),
+            parsed.expectedReconciliationDigest!,
+          );
+  } else if (!parsed.dryRun)
     await withProviderSessionProfileExclusion(stateDir(env), profiles, async () => {
       await bindings.reserveRestore(profiles, selected.id, setDigest);
     });
@@ -451,8 +502,13 @@ export async function runBackup(
           "profile_backup_failed",
           `${selected.id}: restore helper released an unexpected profile set`,
         );
-      await bindings.releaseRestore(profiles, selected.id, setDigest);
-      return { ...result, bindingsReleased: profiles };
+      if (reconciliation !== undefined) await releaseRestoreBindingReconciliation(reconciliation);
+      else await bindings.releaseRestore(profiles, selected.id, setDigest);
+      return {
+        ...result,
+        bindingsReleased: profiles,
+        ...(reconciliation === undefined ? {} : { bindingReconciliation: reconciliation }),
+      };
     }
     if (
       !Array.isArray(result.complete) ||
@@ -472,8 +528,16 @@ export async function runBackup(
         "profile_backup_failed",
         `${selected.id}: restore helper completed an unexpected profile set`,
       );
-    await bindings.completeRestore(profiles, selected.id, setDigest);
-    return { ...result, bindingsCreated: result.complete };
+    if (reconciliation !== undefined) await completeRestoreBindingReconciliation(reconciliation);
+    else await bindings.completeRestore(profiles, selected.id, setDigest);
+    return {
+      ...result,
+      bindingsCreated: result.complete,
+      ...(reconciliation === undefined ? {} : { bindingReconciliation: reconciliation }),
+    };
   }
-  return result;
+  return {
+    ...result,
+    ...(reconciliation === undefined ? {} : { bindingReconciliation: reconciliation }),
+  };
 }

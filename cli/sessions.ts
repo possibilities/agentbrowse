@@ -44,6 +44,40 @@ export async function withProviderSessionProfileExclusion<T>(
   });
 }
 
+export async function assertNoProviderSessionProfiles(
+  stateDirs: readonly string[],
+  profiles: readonly string[],
+): Promise<void> {
+  const names = new Set(profiles);
+  for (const profile of names) validateName(profile);
+  for (const stateDir of [...new Set(stateDirs)].sort()) {
+    const owner = (await listSessionReceipts(join(stateDir, "provider-sessions"))).find((receipt) =>
+      names.has(receipt.profile),
+    );
+    if (owner)
+      throw new CliError(
+        "profile_leased",
+        `profile ${owner.profile} is reserved by session ${owner.session}`,
+        "close or release that session before restoring the profile",
+      );
+  }
+}
+
+export async function withProviderSessionProfileExclusions<T>(
+  stateDirs: readonly string[],
+  profiles: readonly string[],
+  operation: () => Promise<T>,
+): Promise<T> {
+  const directories = [...new Set(stateDirs)].sort();
+  const acquire = async (index: number): Promise<T> =>
+    index === directories.length
+      ? await operation()
+      : await withProviderSessionProfileExclusion(directories[index]!, profiles, () =>
+          acquire(index + 1),
+        );
+  return await acquire(0);
+}
+
 type SessionFarm = Pick<
   BrowserFleet,
   "provisionProfile" | "destroy" | "deleteProfile" | "listProfiles" | "list" | "bindings"

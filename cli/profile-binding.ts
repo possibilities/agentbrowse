@@ -37,7 +37,7 @@ export class ProfileBindingStore {
   constructor(readonly stateDir: string) {}
 
   async read(profile: string): Promise<ProfileBinding | undefined> {
-    const path = this.path(profile);
+    const path = this.bindingPath(profile);
     try {
       return parseProfileBinding(await readFile(path, "utf8"));
     } catch (error) {
@@ -97,47 +97,59 @@ export class ProfileBindingStore {
       throw new CliError("profile_backup_failed", "invalid backup set digest");
     const names = [...new Set(profiles)].sort();
     for (const profile of names) validateName(profile);
-    await this.withProfileLocks(names, async () => {
-      const existing = await Promise.all(names.map((profile) => this.read(profile)));
-      for (const [index, binding] of existing.entries()) {
-        const profile = names[index]!;
-        if (
-          binding !== undefined &&
-          (binding.backend !== backend ||
-            ((binding.pendingRestore !== setDigest || binding.target !== null) &&
-              (binding.restoredFrom !== setDigest || binding.target !== null)))
-        ) {
-          throw new CliError("profile_exists", `Browser profile ${profile} already exists`);
-        }
-      }
-      const journal = await this.readRestoreJournal(setDigest);
+    await this.withProfileLocks(names, () => this.reserveRestoreLocked(names, backend, setDigest));
+  }
+
+  /** Caller must hold this store's profile locks for every supplied name. */
+  async reserveRestoreLocked(
+    profiles: readonly string[],
+    backend: string,
+    setDigest: string,
+  ): Promise<void> {
+    validateBackendId(backend);
+    if (!/^[0-9a-f]{64}$/.test(setDigest))
+      throw new CliError("profile_backup_failed", "invalid backup set digest");
+    const names = [...new Set(profiles)].sort();
+    for (const profile of names) validateName(profile);
+    const existing = await Promise.all(names.map((profile) => this.read(profile)));
+    for (const [index, binding] of existing.entries()) {
+      const profile = names[index]!;
       if (
-        journal !== undefined &&
-        (journal.backend !== backend || canonicalNames(journal.profiles) !== canonicalNames(names))
+        binding !== undefined &&
+        (binding.backend !== backend ||
+          ((binding.pendingRestore !== setDigest || binding.target !== null) &&
+            (binding.restoredFrom !== setDigest || binding.target !== null)))
       ) {
-        throw new CliError(
-          "profile_backup_failed",
-          "restore operation journal conflicts with this set",
-        );
+        throw new CliError("profile_exists", `Browser profile ${profile} already exists`);
       }
-      await this.writeRestoreJournal({
-        version: 1,
-        backend,
-        setDigest,
-        profiles: names,
-        completed: journal?.completed ?? [],
-      });
-      for (const [index, profile] of names.entries()) {
-        if (existing[index]?.restoredFrom !== setDigest) {
-          await this.write({
-            profile,
-            backend,
-            target: null,
-            pendingRestore: setDigest,
-          });
-        }
-      }
+    }
+    const journal = await this.readRestoreJournal(setDigest);
+    if (
+      journal !== undefined &&
+      (journal.backend !== backend || canonicalNames(journal.profiles) !== canonicalNames(names))
+    ) {
+      throw new CliError(
+        "profile_backup_failed",
+        "restore operation journal conflicts with this set",
+      );
+    }
+    await this.writeRestoreJournal({
+      version: 1,
+      backend,
+      setDigest,
+      profiles: names,
+      completed: journal?.completed ?? [],
     });
+    for (const [index, profile] of names.entries()) {
+      if (existing[index]?.restoredFrom !== setDigest) {
+        await this.write({
+          profile,
+          backend,
+          target: null,
+          pendingRestore: setDigest,
+        });
+      }
+    }
   }
 
   async completeRestore(
@@ -187,7 +199,7 @@ export class ProfileBindingStore {
         }
       }
       for (const profile of names) {
-        await rm(this.path(profile), { force: true });
+        await rm(this.bindingPath(profile), { force: true });
       }
       await rm(this.restoreJournalPath(setDigest), { force: true });
     });
@@ -240,17 +252,17 @@ export class ProfileBindingStore {
           `Browser profile ${profile} is bound to backend ${existing.backend}, not ${backend}`,
         );
       }
-      await rm(this.path(profile), { force: true });
+      await rm(this.bindingPath(profile), { force: true });
     });
   }
 
-  private path(profile: string): string {
+  bindingPath(profile: string): string {
     validateName(profile);
     return join(this.stateDir, "profiles", `${profile}.json`);
   }
 
   private async write(binding: ProfileBinding): Promise<void> {
-    const path = this.path(binding.profile);
+    const path = this.bindingPath(binding.profile);
     const directory = join(this.stateDir, "profiles");
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
@@ -425,10 +437,7 @@ export class ProfileBindingStore {
     }
   }
 
-  private async withProfileLocks<T>(
-    profiles: readonly string[],
-    operation: () => Promise<T>,
-  ): Promise<T> {
+  async withProfileLocks<T>(profiles: readonly string[], operation: () => Promise<T>): Promise<T> {
     const acquire = async (index: number): Promise<T> =>
       index === profiles.length
         ? await operation()

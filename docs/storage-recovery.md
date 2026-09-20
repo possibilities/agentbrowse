@@ -133,9 +133,9 @@ opaque archive ordinals and minimized resume receipts; logical names, original v
 IDs, source metadata, and recovery policy remain in the encrypted manifest. Existing
 nonempty destinations without AgentBrowse's exact private state receipt are refused.
 
-Restore requires an empty destination namespace for every logical profile. It uses
-new volume IDs, verifies each image before publication, and writes new local backend
-bindings only after host success. Before the host creates a volume, the client
+Restore ordinarily requires an empty destination namespace for every logical profile.
+It uses new volume IDs, verifies each image before publication, and writes new local
+backend bindings only after host success. Before the host creates a volume, the client
 reserves every logical name under the authenticated set digest. The age identity path
 is on the destination host, and dry-run validates it and the encrypted manifest.
 Prepared or active provider sessions also hold their profile names, even when a
@@ -153,15 +153,49 @@ agentbrowse backup restore --backend local \
   --expected-set-digest RETAINED_SHA256
 ```
 
+After a verified host replacement, old client binding receipts may still name the
+source backend even though its profile volumes no longer exist. Reconcile those
+receipts only through the restore dry-run. Name every state namespace that owns part
+of the set; the first is `AGENTBROWSE_STATE_DIR`, and additional namespaces are
+explicit absolute paths:
+
+```sh
+agentbrowse backup restore --backend artbird \
+  --set /recovery/artbird --identity /recovery/profile-backup.agekey \
+  --expected-set-digest RETAINED_SHA256 --reconcile-from-backend artbird \
+  --binding-state-dir "$HOME/.local/state/agentbrowse-demo" --dry-run --json
+```
+
+Review `bindingReconciliation` in the result. It assigns every manifest profile to
+exactly one namespace, shows the exact binding and target-receipt revisions, confirms
+the authenticated source and selected destination backends, and returns a
+`reconciliationDigest`. Applying requires the identical command without `--dry-run`
+and with `--expected-reconciliation-digest REVIEWED_SHA256`. A binding on another
+backend, a second binding for the same profile, a changed receipt, or any provider
+session holding a manifest name stops before host mutation.
+
+The apply step archives exact old binding and target receipts under each namespace's
+`retired-bindings/restore-reconciliations/SET_DIGEST/`, publishes digest-bound restore
+reservations, and keeps a private reconciliation journal. It never selects or removes
+a receipt by name alone. Interrupted work retries with the same set and reviewed
+digest; completed retries are no-ops. Profiles with no prior binding are assigned to
+the primary namespace, while profiles found in an additional namespace remain owned
+there. Unrelated bindings are not part of the plan and remain untouched.
+
 Retry the same command after interruption. To abandon an incomplete restore, use the
 same set and identity with `--release-reservations`; the host first removes only
 detached staging volumes whose ownership and receipt still match, then the client
 releases the logical-name reservations. Completed restores cannot be released.
+For a reconciled restore, retain the same source backend, additional state namespaces,
+and reviewed reconciliation digest on the release command; the receipt archives and
+reconciliation journal remain as history.
 Dry-run performs complete decryption, zstd, digest, and read-only filesystem checks
 without creating destination volumes or local binding reservations.
 
 The backup records only recovery metadata and complete volume images. Slots, target
 and VM identities, session leases, credentials, SSH keys, and connection descriptors
 are not copied or restored. After restore, launch each logical profile normally and
-validate its browser state before retiring any source or backup media. The ownership
-and transaction decision is recorded in [ADR 0018](adr/0018-portable-profile-volume-backups.md).
+validate its browser state before retiring any source or backup media. The backup
+transaction is recorded in [ADR 0018](adr/0018-portable-profile-volume-backups.md),
+and host-loss binding reconciliation is recorded in
+[ADR 0019](adr/0019-reconcile-host-loss-bindings-by-exact-receipt.md).

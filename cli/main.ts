@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { isAbsolute } from "node:path";
+
 import { type ParsedBackup, runBackup } from "./backup.ts";
 import { CONTRACT, renderAgentHelp, renderHelp, renderTeaser } from "./contract.ts";
 import { failure as failureEnvelope, success as successEnvelope } from "./envelope.ts";
@@ -150,6 +152,9 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
   let unencrypted = false;
   let allowUnencrypted = false;
   let releaseReservations = false;
+  let reconcileFromBackend: string | undefined;
+  let expectedReconciliationDigest: string | undefined;
+  const bindingStateDirs: string[] = [];
   let dryRun = false;
   for (let index = 2; index < args.length; index += 1) {
     const option = args[index]!;
@@ -163,6 +168,12 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
     else if (option === "--unencrypted") unencrypted = true;
     else if (option === "--allow-unencrypted") allowUnencrypted = true;
     else if (option === "--release-reservations") releaseReservations = true;
+    else if (option === "--reconcile-from-backend")
+      reconcileFromBackend = takeValue(args, index++, option);
+    else if (option === "--expected-reconciliation-digest")
+      expectedReconciliationDigest = takeValue(args, index++, option);
+    else if (option === "--binding-state-dir")
+      bindingStateDirs.push(takeValue(args, index++, option));
     else if (option === "--dry-run") dryRun = true;
     else throw new UsageError(`unknown option for backup ${action}: ${option}`);
   }
@@ -177,7 +188,10 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
       identity !== undefined ||
       expectedSetDigest !== undefined ||
       allowUnencrypted ||
-      releaseReservations
+      releaseReservations ||
+      reconcileFromBackend !== undefined ||
+      expectedReconciliationDigest !== undefined ||
+      bindingStateDirs.length > 0
     )
       throw new UsageError("backup create does not accept --set or --identity");
     if (unencrypted && recipients.length > 0)
@@ -198,7 +212,15 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
   if (action === "list") {
     if (destination === undefined)
       throw new UsageError("backup list requires --destination ABSOLUTE_COLLECTION_PATH");
-    if (set !== undefined || expectedSetDigest !== undefined || dryRun || releaseReservations)
+    if (
+      set !== undefined ||
+      expectedSetDigest !== undefined ||
+      dryRun ||
+      releaseReservations ||
+      reconcileFromBackend !== undefined ||
+      expectedReconciliationDigest !== undefined ||
+      bindingStateDirs.length > 0
+    )
       throw new UsageError(
         "backup list accepts only --backend, --destination, --identity, and --allow-unencrypted",
       );
@@ -216,7 +238,13 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
   if (destination !== undefined)
     throw new UsageError(`backup ${action} does not accept --destination`);
   if (action === "inspect") {
-    if (dryRun || releaseReservations)
+    if (
+      dryRun ||
+      releaseReservations ||
+      reconcileFromBackend !== undefined ||
+      expectedReconciliationDigest !== undefined ||
+      bindingStateDirs.length > 0
+    )
       throw new UsageError("backup inspect does not accept --dry-run or --release-reservations");
     return {
       command: "backup",
@@ -233,6 +261,26 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
     throw new UsageError("backup restore requires --expected-set-digest SHA256");
   if (releaseReservations && dryRun)
     throw new UsageError("backup restore --release-reservations conflicts with --dry-run");
+  if (
+    expectedReconciliationDigest !== undefined &&
+    !/^[0-9a-f]{64}$/.test(expectedReconciliationDigest)
+  )
+    throw new UsageError("--expected-reconciliation-digest must be a lowercase SHA-256 digest");
+  if (bindingStateDirs.some((path) => !isAbsolute(path)))
+    throw new UsageError("--binding-state-dir must be absolute");
+  if (reconcileFromBackend !== undefined && !/^[a-z][a-z0-9-]{0,31}$/.test(reconcileFromBackend))
+    throw new UsageError("--reconcile-from-backend must be a valid backend id");
+  if (
+    reconcileFromBackend === undefined &&
+    (expectedReconciliationDigest !== undefined || bindingStateDirs.length > 0)
+  )
+    throw new UsageError(
+      "--expected-reconciliation-digest and --binding-state-dir require --reconcile-from-backend",
+    );
+  if (reconcileFromBackend !== undefined && !dryRun && expectedReconciliationDigest === undefined)
+    throw new UsageError(
+      "binding reconciliation requires --expected-reconciliation-digest from the reviewed dry-run",
+    );
   return {
     command: "backup",
     action,
@@ -242,6 +290,9 @@ function parseBackup(args: readonly string[], json: boolean): ParsedBackup {
     allowUnencrypted,
     expectedSetDigest,
     releaseReservations,
+    ...(reconcileFromBackend === undefined ? {} : { reconcileFromBackend }),
+    ...(expectedReconciliationDigest === undefined ? {} : { expectedReconciliationDigest }),
+    ...(bindingStateDirs.length === 0 ? {} : { bindingStateDirs }),
     dryRun,
     json,
   };
