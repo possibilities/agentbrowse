@@ -107,6 +107,22 @@ function isHostCommand(command: readonly string[], name: string): boolean {
   return command.includes(name) || command.join(" ").includes(`'${name}'`);
 }
 
+function downgradeReconciliationJournal(path: string): string {
+  const journal = JSON.parse(readFileSync(path, "utf8"));
+  const {
+    destinationHostIdentity: _identity,
+    reconciliationDigest: _digest,
+    ...legacyBase
+  } = journal.plan;
+  legacyBase.version = 1;
+  const reconciliationDigest = createHash("sha256")
+    .update(JSON.stringify(legacyBase))
+    .digest("hex");
+  journal.plan = { ...legacyBase, reconciliationDigest };
+  writeFileSync(path, `${JSON.stringify(journal, null, 2)}\n`);
+  return reconciliationDigest;
+}
+
 test("backup host commands preserve the local root and use the installed remote helper", () => {
   const local = {
     id: "local",
@@ -957,7 +973,7 @@ test("restore reconciliation refuses a byte-identical replacement target receipt
   expect(await store.read("research")).toMatchObject({ target: { name: target.name } });
 });
 
-test("restore reconciliation resumes after host failure and a completed re-run is a no-op", async () => {
+test("v1 reserved reconciliation upgrades through reviewed retry and preserves its archive", async () => {
   const { directory, env } = fixture();
   const digest = "4".repeat(64);
   const store = new ProfileBindingStore(join(directory, "state"));
@@ -985,9 +1001,8 @@ test("restore reconciliation resumes after host failure and a completed re-run i
     stdout: isHostCommand(command, "inspect") ? report : '{"dryRun":true}',
     stderr: "",
   }));
-  const expectedReconciliationDigest = (
-    dry.bindingReconciliation as { reconciliationDigest: string }
-  ).reconciliationDigest;
+  let expectedReconciliationDigest = (dry.bindingReconciliation as { reconciliationDigest: string })
+    .reconciliationDigest;
   await expect(
     runBackup({ ...base, dryRun: false, expectedReconciliationDigest }, env, async (command) =>
       isHostCommand(command, "inspect")
@@ -997,11 +1012,7 @@ test("restore reconciliation resumes after host failure and a completed re-run i
   ).rejects.toMatchObject({ code: "profile_backup_failed" });
   expect(await store.read("research")).toMatchObject({ pendingRestore: digest });
 
-  const successfulRunner: Parameters<typeof runBackup>[2] = async (command) =>
-    isHostCommand(command, "inspect")
-      ? { exitCode: 0, stdout: report, stderr: "" }
-      : { exitCode: 0, stdout: '{"complete":["research"]}', stderr: "" };
-  await runBackup({ ...base, dryRun: false, expectedReconciliationDigest }, env, successfulRunner);
+  const journalPath = join(directory, "state/restore-reconciliations", `${digest}.json`);
   const archived = join(
     directory,
     "state/retired-bindings/restore-reconciliations",
@@ -1009,7 +1020,58 @@ test("restore reconciliation resumes after host failure and a completed re-run i
     "profiles/research.json",
   );
   const archivedSource = readFileSync(archived, "utf8");
+  const legacyDigest = downgradeReconciliationJournal(journalPath);
+  const preview = await runBackup({ ...base, dryRun: true }, env, async (command) => ({
+    exitCode: 0,
+    stdout: isHostCommand(command, "inspect") ? report : '{"dryRun":true}',
+    stderr: "",
+  }));
+  expectedReconciliationDigest = (
+    preview.bindingReconciliation as {
+      version: number;
+      destinationHostIdentity: string;
+      reconciliationDigest: string;
+    }
+  ).reconciliationDigest;
+  expect(expectedReconciliationDigest).not.toBe(legacyDigest);
+  expect(preview.bindingReconciliation).toMatchObject({
+    version: 2,
+    destinationHostIdentity: DESTINATION_HOST_IDENTITY,
+  });
+  expect(JSON.parse(readFileSync(journalPath, "utf8")).plan).toMatchObject({ version: 1 });
+  expect(readFileSync(archived, "utf8")).toBe(archivedSource);
+  let hostRestoreCalls = 0;
+  await expect(
+    runBackup(
+      {
+        ...base,
+        dryRun: false,
+        expectedReconciliationDigest: legacyDigest,
+      },
+      env,
+      async (command) => {
+        if (!isHostCommand(command, "inspect")) hostRestoreCalls += 1;
+        return { exitCode: 0, stdout: report, stderr: "" };
+      },
+    ),
+  ).rejects.toMatchObject({ code: "profile_backup_failed" });
+  expect(hostRestoreCalls).toBe(0);
+  expect(JSON.parse(readFileSync(journalPath, "utf8")).plan).toMatchObject({ version: 1 });
+  expect(await store.read("research")).toMatchObject({ pendingRestore: digest });
+
+  const successfulRunner: Parameters<typeof runBackup>[2] = async (command) =>
+    isHostCommand(command, "inspect")
+      ? { exitCode: 0, stdout: report, stderr: "" }
+      : { exitCode: 0, stdout: '{"complete":["research"]}', stderr: "" };
+  await runBackup({ ...base, dryRun: false, expectedReconciliationDigest }, env, successfulRunner);
   expect(await store.read("research")).toMatchObject({ restoredFrom: digest });
+  expect(JSON.parse(readFileSync(journalPath, "utf8"))).toMatchObject({
+    plan: {
+      version: 2,
+      destinationHostIdentity: DESTINATION_HOST_IDENTITY,
+    },
+    legacyAuthorization: { version: 1, reconciliationDigest: legacyDigest },
+  });
 
   await runBackup({ ...base, dryRun: false, expectedReconciliationDigest }, env, successfulRunner);
   expect(readFileSync(archived, "utf8")).toBe(archivedSource);
@@ -1089,12 +1151,31 @@ test("reconciled restore reservation release retains archived history and is ide
     releaseIntents: [join(directory, "state")],
   });
   expect(await store.read("research")).toMatchObject({ pendingRestore: digest });
-  await runBackup(release, env, releaseRunner);
+  const legacyDigest = downgradeReconciliationJournal(journalPath);
+  const preview = await runBackup(
+    { ...base, releaseReservations: false, dryRun: true },
+    env,
+    async (command) => ({
+      exitCode: 0,
+      stdout: isHostCommand(command, "inspect") ? report : '{"dryRun":true}',
+      stderr: "",
+    }),
+  );
+  const recoveredDigest = (preview.bindingReconciliation as { reconciliationDigest: string })
+    .reconciliationDigest;
+  expect(recoveredDigest).not.toBe(legacyDigest);
+  expect(JSON.parse(readFileSync(journalPath, "utf8"))).toMatchObject({
+    status: "releasing",
+    releaseIntents: [join(directory, "state")],
+    plan: { version: 1 },
+  });
+  const recoveredRelease = { ...release, expectedReconciliationDigest: recoveredDigest };
+  await runBackup(recoveredRelease, env, releaseRunner);
   const interrupted = JSON.parse(readFileSync(journalPath, "utf8"));
   interrupted.status = "releasing";
   interrupted.releasedNamespaces = [];
   writeFileSync(journalPath, `${JSON.stringify(interrupted, null, 2)}\n`);
-  await runBackup(release, env, releaseRunner);
+  await runBackup(recoveredRelease, env, releaseRunner);
   expect(await store.read("research")).toBeUndefined();
   const archived = join(
     directory,
@@ -1103,7 +1184,11 @@ test("reconciled restore reservation release retains archived history and is ide
     "profiles/research.json",
   );
   expect(existsSync(archived)).toBe(true);
-  expect(JSON.parse(readFileSync(journalPath, "utf8"))).toMatchObject({ status: "released" });
+  expect(JSON.parse(readFileSync(journalPath, "utf8"))).toMatchObject({
+    status: "released",
+    plan: { version: 2, destinationHostIdentity: DESTINATION_HOST_IDENTITY },
+    legacyAuthorization: { version: 1, reconciliationDigest: legacyDigest },
+  });
 
   await store.bindProfile("research", "artbird");
   expect(readFileSync(store.bindingPath("research"), "utf8")).toBe(readFileSync(archived, "utf8"));
@@ -1115,7 +1200,7 @@ test("reconciled restore reservation release retains archived history and is ide
         ...base,
         releaseReservations: false,
         dryRun: false,
-        expectedReconciliationDigest,
+        expectedReconciliationDigest: recoveredDigest,
       },
       env,
       async (command) => {
@@ -1133,7 +1218,7 @@ test("reconciled restore reservation release retains archived history and is ide
   writeFileSync(journalPath, `${JSON.stringify(secondCrash, null, 2)}\n`);
   let hostReleaseCalls = 0;
   await expect(
-    runBackup(release, env, async (command) => {
+    runBackup(recoveredRelease, env, async (command) => {
       if (!isHostCommand(command, "inspect")) hostReleaseCalls += 1;
       return isHostCommand(command, "inspect")
         ? { exitCode: 0, stdout: report, stderr: "" }
@@ -1206,11 +1291,30 @@ test("release safely abandons a partially prepared multi-namespace reconciliatio
   expect(await main.read("alpha")).toMatchObject({ pendingRestore: digest });
   expect(await demo.read("beta")).toMatchObject({ backend: "artbird", target: null });
 
+  const journalPath = join(mainState, "restore-reconciliations", `${digest}.json`);
+  const legacyDigest = downgradeReconciliationJournal(journalPath);
+  const preview = await runBackup(
+    { ...base, releaseReservations: false, dryRun: true },
+    env,
+    async (command) => ({
+      exitCode: 0,
+      stdout: isHostCommand(command, "inspect") ? report : '{"dryRun":true}',
+      stderr: "",
+    }),
+  );
+  const recoveredDigest = (preview.bindingReconciliation as { reconciliationDigest: string })
+    .reconciliationDigest;
+  expect(recoveredDigest).not.toBe(legacyDigest);
+  expect(JSON.parse(readFileSync(journalPath, "utf8"))).toMatchObject({
+    status: "prepared",
+    plan: { version: 1 },
+  });
+
   const release = {
     ...base,
     releaseReservations: true,
     dryRun: false,
-    expectedReconciliationDigest,
+    expectedReconciliationDigest: recoveredDigest,
   };
   await runBackup(release, env, async (command) =>
     isHostCommand(command, "inspect")
@@ -1219,7 +1323,10 @@ test("release safely abandons a partially prepared multi-namespace reconciliatio
   );
   expect(await main.read("alpha")).toBeUndefined();
   expect(await demo.read("beta")).toMatchObject({ backend: "artbird", target: null });
-  expect(
-    JSON.parse(readFileSync(join(mainState, "restore-reconciliations", `${digest}.json`), "utf8")),
-  ).toMatchObject({ status: "released", releasedNamespaces: [demoState, mainState].sort() });
+  expect(JSON.parse(readFileSync(journalPath, "utf8"))).toMatchObject({
+    status: "released",
+    releasedNamespaces: [demoState, mainState].sort(),
+    plan: { version: 2, destinationHostIdentity: DESTINATION_HOST_IDENTITY },
+    legacyAuthorization: { version: 1, reconciliationDigest: legacyDigest },
+  });
 });

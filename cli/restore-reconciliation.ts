@@ -33,6 +33,14 @@ export interface RestoreBindingReconciliationPlan {
   readonly reconciliationDigest: string;
 }
 
+type LegacyRestoreBindingReconciliationPlan = Omit<
+  RestoreBindingReconciliationPlan,
+  "version" | "destinationHostIdentity" | "reconciliationDigest"
+> & {
+  readonly version: 1;
+  readonly reconciliationDigest: string;
+};
+
 interface RestoreBindingNamespacePlan {
   readonly stateDir: string;
   readonly identity: DirectoryIdentity;
@@ -64,12 +72,20 @@ interface RestoreBindingExpectation {
 interface ReconciliationJournal {
   readonly version: 2;
   readonly plan: RestoreBindingReconciliationPlan;
+  readonly legacyAuthorization?: {
+    readonly version: 1;
+    readonly reconciliationDigest: string;
+  };
   readonly status: "prepared" | "reserved" | "releasing" | "released";
   readonly completed: readonly string[];
   readonly reservations: readonly NamespaceReservation[];
   readonly releaseIntents: readonly string[];
   readonly releasedNamespaces: readonly string[];
 }
+
+type StoredReconciliationJournal = Omit<ReconciliationJournal, "plan"> & {
+  readonly plan: RestoreBindingReconciliationPlan | LegacyRestoreBindingReconciliationPlan;
+};
 
 interface NamespaceReservation {
   readonly stateDir: string;
@@ -94,6 +110,24 @@ export async function planRestoreBindingReconciliation(
 ): Promise<RestoreBindingReconciliationPlan> {
   const stateDirs = namespacePaths(primaryStateDir, additionalStateDirs);
   await assertNoProviderSessionProfiles(stateDirs, profiles);
+  const journal = await readJournal(
+    reconciliationJournalPath(primaryStateDir, setDigest),
+    destinationHostIdentity,
+  );
+  if (journal !== undefined) {
+    requireMatchingOperation(
+      journal.plan,
+      profiles,
+      sourceBackend,
+      destinationBackend,
+      destinationHostIdentity,
+      setDigest,
+      stateDirs,
+      runtimeDir,
+    );
+    await verifyPlanDirectories(journal.plan);
+    return journal.plan;
+  }
   return await buildPlanLocked(
     profiles,
     sourceBackend,
@@ -120,7 +154,10 @@ export async function applyRestoreBindingReconciliation(
   } = {},
 ): Promise<RestoreBindingReconciliationPlan> {
   const stateDirs = namespacePaths(primaryStateDir, additionalStateDirs);
-  const initialJournal = await readJournal(reconciliationJournalPath(primaryStateDir, setDigest));
+  const initialJournal = await readJournal(
+    reconciliationJournalPath(primaryStateDir, setDigest),
+    destinationHostIdentity,
+  );
   const initialPlan =
     initialJournal === undefined
       ? await buildPlanLocked(
@@ -136,7 +173,7 @@ export async function applyRestoreBindingReconciliation(
   if (initialPlan !== undefined) requireExpectedPlan(initialPlan, expectedReconciliationDigest);
   return await withReconciliationLocks(stateDirs, profiles, runtimeDir, async () => {
     const journalPath = reconciliationJournalPath(primaryStateDir, setDigest);
-    let journal = await readJournal(journalPath);
+    let journal = await readJournal(journalPath, destinationHostIdentity);
     if (journal === undefined) {
       const plan = await buildPlanLocked(
         profiles,
@@ -242,7 +279,10 @@ export async function loadRestoreBindingReconciliation(
   setDigest: string,
   expectedReconciliationDigest: string,
 ): Promise<RestoreBindingReconciliationPlan> {
-  const journal = await readJournal(reconciliationJournalPath(primaryStateDir, setDigest));
+  const journal = await readJournal(
+    reconciliationJournalPath(primaryStateDir, setDigest),
+    destinationHostIdentity,
+  );
   if (journal === undefined) throw changed("restore binding reconciliation journal is missing");
   requireMatchingOperation(
     journal.plan,
@@ -285,7 +325,7 @@ export async function releaseRestoreBindingReconciliation<T>(
   return await withReconciliationLocks(stateDirs, profiles, plan.runtimeDir, async () => {
     await verifyPlanDirectories(plan);
     const path = reconciliationJournalPath(plan.namespaces[0]!.stateDir, plan.setDigest);
-    let journal = await readJournal(path);
+    let journal = await readJournal(path, plan.destinationHostIdentity);
     if (journal === undefined || journal.plan.reconciliationDigest !== plan.reconciliationDigest)
       throw changed("restore binding reconciliation journal is missing or changed");
     if (journal.status === "released") return await hostRelease();
@@ -705,7 +745,10 @@ function reconciliationJournalPath(stateDir: string, setDigest: string): string 
   return join(stateDir, "restore-reconciliations", `${setDigest}.json`);
 }
 
-async function readJournal(path: string): Promise<ReconciliationJournal | undefined> {
+async function readJournal(
+  path: string,
+  destinationHostIdentity: string,
+): Promise<ReconciliationJournal | undefined> {
   const receipt = await readReceipt(path);
   if (receipt === undefined) return undefined;
   let value: unknown;
@@ -718,10 +761,35 @@ async function readJournal(path: string): Promise<ReconciliationJournal | undefi
   const { reconciliationDigest, ...base } = value.plan;
   if (digest(JSON.stringify(base)) !== reconciliationDigest)
     throw changed("restore binding reconciliation journal digest is invalid");
-  return value;
+  if (value.plan.version === 2) return value as ReconciliationJournal;
+  return {
+    ...value,
+    plan: upgradeLegacyPlan(value.plan, destinationHostIdentity),
+    legacyAuthorization: {
+      version: 1,
+      reconciliationDigest: value.plan.reconciliationDigest,
+    },
+  };
 }
 
-function isJournal(value: unknown): value is ReconciliationJournal {
+function upgradeLegacyPlan(
+  plan: LegacyRestoreBindingReconciliationPlan,
+  destinationHostIdentity: string,
+): RestoreBindingReconciliationPlan {
+  const base = {
+    version: 2 as const,
+    setDigest: plan.setDigest,
+    sourceBackend: plan.sourceBackend,
+    destinationBackend: plan.destinationBackend,
+    destinationHostIdentity,
+    runtimeDir: plan.runtimeDir,
+    runtimeIdentity: plan.runtimeIdentity,
+    namespaces: plan.namespaces,
+  };
+  return { ...base, reconciliationDigest: digest(JSON.stringify(base)) };
+}
+
+function isJournal(value: unknown): value is StoredReconciliationJournal {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const journal = value as Record<string, unknown>;
   const plan = journal.plan;
@@ -740,11 +808,23 @@ function isJournal(value: unknown): value is ReconciliationJournal {
       journal.releaseIntents.every((entry) => typeof entry === "string") &&
       Array.isArray(journal.releasedNamespaces) &&
       journal.releasedNamespaces.every((entry) => typeof entry === "string") &&
-      isPlan(plan)
+      isLegacyAuthorization(journal.legacyAuthorization) &&
+      (isPlan(plan) || isLegacyPlan(plan))
     )
   )
     return false;
-  const typedPlan = plan as RestoreBindingReconciliationPlan;
+  const typedPlan = plan as
+    | RestoreBindingReconciliationPlan
+    | LegacyRestoreBindingReconciliationPlan;
+  const legacyAuthorization = journal.legacyAuthorization as
+    | { readonly version: 1; readonly reconciliationDigest: string }
+    | undefined;
+  if (
+    legacyAuthorization !== undefined &&
+    (typedPlan.version !== 2 ||
+      legacyAuthorization.reconciliationDigest !== legacyDigestForPlan(typedPlan))
+  )
+    return false;
   const stateDirs = new Set(typedPlan.namespaces.map((namespace) => namespace.stateDir));
   const allProfiles = new Set(
     typedPlan.namespaces.flatMap((namespace) =>
@@ -787,6 +867,31 @@ function isJournal(value: unknown): value is ReconciliationJournal {
   return true;
 }
 
+function isLegacyAuthorization(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const authorization = value as Record<string, unknown>;
+  return (
+    authorization.version === 1 &&
+    typeof authorization.reconciliationDigest === "string" &&
+    /^[0-9a-f]{64}$/.test(authorization.reconciliationDigest)
+  );
+}
+
+function legacyDigestForPlan(plan: RestoreBindingReconciliationPlan): string {
+  return digest(
+    JSON.stringify({
+      version: 1,
+      setDigest: plan.setDigest,
+      sourceBackend: plan.sourceBackend,
+      destinationBackend: plan.destinationBackend,
+      runtimeDir: plan.runtimeDir,
+      runtimeIdentity: plan.runtimeIdentity,
+      namespaces: plan.namespaces,
+    }),
+  );
+}
+
 function isNamespaceReservation(value: unknown): value is NamespaceReservation {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const reservation = value as Record<string, unknown>;
@@ -815,6 +920,29 @@ function isPlan(value: unknown): value is RestoreBindingReconciliationPlan {
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
       plan.destinationHostIdentity,
     ) ||
+    typeof plan.runtimeDir !== "string" ||
+    !isAbsolute(plan.runtimeDir) ||
+    !(plan.runtimeIdentity === null || isDirectoryIdentity(plan.runtimeIdentity)) ||
+    typeof plan.reconciliationDigest !== "string" ||
+    !/^[0-9a-f]{64}$/.test(plan.reconciliationDigest) ||
+    !validPlanBody(plan)
+  )
+    return false;
+  return true;
+}
+
+function isLegacyPlan(value: unknown): value is LegacyRestoreBindingReconciliationPlan {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const plan = value as Record<string, unknown>;
+  return plan.version === 1 && !("destinationHostIdentity" in plan) && validPlanBody(plan);
+}
+
+function validPlanBody(plan: Record<string, unknown>): boolean {
+  if (
+    typeof plan.setDigest !== "string" ||
+    !/^[0-9a-f]{64}$/.test(plan.setDigest) ||
+    typeof plan.sourceBackend !== "string" ||
+    typeof plan.destinationBackend !== "string" ||
     typeof plan.runtimeDir !== "string" ||
     !isAbsolute(plan.runtimeDir) ||
     !(plan.runtimeIdentity === null || isDirectoryIdentity(plan.runtimeIdentity)) ||

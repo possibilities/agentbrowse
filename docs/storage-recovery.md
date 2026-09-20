@@ -176,6 +176,12 @@ destination host, a binding on another backend, a second binding for the same pr
 a changed receipt, or any provider session holding a manifest name stops before host
 mutation.
 
+If an interrupted reconciliation predates the destination-host fence, the next dry-run
+validates its original journal and returns a new review digest that includes the
+currently observed Hypeman host identity. The dry-run leaves the legacy journal
+unchanged. Use only that new reviewed digest for retry or
+`--release-reservations`; the old digest cannot authorize the newly identified host.
+
 The apply step archives exact old binding and target receipts under each namespace's
 `retired-bindings/restore-reconciliations/SET_DIGEST/`, publishes digest-bound restore
 reservations, and keeps a private reconciliation journal. It never selects or removes

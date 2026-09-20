@@ -29,6 +29,16 @@ namespace's provider-session registry lock and the sorted Profile binding locks,
 stops before host mutation on host replacement, receipt drift, or any session receipt
 holding a manifest name.
 
+An interrupted journal written before the host-identity fence retains its original
+version-1 plan and digest on disk. Dry-run first authenticates that exact legacy plan,
+then returns a version-2 review plan by adding the destination's observed Hypeman host
+identity and recomputing the reconciliation digest. It does not rewrite the journal.
+Retry or release requires the new reviewed digest and persists the version-2 plan only
+while holding the ordinary reconciliation locks; status, completed namespaces,
+reservation revisions, release intent and released namespaces carry forward unchanged.
+The journal retains the validated legacy authorization digest as migration provenance.
+That legacy digest cannot authorize a host identity that it never named.
+
 Exact old receipts move into private per-set archives before digest-bound restore
 reservations replace them. Immediately before each archive, the locked operation
 reopens and rechecks the exact identity and bytes. A durable reconciliation journal is
