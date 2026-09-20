@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { CliError } from "./errors.ts";
 import { type Target, targetFor, validateBackendId, validateName } from "./model.ts";
+import { type ReceiptRevision, readReceipt, sameReceiptRevision } from "./receipt.ts";
 
 export const PROFILE_BINDING_RECEIPT_VERSION = 1;
 
@@ -16,6 +17,13 @@ export interface ProfileBinding {
   readonly pendingImport?: true;
   readonly pendingRestore?: string;
   readonly restoredFrom?: string;
+}
+
+export interface RestoreReleaseInspection {
+  readonly journal: boolean;
+  readonly journalRevision: ReceiptRevision | null;
+  readonly pending: readonly { readonly profile: string; readonly revision: ReceiptRevision }[];
+  readonly absent: readonly string[];
 }
 
 export function requireReadyProfile(binding: ProfileBinding | undefined): void {
@@ -141,7 +149,10 @@ export class ProfileBindingStore {
       completed: journal?.completed ?? [],
     });
     for (const [index, profile] of names.entries()) {
-      if (existing[index]?.restoredFrom !== setDigest) {
+      if (
+        existing[index]?.restoredFrom !== setDigest &&
+        existing[index]?.pendingRestore !== setDigest
+      ) {
         await this.write({
           profile,
           backend,
@@ -203,6 +214,111 @@ export class ProfileBindingStore {
       }
       await rm(this.restoreJournalPath(setDigest), { force: true });
     });
+  }
+
+  /** Caller must hold this store's profile locks for every supplied name. */
+  async inspectRestoreReleaseLocked(
+    profiles: readonly string[],
+    backend: string,
+    setDigest: string,
+  ): Promise<RestoreReleaseInspection> {
+    validateBackendId(backend);
+    const names = [...new Set(profiles)].sort();
+    for (const profile of names) validateName(profile);
+    const journalRecord = await this.readRestoreJournalRecord(setDigest);
+    const bindings = await Promise.all(
+      names.map(async (profile) => {
+        const receipt = await readReceipt(this.bindingPath(profile));
+        return receipt === undefined
+          ? undefined
+          : { binding: parseProfileBinding(receipt.source), revision: receipt.revision };
+      }),
+    );
+    if (journalRecord === undefined) {
+      if (
+        bindings.some(
+          (entry) =>
+            entry?.binding.pendingRestore === setDigest ||
+            entry?.binding.restoredFrom === setDigest,
+        )
+      )
+        throw new CliError(
+          "profile_backup_failed",
+          "restore binding exists without its operation journal",
+        );
+      return { journal: false, journalRevision: null, pending: [], absent: [] };
+    }
+    const journal = journalRecord.journal;
+    if (
+      journal.backend !== backend ||
+      canonicalNames(journal.profiles) !== canonicalNames(names) ||
+      journal.completed.length > 0
+    )
+      throw new CliError(
+        "profile_backup_failed",
+        "restore operation journal cannot be released from this reconciliation",
+      );
+    const pending: { profile: string; revision: ReceiptRevision }[] = [];
+    const absent: string[] = [];
+    for (const [index, entry] of bindings.entries()) {
+      const profile = names[index]!;
+      if (entry === undefined) {
+        absent.push(profile);
+        continue;
+      }
+      const binding = entry.binding;
+      if (
+        binding.backend !== backend ||
+        binding.target !== null ||
+        binding.pendingRestore !== setDigest
+      )
+        throw new CliError("profile_backup_failed", `restore reservation changed for ${profile}`);
+      pending.push({ profile, revision: entry.revision });
+    }
+    return {
+      journal: true,
+      journalRevision: journalRecord.revision,
+      pending,
+      absent,
+    };
+  }
+
+  /** Caller must hold this store's profile locks for every supplied name. */
+  async releaseRestorePartialLocked(
+    profiles: readonly string[],
+    backend: string,
+    setDigest: string,
+    expectedPending: readonly { readonly profile: string; readonly revision: ReceiptRevision }[],
+  ): Promise<RestoreReleaseInspection> {
+    const inspection = await this.inspectRestoreReleaseLocked(profiles, backend, setDigest);
+    if (!inspection.journal) return inspection;
+    if (
+      !pendingSubsetMatches(inspection.pending, expectedPending) ||
+      inspection.journalRevision === null
+    )
+      throw new CliError("profile_backup_failed", "restore release receipt revisions changed");
+    for (const pending of inspection.pending) {
+      const receipt = await readReceipt(this.bindingPath(pending.profile));
+      if (receipt === undefined || !sameReceiptRevision(receipt.revision, pending.revision))
+        throw new CliError(
+          "profile_backup_failed",
+          `restore reservation changed for ${pending.profile}`,
+        );
+      await rm(this.bindingPath(pending.profile));
+    }
+    await syncDirectoryIfPresent(join(this.stateDir, "profiles"));
+    const journalReceipt = await readReceipt(this.restoreJournalPath(setDigest));
+    if (
+      journalReceipt === undefined ||
+      !sameReceiptRevision(journalReceipt.revision, inspection.journalRevision)
+    )
+      throw new CliError(
+        "profile_backup_failed",
+        "restore operation journal changed before release",
+      );
+    await rm(this.restoreJournalPath(setDigest));
+    await syncDirectoryIfPresent(join(this.stateDir, "restore-operations"));
+    return inspection;
   }
 
   async withImport<T>(
@@ -298,44 +414,48 @@ export class ProfileBindingStore {
   }
 
   private async readRestoreJournal(setDigest: string): Promise<RestoreJournal | undefined> {
-    try {
-      const value = JSON.parse(
-        await readFile(this.restoreJournalPath(setDigest), "utf8"),
-      ) as unknown;
-      if (
-        !isObject(value) ||
-        value.version !== 1 ||
-        typeof value.backend !== "string" ||
-        value.setDigest !== setDigest ||
-        !Array.isArray(value.profiles) ||
-        !value.profiles.every((profile) => typeof profile === "string") ||
-        !Array.isArray(value.completed) ||
-        !value.completed.every((profile) => typeof profile === "string")
+    return (await this.readRestoreJournalRecord(setDigest))?.journal;
+  }
+
+  private async readRestoreJournalRecord(
+    setDigest: string,
+  ): Promise<{ readonly journal: RestoreJournal; readonly revision: ReceiptRevision } | undefined> {
+    const receipt = await readReceipt(this.restoreJournalPath(setDigest));
+    if (receipt === undefined) return undefined;
+    const value = JSON.parse(receipt.source) as unknown;
+    if (
+      !isObject(value) ||
+      value.version !== 1 ||
+      typeof value.backend !== "string" ||
+      value.setDigest !== setDigest ||
+      !Array.isArray(value.profiles) ||
+      !value.profiles.every((profile) => typeof profile === "string") ||
+      !Array.isArray(value.completed) ||
+      !value.completed.every((profile) => typeof profile === "string")
+    )
+      throw invalidBinding("restore operation journal is invalid");
+    validateBackendAsBinding(value.backend);
+    for (const profile of value.profiles) validateNameAsBinding(profile as string);
+    if (
+      canonicalNames(value.profiles as string[]) !== JSON.stringify(value.profiles) ||
+      canonicalNames(value.completed as string[]) !== JSON.stringify(value.completed) ||
+      new Set(value.profiles as string[]).size !== value.profiles.length ||
+      new Set(value.completed as string[]).size !== value.completed.length ||
+      (value.completed as string[]).some(
+        (profile) => !(value.profiles as string[]).includes(profile),
       )
-        throw invalidBinding("restore operation journal is invalid");
-      validateBackendAsBinding(value.backend);
-      for (const profile of value.profiles) validateNameAsBinding(profile as string);
-      if (
-        canonicalNames(value.profiles as string[]) !== JSON.stringify(value.profiles) ||
-        canonicalNames(value.completed as string[]) !== JSON.stringify(value.completed) ||
-        new Set(value.profiles as string[]).size !== value.profiles.length ||
-        new Set(value.completed as string[]).size !== value.completed.length ||
-        (value.completed as string[]).some(
-          (profile) => !(value.profiles as string[]).includes(profile),
-        )
-      )
-        throw invalidBinding("restore operation journal names are invalid");
-      return {
+    )
+      throw invalidBinding("restore operation journal names are invalid");
+    return {
+      journal: {
         version: 1,
         backend: value.backend,
         setDigest,
         profiles: value.profiles,
         completed: value.completed,
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      throw error;
-    }
+      },
+      revision: receipt.revision,
+    };
   }
 
   private async requireRestoreJournal(
@@ -458,6 +578,17 @@ function canonicalNames(names: readonly string[]): string {
   return JSON.stringify([...names].sort());
 }
 
+function pendingSubsetMatches(
+  pending: readonly { readonly profile: string; readonly revision: ReceiptRevision }[],
+  expected: readonly { readonly profile: string; readonly revision: ReceiptRevision }[],
+): boolean {
+  const byProfile = new Map(expected.map((entry) => [entry.profile, entry.revision]));
+  return pending.every((entry) => {
+    const revision = byProfile.get(entry.profile);
+    return revision !== undefined && sameReceiptRevision(entry.revision, revision);
+  });
+}
+
 async function profileBindingLockOwnerIsAlive(path: string): Promise<boolean> {
   let source: string;
   try {
@@ -473,6 +604,19 @@ async function profileBindingLockOwnerIsAlive(path: string): Promise<boolean> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
     return true;
+  }
+}
+
+async function syncDirectoryIfPresent(path: string): Promise<void> {
+  try {
+    const directory = await open(path, "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 

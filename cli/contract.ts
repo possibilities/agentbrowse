@@ -873,7 +873,7 @@ export const CONTRACT: Contract = {
           audience: "operator",
           mutates: true,
           guidance:
-            "Supply the setDigest retained separately when the backup was created. Restore validates every decrypted image and filesystem during dry-run, reserves all logical names, then uses deterministic staging volumes and operation journals for crash recovery. After a verified host replacement, --reconcile-from-backend produces an exact receipt-hash plan during dry-run; mutation additionally requires that plan's reconciliationDigest. Repeat --binding-state-dir for another explicit client namespace whose existing source binding must retain ownership. It never restores slots, leases, targets, credentials, SSH keys, or connection descriptors.",
+            "Supply the setDigest retained separately when the backup was created. Restore validates every decrypted image and filesystem during dry-run, reserves all logical names, then uses deterministic staging volumes and operation journals for crash recovery. After a verified host replacement, --reconcile-from-backend produces an exact opened-file identity and byte plan during dry-run; mutation additionally requires that plan's reconciliationDigest. Repeat --binding-state-dir for another explicit client namespace whose existing source binding must retain ownership. Release is crash-idempotent and terminal for that reconciliation plan. It never restores slots, leases, targets, credentials, SSH keys, or connection descriptors.",
           arguments: [
             {
               name: "--backend",

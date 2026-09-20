@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 
 import { CliError } from "./errors.ts";
@@ -10,6 +10,12 @@ import {
   ProfileBindingStore,
   parseProfileBinding,
 } from "./profile-binding.ts";
+import {
+  type ReceiptRevision,
+  readReceipt,
+  sameReceiptLineage,
+  sameReceiptRevision,
+} from "./receipt.ts";
 import {
   assertNoProviderSessionProfiles,
   withProviderSessionProfileExclusions,
@@ -41,7 +47,7 @@ interface RestoreBindingExpectation {
   readonly profile: string;
   readonly owner: boolean;
   readonly binding: null | {
-    readonly sha256: string;
+    readonly revision: ReceiptRevision;
     readonly backend: string;
     readonly target: null | {
       readonly name: string;
@@ -49,23 +55,30 @@ interface RestoreBindingExpectation {
       readonly backend: string;
       readonly container: string;
       readonly slot: number;
-      readonly receiptSha256: string | null;
+      readonly receiptRevision: ReceiptRevision | null;
     };
   };
 }
 
 interface ReconciliationJournal {
-  readonly version: 1;
+  readonly version: 2;
   readonly plan: RestoreBindingReconciliationPlan;
-  readonly status: "prepared" | "reserved" | "released";
+  readonly status: "prepared" | "reserved" | "releasing" | "released";
   readonly completed: readonly string[];
+  readonly reservations: readonly NamespaceReservation[];
+  readonly releaseIntents: readonly string[];
   readonly releasedNamespaces: readonly string[];
+}
+
+interface NamespaceReservation {
+  readonly stateDir: string;
+  readonly pending: readonly { readonly profile: string; readonly revision: ReceiptRevision }[];
 }
 
 interface BindingObservation {
   readonly binding: ProfileBinding;
-  readonly sha256: string;
-  readonly targetReceiptSha256: string | null;
+  readonly revision: ReceiptRevision;
+  readonly targetReceiptRevision: ReceiptRevision | null;
 }
 
 export async function planRestoreBindingReconciliation(
@@ -98,6 +111,9 @@ export async function applyRestoreBindingReconciliation(
   additionalStateDirs: readonly string[],
   runtimeDir: string,
   expectedReconciliationDigest: string,
+  hooks: {
+    readonly beforeNamespace?: (stateDir: string, index: number) => void | Promise<void>;
+  } = {},
 ): Promise<RestoreBindingReconciliationPlan> {
   const stateDirs = namespacePaths(primaryStateDir, additionalStateDirs);
   const initialJournal = await readJournal(reconciliationJournalPath(primaryStateDir, setDigest));
@@ -128,10 +144,12 @@ export async function applyRestoreBindingReconciliation(
       );
       requireExpectedPlan(plan, expectedReconciliationDigest);
       journal = {
-        version: 1,
+        version: 2,
         plan,
         status: "prepared",
         completed: [],
+        reservations: [],
+        releaseIntents: [],
         releasedNamespaces: [],
       };
       await writeJournal(journalPath, journal);
@@ -146,20 +164,19 @@ export async function applyRestoreBindingReconciliation(
         runtimeDir,
       );
       requireExpectedPlan(journal.plan, expectedReconciliationDigest);
-      if (journal.status === "released") {
-        journal = { ...journal, status: "prepared", completed: [], releasedNamespaces: [] };
-        await writeJournal(journalPath, journal);
-      }
+      if (journal.status === "released" || journal.status === "releasing")
+        throw changed("released restore reconciliation authorization is terminal");
     }
     await verifyPlanDirectories(journal.plan);
 
     const completed = new Set(journal.completed);
-    for (const namespace of journal.plan.namespaces) {
+    for (const [namespaceIndex, namespace] of journal.plan.namespaces.entries()) {
+      await hooks.beforeNamespace?.(namespace.stateDir, namespaceIndex);
       const store = new ProfileBindingStore(namespace.stateDir);
       const owners = namespace.profiles.filter((entry) => entry.owner);
       for (const expectation of namespace.profiles) {
         if (!expectation.owner) {
-          if ((await store.read(expectation.profile)) !== undefined)
+          if ((await readReceipt(store.bindingPath(expectation.profile))) !== undefined)
             throw changed(`profile ${expectation.profile} appeared in ${namespace.stateDir}`);
           continue;
         }
@@ -178,6 +195,25 @@ export async function applyRestoreBindingReconciliation(
           journal.plan.destinationBackend,
           journal.plan.setDigest,
         );
+      if (
+        owners.length > 0 &&
+        !journal.reservations.some((entry) => entry.stateDir === namespace.stateDir)
+      ) {
+        const inspection = await store.inspectRestoreReleaseLocked(
+          owners.map((entry) => entry.profile),
+          journal.plan.destinationBackend,
+          journal.plan.setDigest,
+        );
+        if (!inspection.journal || inspection.pending.length !== owners.length)
+          throw changed(`restore reservations are incomplete in ${namespace.stateDir}`);
+        journal = {
+          ...journal,
+          reservations: [
+            ...journal.reservations,
+            { stateDir: namespace.stateDir, pending: inspection.pending },
+          ].sort((left, right) => left.stateDir.localeCompare(right.stateDir)),
+        };
+      }
       for (const owner of owners) completed.add(owner.profile);
       journal = { ...journal, completed: [...completed].sort() };
       await writeJournal(journalPath, journal);
@@ -210,8 +246,6 @@ export async function loadRestoreBindingReconciliation(
     runtimeDir,
   );
   requireExpectedPlan(journal.plan, expectedReconciliationDigest);
-  if (journal.status === "prepared")
-    throw changed("restore binding reconciliation did not finish publishing reservations");
   await verifyPlanDirectories(journal.plan);
   return journal.plan;
 }
@@ -233,34 +267,182 @@ export async function completeRestoreBindingReconciliation(
   }
 }
 
-export async function releaseRestoreBindingReconciliation(
+export async function releaseRestoreBindingReconciliation<T>(
   plan: RestoreBindingReconciliationPlan,
-): Promise<void> {
-  await verifyPlanDirectories(plan);
-  const path = reconciliationJournalPath(plan.namespaces[0]!.stateDir, plan.setDigest);
-  let journal = await readJournal(path);
-  if (journal === undefined || journal.plan.reconciliationDigest !== plan.reconciliationDigest)
-    throw changed("restore binding reconciliation journal is missing or changed");
-  const released = new Set(journal.releasedNamespaces);
-  for (const namespace of plan.namespaces) {
-    if (released.has(namespace.stateDir)) continue;
-    const profiles = namespace.profiles
-      .filter((entry) => entry.owner)
-      .map((entry) => entry.profile);
-    if (profiles.length === 0) {
+  hostRelease: () => Promise<T>,
+): Promise<T> {
+  const stateDirs = plan.namespaces.map((namespace) => namespace.stateDir);
+  const profiles = plan.namespaces[0]!.profiles.map((entry) => entry.profile);
+  return await withReconciliationLocks(stateDirs, profiles, plan.runtimeDir, async () => {
+    await verifyPlanDirectories(plan);
+    const path = reconciliationJournalPath(plan.namespaces[0]!.stateDir, plan.setDigest);
+    let journal = await readJournal(path);
+    if (journal === undefined || journal.plan.reconciliationDigest !== plan.reconciliationDigest)
+      throw changed("restore binding reconciliation journal is missing or changed");
+    if (journal.status === "released") return await hostRelease();
+
+    const released = new Set(journal.releasedNamespaces);
+    const reservations = new Map(
+      journal.reservations.map((reservation) => [reservation.stateDir, reservation]),
+    );
+    for (const namespace of plan.namespaces) {
+      if (released.has(namespace.stateDir)) continue;
+      const observed = await validateNamespaceReleaseLocked(
+        plan,
+        namespace,
+        reservations.get(namespace.stateDir)?.pending,
+      );
+      reservations.set(namespace.stateDir, { stateDir: namespace.stateDir, pending: observed });
+    }
+    const intents = new Set(journal.releaseIntents);
+    for (const namespace of plan.namespaces)
+      if (!released.has(namespace.stateDir)) intents.add(namespace.stateDir);
+    journal = {
+      ...journal,
+      status: "releasing",
+      reservations: [...reservations.values()].sort((left, right) =>
+        left.stateDir.localeCompare(right.stateDir),
+      ),
+      releaseIntents: [...intents].sort(),
+    };
+    await writeJournal(path, journal);
+
+    const result = await hostRelease();
+    for (const namespace of plan.namespaces) {
+      if (released.has(namespace.stateDir)) continue;
+      const expectedPending = reservations.get(namespace.stateDir)?.pending ?? [];
+      await validateNamespaceReleaseLocked(plan, namespace, expectedPending);
+      const owners = namespace.profiles
+        .filter((entry) => entry.owner)
+        .map((entry) => entry.profile);
+      if (owners.length > 0)
+        await new ProfileBindingStore(namespace.stateDir).releaseRestorePartialLocked(
+          owners,
+          plan.destinationBackend,
+          plan.setDigest,
+          expectedPending,
+        );
       released.add(namespace.stateDir);
+      journal = { ...journal, releasedNamespaces: [...released].sort() };
+      await writeJournal(path, journal);
+    }
+    await writeJournal(path, { ...journal, status: "released", completed: [] });
+    return result;
+  });
+}
+
+async function validateNamespaceReleaseLocked(
+  plan: RestoreBindingReconciliationPlan,
+  namespace: RestoreBindingNamespacePlan,
+  expectedPending?: readonly {
+    readonly profile: string;
+    readonly revision: ReceiptRevision;
+  }[],
+): Promise<readonly { readonly profile: string; readonly revision: ReceiptRevision }[]> {
+  const store = new ProfileBindingStore(namespace.stateDir);
+  const owners: string[] = [];
+  for (const expectation of namespace.profiles) {
+    const path = store.bindingPath(expectation.profile);
+    const receipt = await readReceipt(path);
+    if (!expectation.owner) {
+      if (receipt !== undefined)
+        throw changed(`profile ${expectation.profile} appeared in ${namespace.stateDir}`);
       continue;
     }
-    await new ProfileBindingStore(namespace.stateDir).releaseRestore(
-      profiles,
+    owners.push(expectation.profile);
+    const binding = receipt === undefined ? undefined : parseProfileBinding(receipt.source);
+    const pending =
+      binding?.backend === plan.destinationBackend &&
+      binding.target === null &&
+      binding.pendingRestore === plan.setDigest;
+    if (pending) {
+      await requireRetiredReceipts(plan, namespace, expectation);
+      continue;
+    }
+    if (expectation.binding === null) {
+      if (binding !== undefined)
+        throw changed(`profile ${expectation.profile} changed before reservation release`);
+      continue;
+    }
+    if (
+      receipt !== undefined &&
+      sameReceiptRevision(receipt.revision, expectation.binding.revision)
+    ) {
+      await requireOriginalTarget(plan, expectation);
+      continue;
+    }
+    if (receipt === undefined) {
+      await requireRetiredReceipts(plan, namespace, expectation);
+      continue;
+    }
+    throw changed(`profile ${expectation.profile} changed before reservation release`);
+  }
+  if (owners.length > 0) {
+    const inspection = await store.inspectRestoreReleaseLocked(
+      owners,
       plan.destinationBackend,
       plan.setDigest,
     );
-    released.add(namespace.stateDir);
-    journal = { ...journal, releasedNamespaces: [...released].sort() };
-    await writeJournal(path, journal);
+    if (
+      expectedPending !== undefined &&
+      !reservationSubsetMatches(inspection.pending, expectedPending)
+    )
+      throw changed(`restore reservation revisions changed in ${namespace.stateDir}`);
+    return inspection.pending;
   }
-  await writeJournal(path, { ...journal, status: "released", completed: [] });
+  if (expectedPending !== undefined && expectedPending.length > 0)
+    throw changed(`restore reservation revisions changed in ${namespace.stateDir}`);
+  return [];
+}
+
+async function requireOriginalTarget(
+  plan: RestoreBindingReconciliationPlan,
+  expectation: RestoreBindingExpectation,
+): Promise<void> {
+  const target = expectation.binding?.target;
+  if (target === null || target === undefined) return;
+  const receipt = await readReceipt(configPath(plan.runtimeDir, target.name));
+  if (target.receiptRevision === null) {
+    if (receipt !== undefined)
+      throw changed(`target receipt ${target.name} appeared after the plan`);
+    return;
+  }
+  if (receipt === undefined || !sameReceiptRevision(receipt.revision, target.receiptRevision))
+    throw changed(`target receipt ${target.name} changed after the plan`);
+  requireTarget(
+    parseTargetConfig(receipt.source),
+    target,
+    configPath(plan.runtimeDir, target.name),
+  );
+}
+
+async function requireRetiredReceipts(
+  plan: RestoreBindingReconciliationPlan,
+  namespace: RestoreBindingNamespacePlan,
+  expectation: RestoreBindingExpectation,
+): Promise<void> {
+  const original = expectation.binding;
+  if (original === null) return;
+  const archiveRoot = join(
+    namespace.stateDir,
+    "retired-bindings",
+    "restore-reconciliations",
+    plan.setDigest,
+  );
+  await requireArchived(
+    join(archiveRoot, "profiles", `${expectation.profile}.json`),
+    original.revision,
+  );
+  if (original.target !== null) {
+    const live = await readReceipt(configPath(plan.runtimeDir, original.target.name));
+    if (live !== undefined)
+      throw changed(`target receipt ${original.target.name} reappeared after retirement`);
+    if (original.target.receiptRevision !== null)
+      await requireArchived(
+        join(archiveRoot, "targets", `${original.target.name}.json`),
+        original.target.receiptRevision,
+      );
+  }
 }
 
 async function buildPlanLocked(
@@ -333,7 +515,7 @@ async function buildPlanLocked(
               observation === undefined
                 ? null
                 : {
-                    sha256: observation.sha256,
+                    revision: observation.revision,
                     backend: observation.binding.backend,
                     target:
                       observation.binding.target === null
@@ -344,7 +526,7 @@ async function buildPlanLocked(
                             backend: observation.binding.target.backend,
                             container: observation.binding.target.container,
                             slot: observation.binding.target.slot,
-                            receiptSha256: observation.targetReceiptSha256,
+                            receiptRevision: observation.targetReceiptRevision,
                           },
                   },
           };
@@ -361,21 +543,21 @@ async function observeBinding(
   runtimeDir: string,
 ): Promise<BindingObservation | undefined> {
   const path = store.bindingPath(profile);
-  const source = await readRegularFile(path);
-  if (source === undefined) return undefined;
-  const binding = parseProfileBinding(source);
+  const receipt = await readReceipt(path);
+  if (receipt === undefined) return undefined;
+  const binding = parseProfileBinding(receipt.source);
   if (binding.profile !== profile) throw changed(`binding filename and profile disagree: ${path}`);
-  let targetReceiptSha256: string | null = null;
+  let targetReceiptRevision: ReceiptRevision | null = null;
   if (binding.target !== null) {
     const targetPath = configPath(runtimeDir, binding.target.name);
-    const targetSource = await readRegularFile(targetPath);
-    if (targetSource !== undefined) {
-      const target = parseTargetConfig(targetSource);
+    const targetReceipt = await readReceipt(targetPath);
+    if (targetReceipt !== undefined) {
+      const target = parseTargetConfig(targetReceipt.source);
       requireTarget(target, binding.target, targetPath);
-      targetReceiptSha256 = digest(targetSource);
+      targetReceiptRevision = targetReceipt.revision;
     }
   }
-  return { binding, sha256: digest(source), targetReceiptSha256 };
+  return { binding, revision: receipt.revision, targetReceiptRevision };
 }
 
 async function retireExpectedBinding(
@@ -386,7 +568,10 @@ async function retireExpectedBinding(
   destinationBackend: string,
   expectation: RestoreBindingExpectation,
 ): Promise<void> {
-  const current = await store.read(expectation.profile);
+  const bindingPath = store.bindingPath(expectation.profile);
+  const currentReceipt = await readReceipt(bindingPath);
+  const current =
+    currentReceipt === undefined ? undefined : parseProfileBinding(currentReceipt.source);
   const original = expectation.binding;
   if (original === null) {
     if (
@@ -401,7 +586,6 @@ async function retireExpectedBinding(
     return;
   }
 
-  const bindingPath = store.bindingPath(expectation.profile);
   const archiveRoot = join(stateDir, "retired-bindings", "restore-reconciliations", setDigest);
   const archivedBinding = join(archiveRoot, "profiles", `${expectation.profile}.json`);
   if (
@@ -410,31 +594,31 @@ async function retireExpectedBinding(
     current.target === null &&
     (current.pendingRestore === setDigest || current.restoredFrom === setDigest)
   ) {
-    await requireArchived(archivedBinding, original.sha256);
+    await requireArchived(archivedBinding, original.revision);
     return;
   }
-  const source = await readRegularFile(bindingPath);
-  if (source === undefined) await requireArchived(archivedBinding, original.sha256);
-  else if (digest(source) !== original.sha256)
+  if (currentReceipt === undefined) await requireArchived(archivedBinding, original.revision);
+  else if (!sameReceiptRevision(currentReceipt.revision, original.revision))
     throw changed(`profile ${expectation.profile} binding revision changed`);
 
   if (original.target !== null) {
     const targetPath = configPath(runtimeDir, original.target.name);
     const archivedTarget = join(archiveRoot, "targets", `${original.target.name}.json`);
-    const targetSource = await readRegularFile(targetPath);
-    if (original.target.receiptSha256 === null) {
-      if (targetSource !== undefined)
+    const targetReceipt = await readReceipt(targetPath);
+    if (original.target.receiptRevision === null) {
+      if (targetReceipt !== undefined)
         throw changed(`target receipt ${original.target.name} appeared after the plan`);
-    } else if (targetSource === undefined) {
-      await requireArchived(archivedTarget, original.target.receiptSha256);
+    } else if (targetReceipt === undefined) {
+      await requireArchived(archivedTarget, original.target.receiptRevision);
     } else {
-      if (digest(targetSource) !== original.target.receiptSha256)
+      if (!sameReceiptRevision(targetReceipt.revision, original.target.receiptRevision))
         throw changed(`target receipt ${original.target.name} revision changed`);
-      requireTarget(parseTargetConfig(targetSource), original.target, targetPath);
-      await archiveExact(targetPath, archivedTarget, original.target.receiptSha256);
+      requireTarget(parseTargetConfig(targetReceipt.source), original.target, targetPath);
+      await archiveExact(targetPath, archivedTarget, original.target.receiptRevision);
     }
   }
-  if (source !== undefined) await archiveExact(bindingPath, archivedBinding, original.sha256);
+  if (currentReceipt !== undefined)
+    await archiveExact(bindingPath, archivedBinding, original.revision);
 }
 
 async function withReconciliationLocks<T>(
@@ -509,11 +693,11 @@ function reconciliationJournalPath(stateDir: string, setDigest: string): string 
 }
 
 async function readJournal(path: string): Promise<ReconciliationJournal | undefined> {
-  const source = await readRegularFile(path);
-  if (source === undefined) return undefined;
+  const receipt = await readReceipt(path);
+  if (receipt === undefined) return undefined;
   let value: unknown;
   try {
-    value = JSON.parse(source);
+    value = JSON.parse(receipt.source);
   } catch {
     throw changed("restore binding reconciliation journal is invalid JSON");
   }
@@ -528,16 +712,80 @@ function isJournal(value: unknown): value is ReconciliationJournal {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const journal = value as Record<string, unknown>;
   const plan = journal.plan;
+  if (
+    !(
+      journal.version === 2 &&
+      (journal.status === "prepared" ||
+        journal.status === "reserved" ||
+        journal.status === "releasing" ||
+        journal.status === "released") &&
+      Array.isArray(journal.completed) &&
+      journal.completed.every((entry) => typeof entry === "string") &&
+      Array.isArray(journal.reservations) &&
+      journal.reservations.every(isNamespaceReservation) &&
+      Array.isArray(journal.releaseIntents) &&
+      journal.releaseIntents.every((entry) => typeof entry === "string") &&
+      Array.isArray(journal.releasedNamespaces) &&
+      journal.releasedNamespaces.every((entry) => typeof entry === "string") &&
+      isPlan(plan)
+    )
+  )
+    return false;
+  const typedPlan = plan as RestoreBindingReconciliationPlan;
+  const stateDirs = new Set(typedPlan.namespaces.map((namespace) => namespace.stateDir));
+  const allProfiles = new Set(
+    typedPlan.namespaces.flatMap((namespace) =>
+      namespace.profiles.filter((entry) => entry.owner).map((entry) => entry.profile),
+    ),
+  );
+  const completed = journal.completed as string[];
+  const reservations = journal.reservations as NamespaceReservation[];
+  const intents = journal.releaseIntents as string[];
+  const released = journal.releasedNamespaces as string[];
+  if (
+    new Set(completed).size !== completed.length ||
+    completed.some((profile) => !allProfiles.has(profile)) ||
+    new Set(reservations.map((entry) => entry.stateDir)).size !== reservations.length ||
+    reservations.some(
+      (entry) =>
+        !stateDirs.has(entry.stateDir) ||
+        new Set(entry.pending.map((pending) => pending.profile)).size !== entry.pending.length ||
+        entry.pending.some(
+          (pending) =>
+            !typedPlan.namespaces
+              .find((namespace) => namespace.stateDir === entry.stateDir)
+              ?.profiles.some(
+                (expectation) => expectation.owner && expectation.profile === pending.profile,
+              ),
+        ),
+    ) ||
+    new Set(intents).size !== intents.length ||
+    intents.some((stateDir) => !stateDirs.has(stateDir)) ||
+    new Set(released).size !== released.length ||
+    released.some((stateDir) => !intents.includes(stateDir))
+  )
+    return false;
+  if (journal.status === "released" && released.length !== stateDirs.size) return false;
+  if (
+    (journal.status === "prepared" || journal.status === "reserved") &&
+    (intents.length > 0 || released.length > 0)
+  )
+    return false;
+  return true;
+}
+
+function isNamespaceReservation(value: unknown): value is NamespaceReservation {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const reservation = value as Record<string, unknown>;
   return (
-    journal.version === 1 &&
-    (journal.status === "prepared" ||
-      journal.status === "reserved" ||
-      journal.status === "released") &&
-    Array.isArray(journal.completed) &&
-    journal.completed.every((entry) => typeof entry === "string") &&
-    Array.isArray(journal.releasedNamespaces) &&
-    journal.releasedNamespaces.every((entry) => typeof entry === "string") &&
-    isPlan(plan)
+    typeof reservation.stateDir === "string" &&
+    isAbsolute(reservation.stateDir) &&
+    Array.isArray(reservation.pending) &&
+    reservation.pending.every((entry) => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+      const pending = entry as Record<string, unknown>;
+      return typeof pending.profile === "string" && isReceiptRevision(pending.revision);
+    })
   );
 }
 
@@ -579,12 +827,7 @@ function isPlan(value: unknown): value is RestoreBindingReconciliationPlan {
       if (typeof expectation.binding !== "object" || Array.isArray(expectation.binding))
         return false;
       const binding = expectation.binding as Record<string, unknown>;
-      if (
-        typeof binding.sha256 !== "string" ||
-        !/^[0-9a-f]{64}$/.test(binding.sha256) ||
-        typeof binding.backend !== "string"
-      )
-        return false;
+      if (!isReceiptRevision(binding.revision) || typeof binding.backend !== "string") return false;
       if (binding.target === null) return true;
       if (typeof binding.target !== "object" || Array.isArray(binding.target)) return false;
       const target = binding.target as Record<string, unknown>;
@@ -594,10 +837,41 @@ function isPlan(value: unknown): value is RestoreBindingReconciliationPlan {
         typeof target.backend === "string" &&
         typeof target.container === "string" &&
         Number.isSafeInteger(target.slot) &&
-        (target.receiptSha256 === null ||
-          (typeof target.receiptSha256 === "string" && /^[0-9a-f]{64}$/.test(target.receiptSha256)))
+        (target.receiptRevision === null || isReceiptRevision(target.receiptRevision))
       );
     });
+  });
+}
+
+function isReceiptRevision(value: unknown): value is ReceiptRevision {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const revision = value as Record<string, unknown>;
+  return (
+    typeof revision.sha256 === "string" &&
+    /^[0-9a-f]{64}$/.test(revision.sha256) &&
+    typeof revision.device === "string" &&
+    /^[0-9]+$/.test(revision.device) &&
+    typeof revision.inode === "string" &&
+    /^[0-9]+$/.test(revision.inode) &&
+    typeof revision.generation === "string" &&
+    /^[0-9]+$/.test(revision.generation) &&
+    typeof revision.changedNs === "string" &&
+    /^[0-9]+$/.test(revision.changedNs) &&
+    typeof revision.size === "string" &&
+    /^[0-9]+$/.test(revision.size) &&
+    typeof revision.modifiedNs === "string" &&
+    /^[0-9]+$/.test(revision.modifiedNs)
+  );
+}
+
+function reservationSubsetMatches(
+  pending: readonly { readonly profile: string; readonly revision: ReceiptRevision }[],
+  expected: readonly { readonly profile: string; readonly revision: ReceiptRevision }[],
+): boolean {
+  const byProfile = new Map(expected.map((entry) => [entry.profile, entry.revision]));
+  return pending.every((entry) => {
+    const revision = byProfile.get(entry.profile);
+    return revision !== undefined && sameReceiptRevision(entry.revision, revision);
   });
 }
 
@@ -659,42 +933,40 @@ async function writeJournal(path: string, journal: ReconciliationJournal): Promi
   }
 }
 
-async function archiveExact(source: string, destination: string, expectedSha256: string) {
-  const existing = await readRegularFile(destination);
+async function archiveExact(
+  source: string,
+  destination: string,
+  expectedRevision: ReceiptRevision,
+) {
+  const existing = await readReceipt(destination);
   if (existing !== undefined) {
-    if (digest(existing) !== expectedSha256)
+    if (!sameReceiptLineage(existing.revision, expectedRevision))
       throw changed(`archive receipt changed: ${destination}`);
-    const current = await readRegularFile(source);
+    const current = await readReceipt(source);
     if (current !== undefined) {
-      if (digest(current) !== expectedSha256) throw changed(`source receipt changed: ${source}`);
+      if (!sameReceiptRevision(current.revision, expectedRevision))
+        throw changed(`source receipt changed: ${source}`);
       await rm(source);
       await syncDirectory(dirname(source));
     }
     return;
   }
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+  const current = await readReceipt(source);
+  if (current === undefined || !sameReceiptRevision(current.revision, expectedRevision))
+    throw changed(`source receipt changed: ${source}`);
   await rename(source, destination);
-  await chmod(destination, 0o600);
+  const archived = await readReceipt(destination);
+  if (archived === undefined || !sameReceiptLineage(archived.revision, expectedRevision))
+    throw changed(`archived receipt identity changed: ${destination}`);
   await syncDirectory(dirname(destination));
   await syncDirectory(dirname(source));
 }
 
-async function requireArchived(path: string, expectedSha256: string): Promise<void> {
-  const source = await readRegularFile(path);
-  if (source === undefined || digest(source) !== expectedSha256)
+async function requireArchived(path: string, expectedRevision: ReceiptRevision): Promise<void> {
+  const receipt = await readReceipt(path);
+  if (receipt === undefined || !sameReceiptLineage(receipt.revision, expectedRevision))
     throw changed(`archived receipt is missing or changed: ${path}`);
-}
-
-async function readRegularFile(path: string): Promise<string | undefined> {
-  try {
-    const details = await lstat(path);
-    if (!details.isFile() || details.isSymbolicLink())
-      throw changed(`receipt is not a regular file: ${path}`);
-    return await readFile(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
 }
 
 function requireTarget(

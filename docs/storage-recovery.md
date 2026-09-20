@@ -167,7 +167,8 @@ agentbrowse backup restore --backend artbird \
 ```
 
 Review `bindingReconciliation` in the result. It assigns every manifest profile to
-exactly one namespace, shows the exact binding and target-receipt revisions, confirms
+exactly one namespace, shows the exact opened binding and target-receipt file identities
+and byte revisions, confirms
 the authenticated source and selected destination backends, and returns a
 `reconciliationDigest`. Applying requires the identical command without `--dry-run`
 and with `--expected-reconciliation-digest REVIEWED_SHA256`. A binding on another
@@ -177,10 +178,14 @@ session holding a manifest name stops before host mutation.
 The apply step archives exact old binding and target receipts under each namespace's
 `retired-bindings/restore-reconciliations/SET_DIGEST/`, publishes digest-bound restore
 reservations, and keeps a private reconciliation journal. It never selects or removes
-a receipt by name alone. Interrupted work retries with the same set and reviewed
-digest; completed retries are no-ops. Profiles with no prior binding are assigned to
-the primary namespace, while profiles found in an additional namespace remain owned
-there. Unrelated bindings are not part of the plan and remain untouched.
+a receipt by name or bytes alone. Interrupted work retries with the same set and
+reviewed digest; completed restore retries are no-ops. Release records intent before
+host cleanup and commits each namespace durably while all session, runtime allocation,
+and profile locks remain held. A fully released reconciliation is terminal and cannot
+retire a later binding, even if that binding has byte-identical content. Profiles with
+no prior binding are assigned to the primary namespace, while profiles found in an
+additional namespace remain owned there. Unrelated bindings are not part of the plan
+and remain untouched.
 
 Retry the same command after interruption. To abandon an incomplete restore, use the
 same set and identity with `--release-reservations`; the host first removes only

@@ -476,34 +476,39 @@ export async function runBackup(
     await withProviderSessionProfileExclusion(stateDir(env), profiles, async () => {
       await bindings.reserveRestore(profiles, selected.id, setDigest);
     });
-  const result = await invoke(
-    selected,
-    [
-      "restore",
-      "--set",
-      parsed.set,
-      ...(parsed.identity === undefined ? [] : ["--identity", parsed.identity]),
-      ...(parsed.allowUnencrypted ? ["--allow-unencrypted"] : []),
-      "--expected-set-digest",
-      parsed.expectedSetDigest,
-      ...(parsed.releaseReservations ? ["--release"] : []),
-      ...(parsed.dryRun ? ["--dry-run"] : []),
-    ],
-    runner,
-  );
+  const restoreArguments = [
+    "restore",
+    "--set",
+    parsed.set,
+    ...(parsed.identity === undefined ? [] : ["--identity", parsed.identity]),
+    ...(parsed.allowUnencrypted ? ["--allow-unencrypted"] : []),
+    "--expected-set-digest",
+    parsed.expectedSetDigest,
+    ...(parsed.releaseReservations ? ["--release"] : []),
+    ...(parsed.dryRun ? ["--dry-run"] : []),
+  ];
+  const invokeRestore = async () => {
+    const value = await invoke(selected, restoreArguments, runner);
+    if (
+      parsed.releaseReservations &&
+      (!Array.isArray(value.released) ||
+        value.released.length !== profiles.length ||
+        value.released.some((name, index) => name !== profiles[index]))
+    )
+      throw new CliError(
+        "profile_backup_failed",
+        `${selected.id}: restore helper released an unexpected profile set`,
+      );
+    return value;
+  };
+  const result =
+    parsed.releaseReservations && reconciliation !== undefined
+      ? await releaseRestoreBindingReconciliation(reconciliation, invokeRestore)
+      : await invokeRestore();
   if (!parsed.dryRun) {
     if (parsed.releaseReservations) {
-      if (
-        !Array.isArray(result.released) ||
-        result.released.length !== profiles.length ||
-        result.released.some((name, index) => name !== profiles[index])
-      )
-        throw new CliError(
-          "profile_backup_failed",
-          `${selected.id}: restore helper released an unexpected profile set`,
-        );
-      if (reconciliation !== undefined) await releaseRestoreBindingReconciliation(reconciliation);
-      else await bindings.releaseRestore(profiles, selected.id, setDigest);
+      if (reconciliation === undefined)
+        await bindings.releaseRestore(profiles, selected.id, setDigest);
       return {
         ...result,
         bindingsReleased: profiles,

@@ -1,6 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +17,7 @@ import { backupHostCommand, runBackup } from "../cli/backup.ts";
 import type { BrowserFleet } from "../cli/fleet.ts";
 import { renderTargetConfig, targetFor } from "../cli/model.ts";
 import { ProfileBindingStore } from "../cli/profile-binding.ts";
+import { applyRestoreBindingReconciliation } from "../cli/restore-reconciliation.ts";
 import { ProviderSessions } from "../cli/sessions.ts";
 import type { HypemanBackendConfig } from "../config/deployment.ts";
 
@@ -539,7 +549,16 @@ test("restore reconciliation plans exact cross-namespace ownership and preserves
   const second = await runBackup(parsed, env, runner);
   const plan = first.bindingReconciliation as {
     reconciliationDigest: string;
-    namespaces: { stateDir: string; profiles: { owner: boolean; binding: unknown }[] }[];
+    namespaces: {
+      stateDir: string;
+      profiles: {
+        owner: boolean;
+        binding: null | {
+          revision: { sha256: string; device: string; inode: string; generation: string };
+          target: null | { receiptRevision: null | { inode: string; generation: string } };
+        };
+      }[];
+    }[];
   };
   expect(plan.reconciliationDigest).toBe(
     (second.bindingReconciliation as { reconciliationDigest: string }).reconciliationDigest,
@@ -547,7 +566,17 @@ test("restore reconciliation plans exact cross-namespace ownership and preserves
   expect(plan.namespaces).toHaveLength(2);
   expect(plan.namespaces[0]!.profiles.filter((entry) => entry.owner)).toHaveLength(23);
   expect(plan.namespaces[1]!.profiles.filter((entry) => entry.owner)).toHaveLength(1);
-  expect(plan.namespaces[1]!.profiles.find((entry) => entry.owner)?.binding).not.toBeNull();
+  const demoBinding = plan.namespaces[1]!.profiles.find((entry) => entry.owner)?.binding;
+  expect(demoBinding?.revision).toMatchObject({
+    sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    device: expect.stringMatching(/^[0-9]+$/),
+    inode: expect.stringMatching(/^[0-9]+$/),
+    generation: expect.stringMatching(/^[0-9]+$/),
+  });
+  expect(demoBinding?.target?.receiptRevision).toMatchObject({
+    inode: expect.stringMatching(/^[0-9]+$/),
+    generation: expect.stringMatching(/^[0-9]+$/),
+  });
   expect(await demo.read("legacy-demo")).toMatchObject({ backend: "hypeman-artbird" });
   for (let index = 0; index < 15; index += 1)
     expect(await main.read(`local-${String(index).padStart(2, "0")}`)).toMatchObject({
@@ -784,6 +813,62 @@ test("restore reconciliation refuses a changed binding revision before host muta
   expect(existsSync(join(directory, "state/restore-reconciliations"))).toBe(false);
 });
 
+test("restore reconciliation refuses a byte-identical replacement target receipt", async () => {
+  const { directory, env } = fixture();
+  const digest = "9".repeat(64);
+  const store = new ProfileBindingStore(join(directory, "state"));
+  const target = targetFor("research-target", 45, {
+    profile: "research",
+    backend: "artbird",
+    container: "old-container",
+  });
+  await store.bindTarget(target);
+  mkdirSync(env.AGENTBROWSE_RUNTIME_DIR, { recursive: true });
+  const targetPath = join(env.AGENTBROWSE_RUNTIME_DIR, `${target.name}.json`);
+  const source = renderTargetConfig(target);
+  writeFileSync(targetPath, source);
+  const parsed = {
+    command: "backup" as const,
+    action: "restore" as const,
+    backend: "artbird",
+    set: "/backups/current",
+    identity: "/keys/current.agekey",
+    allowUnencrypted: false,
+    expectedSetDigest: digest,
+    releaseReservations: false,
+    reconcileFromBackend: "artbird",
+    json: true,
+  };
+  const report = JSON.stringify({
+    setDigest: digest,
+    sourceBackend: "artbird",
+    profiles: [{ profile: "research" }],
+  });
+  const dry = await runBackup({ ...parsed, dryRun: true }, env, async (command) => ({
+    exitCode: 0,
+    stdout: isHostCommand(command, "inspect") ? report : '{"dryRun":true}',
+    stderr: "",
+  }));
+  const expectedReconciliationDigest = (
+    dry.bindingReconciliation as { reconciliationDigest: string }
+  ).reconciliationDigest;
+  const displaced = join(env.AGENTBROWSE_RUNTIME_DIR, "displaced-target.json");
+  renameSync(targetPath, displaced);
+  writeFileSync(targetPath, source);
+  expect(statSync(targetPath).ino).not.toBe(statSync(displaced).ino);
+
+  let hostRestoreCalls = 0;
+  await expect(
+    runBackup({ ...parsed, dryRun: false, expectedReconciliationDigest }, env, async (command) => {
+      if (!isHostCommand(command, "inspect")) hostRestoreCalls += 1;
+      return { exitCode: 0, stdout: report, stderr: "" };
+    }),
+  ).rejects.toMatchObject({ code: "profile_backup_failed" });
+  expect(hostRestoreCalls).toBe(0);
+  expect(readFileSync(targetPath, "utf8")).toBe(source);
+  expect(await store.read("research")).toMatchObject({ target: { name: target.name } });
+});
+
 test("restore reconciliation resumes after host failure and a completed re-run is a no-op", async () => {
   const { directory, env } = fixture();
   const digest = "4".repeat(64);
@@ -901,22 +986,148 @@ test("reconciled restore reservation release retains archived history and is ide
     isHostCommand(command, "inspect")
       ? { exitCode: 0, stdout: report, stderr: "" }
       : { exitCode: 0, stdout: '{"released":["research"]}', stderr: "" };
+  await expect(
+    runBackup(release, env, async (command) =>
+      isHostCommand(command, "inspect")
+        ? { exitCode: 0, stdout: report, stderr: "" }
+        : { exitCode: 1, stdout: "", stderr: "synthetic release interruption" },
+    ),
+  ).rejects.toMatchObject({ code: "profile_backup_failed" });
+  const journalPath = join(directory, "state/restore-reconciliations", `${digest}.json`);
+  expect(JSON.parse(readFileSync(journalPath, "utf8"))).toMatchObject({
+    status: "releasing",
+    releaseIntents: [join(directory, "state")],
+  });
+  expect(await store.read("research")).toMatchObject({ pendingRestore: digest });
   await runBackup(release, env, releaseRunner);
+  const interrupted = JSON.parse(readFileSync(journalPath, "utf8"));
+  interrupted.status = "releasing";
+  interrupted.releasedNamespaces = [];
+  writeFileSync(journalPath, `${JSON.stringify(interrupted, null, 2)}\n`);
   await runBackup(release, env, releaseRunner);
   expect(await store.read("research")).toBeUndefined();
-  expect(
-    existsSync(
-      join(
-        directory,
-        "state/retired-bindings/restore-reconciliations",
-        digest,
-        "profiles/research.json",
-      ),
+  const archived = join(
+    directory,
+    "state/retired-bindings/restore-reconciliations",
+    digest,
+    "profiles/research.json",
+  );
+  expect(existsSync(archived)).toBe(true);
+  expect(JSON.parse(readFileSync(journalPath, "utf8"))).toMatchObject({ status: "released" });
+
+  await store.bindProfile("research", "artbird");
+  expect(readFileSync(store.bindingPath("research"), "utf8")).toBe(readFileSync(archived, "utf8"));
+  expect(statSync(store.bindingPath("research")).ino).not.toBe(statSync(archived).ino);
+  let hostRestoreCalls = 0;
+  await expect(
+    runBackup(
+      {
+        ...base,
+        releaseReservations: false,
+        dryRun: false,
+        expectedReconciliationDigest,
+      },
+      env,
+      async (command) => {
+        if (!isHostCommand(command, "inspect")) hostRestoreCalls += 1;
+        return { exitCode: 0, stdout: report, stderr: "" };
+      },
     ),
-  ).toBe(true);
-  expect(
-    JSON.parse(
-      readFileSync(join(directory, "state/restore-reconciliations", `${digest}.json`), "utf8"),
+  ).rejects.toMatchObject({ code: "profile_backup_failed" });
+  expect(hostRestoreCalls).toBe(0);
+  expect(readFileSync(store.bindingPath("research"), "utf8")).toBe(readFileSync(archived, "utf8"));
+
+  const secondCrash = JSON.parse(readFileSync(journalPath, "utf8"));
+  secondCrash.status = "releasing";
+  secondCrash.releasedNamespaces = [];
+  writeFileSync(journalPath, `${JSON.stringify(secondCrash, null, 2)}\n`);
+  let hostReleaseCalls = 0;
+  await expect(
+    runBackup(release, env, async (command) => {
+      if (!isHostCommand(command, "inspect")) hostReleaseCalls += 1;
+      return isHostCommand(command, "inspect")
+        ? { exitCode: 0, stdout: report, stderr: "" }
+        : { exitCode: 0, stdout: '{"released":["research"]}', stderr: "" };
+    }),
+  ).rejects.toMatchObject({ code: "profile_backup_failed" });
+  expect(hostReleaseCalls).toBe(0);
+  expect(await store.read("research")).toMatchObject({ backend: "artbird", target: null });
+});
+
+test("release safely abandons a partially prepared multi-namespace reconciliation", async () => {
+  const { directory, env } = fixture();
+  const digest = "8".repeat(64);
+  const mainState = join(directory, "state");
+  const demoState = join(directory, "demo-state");
+  const main = new ProfileBindingStore(mainState);
+  const demo = new ProfileBindingStore(demoState);
+  await main.bindProfile("alpha", "artbird");
+  await demo.bindProfile("beta", "artbird");
+  const profiles = ["alpha", "beta"];
+  const base = {
+    command: "backup" as const,
+    action: "restore" as const,
+    backend: "artbird",
+    set: "/backups/current",
+    identity: "/keys/current.agekey",
+    allowUnencrypted: false,
+    expectedSetDigest: digest,
+    reconcileFromBackend: "artbird",
+    bindingStateDirs: [demoState],
+    json: true,
+  };
+  const report = JSON.stringify({
+    setDigest: digest,
+    sourceBackend: "artbird",
+    profiles: profiles.map((profile) => ({ profile })),
+  });
+  const dry = await runBackup(
+    { ...base, releaseReservations: false, dryRun: true },
+    env,
+    async (command) => ({
+      exitCode: 0,
+      stdout: isHostCommand(command, "inspect") ? report : '{"dryRun":true}',
+      stderr: "",
+    }),
+  );
+  const expectedReconciliationDigest = (
+    dry.bindingReconciliation as { reconciliationDigest: string }
+  ).reconciliationDigest;
+
+  await expect(
+    applyRestoreBindingReconciliation(
+      profiles,
+      "artbird",
+      "artbird",
+      digest,
+      mainState,
+      [demoState],
+      env.AGENTBROWSE_RUNTIME_DIR,
+      expectedReconciliationDigest,
+      {
+        beforeNamespace: (_stateDir, index) => {
+          if (index === 1) throw new Error("synthetic namespace-boundary crash");
+        },
+      },
     ),
-  ).toMatchObject({ status: "released" });
+  ).rejects.toThrow("synthetic namespace-boundary crash");
+  expect(await main.read("alpha")).toMatchObject({ pendingRestore: digest });
+  expect(await demo.read("beta")).toMatchObject({ backend: "artbird", target: null });
+
+  const release = {
+    ...base,
+    releaseReservations: true,
+    dryRun: false,
+    expectedReconciliationDigest,
+  };
+  await runBackup(release, env, async (command) =>
+    isHostCommand(command, "inspect")
+      ? { exitCode: 0, stdout: report, stderr: "" }
+      : { exitCode: 0, stdout: JSON.stringify({ released: profiles }), stderr: "" },
+  );
+  expect(await main.read("alpha")).toBeUndefined();
+  expect(await demo.read("beta")).toMatchObject({ backend: "artbird", target: null });
+  expect(
+    JSON.parse(readFileSync(join(mainState, "restore-reconciliations", `${digest}.json`), "utf8")),
+  ).toMatchObject({ status: "released", releasedNamespaces: [demoState, mainState].sort() });
 });
