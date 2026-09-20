@@ -418,7 +418,26 @@ export async function runBackup(
     runner,
   );
   const setDigest = inspect.setDigest;
-  const sourceBackend = inspect.sourceBackend;
+  const source = inspect.source;
+  const sourceRecord =
+    source !== null && typeof source === "object" ? (source as Record<string, unknown>) : null;
+  const nestedSourceBackend =
+    sourceRecord !== null && typeof sourceRecord.backend === "string"
+      ? sourceRecord.backend
+      : undefined;
+  const legacySourceBackend =
+    typeof inspect.sourceBackend === "string" ? inspect.sourceBackend : undefined;
+  if (
+    nestedSourceBackend !== undefined &&
+    legacySourceBackend !== undefined &&
+    nestedSourceBackend !== legacySourceBackend
+  ) {
+    throw new CliError(
+      "profile_backup_failed",
+      `${selected.id}: inspected backup source metadata conflicts`,
+    );
+  }
+  const sourceBackend = nestedSourceBackend ?? legacySourceBackend;
   const profileEntries = inspect.profiles;
   if (
     typeof setDigest !== "string" ||

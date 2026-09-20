@@ -556,7 +556,7 @@ test("restore reconciliation plans exact cross-namespace ownership and preserves
       isHostCommand(command, "inspect")
         ? {
             setDigest: digest,
-            sourceBackend: "artbird",
+            source: { backend: "artbird" },
             destinationHostIdentity: DESTINATION_HOST_IDENTITY,
             profiles: profiles.map((profile) => ({ profile })),
           }
@@ -634,7 +634,7 @@ test("restore reconciliation plans exact cross-namespace ownership and preserves
         isHostCommand(command, "inspect")
           ? {
               setDigest: legacyDigest,
-              sourceBackend: "hypeman-artbird",
+              source: { backend: "hypeman-artbird" },
               destinationHostIdentity: DESTINATION_HOST_IDENTITY,
               profiles: [{ profile: "legacy-demo" }],
             }
@@ -719,7 +719,7 @@ test("restore reconciliation archives exact collisions and keeps bindings in the
         isHostCommand(command, "inspect")
           ? {
               setDigest: digest,
-              sourceBackend: "artbird",
+              source: { backend: "artbird" },
               destinationHostIdentity: DESTINATION_HOST_IDENTITY,
               profiles: profiles.map((profile) => ({ profile })),
             }
@@ -779,7 +779,7 @@ test("restore reconciliation is fenced to the reviewed destination host identity
   const report = (destinationHostIdentity: string) =>
     JSON.stringify({
       setDigest: digest,
-      sourceBackend: "artbird",
+      source: { backend: "artbird" },
       destinationHostIdentity,
       profiles: [{ profile: "research" }],
     });
@@ -828,7 +828,7 @@ test("restore reconciliation refuses a provider-session receipt created after th
   };
   const report = JSON.stringify({
     setDigest: digest,
-    sourceBackend: "artbird",
+    source: { backend: "artbird" },
     destinationHostIdentity: DESTINATION_HOST_IDENTITY,
     profiles: [{ profile: "research" }],
   });
@@ -883,7 +883,7 @@ test("restore reconciliation refuses a changed binding revision before host muta
   };
   const report = JSON.stringify({
     setDigest: digest,
-    sourceBackend: "artbird",
+    source: { backend: "artbird" },
     destinationHostIdentity: DESTINATION_HOST_IDENTITY,
     profiles: [{ profile: "research" }],
   });
@@ -944,7 +944,7 @@ test("restore reconciliation refuses a byte-identical replacement target receipt
   };
   const report = JSON.stringify({
     setDigest: digest,
-    sourceBackend: "artbird",
+    source: { backend: "artbird" },
     destinationHostIdentity: DESTINATION_HOST_IDENTITY,
     profiles: [{ profile: "research" }],
   });
@@ -992,7 +992,7 @@ test("v1 reserved reconciliation upgrades through reviewed retry and preserves i
   };
   const report = JSON.stringify({
     setDigest: digest,
-    sourceBackend: "artbird",
+    source: { backend: "artbird" },
     destinationHostIdentity: DESTINATION_HOST_IDENTITY,
     profiles: [{ profile: "research" }],
   });
@@ -1096,7 +1096,7 @@ test("reconciled restore reservation release retains archived history and is ide
   };
   const report = JSON.stringify({
     setDigest: digest,
-    sourceBackend: "artbird",
+    source: { backend: "artbird" },
     destinationHostIdentity: DESTINATION_HOST_IDENTITY,
     profiles: [{ profile: "research" }],
   });
@@ -1253,7 +1253,7 @@ test("release safely abandons a partially prepared multi-namespace reconciliatio
   };
   const report = JSON.stringify({
     setDigest: digest,
-    sourceBackend: "artbird",
+    source: { backend: "artbird" },
     destinationHostIdentity: DESTINATION_HOST_IDENTITY,
     profiles: profiles.map((profile) => ({ profile })),
   });
