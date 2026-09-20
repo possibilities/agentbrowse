@@ -217,6 +217,21 @@ class HostSafetyTests(unittest.TestCase):
         self.assertIn(("POST", "/instances/stopped/start", {}), calls)
         run.assert_called_once_with(sys.executable, Path("/owned/helper"), "network-sync")
 
+    def test_host_identity_is_created_once_and_refuses_unsafe_replacement(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            api = {"write_private": host.write_private}
+            first = installer.ensure_host_identity(api, root)
+            second = installer.ensure_host_identity(api, root)
+            self.assertEqual(first, second)
+            self.assertRegex(first, installer.HOST_IDENTITY)
+            self.assertEqual((root / "host-identity").stat().st_mode & 0o777, 0o600)
+
+            (root / "host-identity").unlink()
+            (root / "host-identity").symlink_to(root / "elsewhere")
+            with self.assertRaisesRegex(RuntimeError, "unsafe"):
+                installer.ensure_host_identity(api, root)
+
     def test_caddy_cleanup_requires_exact_owned_orphan(self):
         root = Path("/home/operator/.local/share/ab-hypeman")
         command = "/opt/homebrew/bin/caddy run --config " + str(root / "data/caddy/config.json")
@@ -234,6 +249,11 @@ class HostSafetyTests(unittest.TestCase):
             root = Path(d)
             (root / "OWNED").write_text(host.MARKER)
             (root / "token").symlink_to(root / "unrelated")
+            with self.assertRaisesRegex(RuntimeError, "unsafe Hypeman state"):
+                host.owned(root)
+
+            (root / "token").unlink()
+            (root / "host-identity").symlink_to(root / "unrelated")
             with self.assertRaisesRegex(RuntimeError, "unsafe Hypeman state"):
                 host.owned(root)
 

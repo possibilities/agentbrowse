@@ -168,12 +168,13 @@ agentbrowse backup restore --backend artbird \
 
 Review `bindingReconciliation` in the result. It assigns every manifest profile to
 exactly one namespace, shows the exact opened binding and target-receipt file identities
-and byte revisions, confirms
-the authenticated source and selected destination backends, and returns a
-`reconciliationDigest`. Applying requires the identical command without `--dry-run`
-and with `--expected-reconciliation-digest REVIEWED_SHA256`. A binding on another
-backend, a second binding for the same profile, a changed receipt, or any provider
-session holding a manifest name stops before host mutation.
+and byte revisions, confirms the authenticated source and selected destination
+backends, records the installer-created identity of the rebuilt destination host, and
+returns a `reconciliationDigest`. Applying requires the identical command without
+`--dry-run` and with `--expected-reconciliation-digest REVIEWED_SHA256`. A different
+destination host, a binding on another backend, a second binding for the same profile,
+a changed receipt, or any provider session holding a manifest name stops before host
+mutation.
 
 The apply step archives exact old binding and target receipts under each namespace's
 `retired-bindings/restore-reconciliations/SET_DIGEST/`, publishes digest-bound restore

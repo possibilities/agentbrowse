@@ -55,6 +55,12 @@ host or VM service cannot currently be reached. It is the only failure
 class that permits provisioning to continue to the next configured backend.
 _Avoid: retryable error, generic fallback error._
 
+**Hypeman host identity** — The private stable UUID created in one owned Hypeman
+state root by the AgentBrowse host installer. Ordinary upgrades preserve it; a
+rebuilt state root receives a new UUID. Host-loss reconciliation binds its reviewed
+plan to this identity as well as the Browser provider's configured backend ID.
+_Avoid: backend ID, machine ID, credential._
+
 **Backend-bound target receipt** — The versioned runtime record that binds one
 Browser target to its Browser profile, backend identity, exact generated container
 identity, target name, and slot. Cleanup routes through that backend and rechecks

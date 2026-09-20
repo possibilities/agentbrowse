@@ -435,6 +435,18 @@ export async function runBackup(
   const bindings = new ProfileBindingStore(stateDir(env));
   let reconciliation: RestoreBindingReconciliationPlan | undefined;
   if (parsed.reconcileFromBackend !== undefined) {
+    const destinationHostIdentity = inspect.destinationHostIdentity;
+    if (
+      typeof destinationHostIdentity !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+        destinationHostIdentity,
+      )
+    )
+      throw new CliError(
+        "profile_backup_failed",
+        `${selected.id}: profile backup helper omitted its destination host identity`,
+        "install the reviewed AgentBrowse host tooling on the rebuilt destination before reconciliation",
+      );
     if (sourceBackend !== parsed.reconcileFromBackend)
       throw new CliError(
         "profile_backup_failed",
@@ -446,6 +458,7 @@ export async function runBackup(
           profiles,
           parsed.reconcileFromBackend,
           selected.id,
+          destinationHostIdentity,
           setDigest,
           stateDir(env),
           parsed.bindingStateDirs ?? [],
@@ -459,6 +472,7 @@ export async function runBackup(
             profiles,
             parsed.reconcileFromBackend,
             selected.id,
+            destinationHostIdentity,
             setDigest,
             parsed.expectedReconciliationDigest!,
           )
@@ -466,6 +480,7 @@ export async function runBackup(
             profiles,
             parsed.reconcileFromBackend,
             selected.id,
+            destinationHostIdentity,
             setDigest,
             stateDir(env),
             parsed.bindingStateDirs ?? [],
@@ -484,6 +499,9 @@ export async function runBackup(
     ...(parsed.allowUnencrypted ? ["--allow-unencrypted"] : []),
     "--expected-set-digest",
     parsed.expectedSetDigest,
+    ...(reconciliation === undefined
+      ? []
+      : ["--expected-host-identity", reconciliation.destinationHostIdentity]),
     ...(parsed.releaseReservations ? ["--release"] : []),
     ...(parsed.dryRun ? ["--dry-run"] : []),
   ];

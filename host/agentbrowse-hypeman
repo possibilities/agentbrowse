@@ -42,7 +42,7 @@ def run(args, **kwargs):
 def owned(root):
     if root.is_symlink() or not root.is_dir() or root.stat().st_uid != os.geteuid():
         raise RuntimeError("Hypeman root has unsafe ownership")
-    for name in ("OWNED", "token", "config.yaml", "connection.json", "release.json", "service.plist", "host-install.json", "pending-host-install.json"):
+    for name in ("OWNED", "token", "config.yaml", "connection.json", "release.json", "service.plist", "host-identity", "host-install.json", "pending-host-install.json"):
         path = root / name
         if path.is_symlink() or (path.exists() and (not path.is_file() or path.stat().st_uid != os.geteuid())):
             raise RuntimeError("unsafe Hypeman state file: " + name)

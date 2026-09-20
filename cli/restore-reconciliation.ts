@@ -22,10 +22,11 @@ import {
 } from "./sessions.ts";
 
 export interface RestoreBindingReconciliationPlan {
-  readonly version: 1;
+  readonly version: 2;
   readonly setDigest: string;
   readonly sourceBackend: string;
   readonly destinationBackend: string;
+  readonly destinationHostIdentity: string;
   readonly runtimeDir: string;
   readonly runtimeIdentity: DirectoryIdentity | null;
   readonly namespaces: readonly RestoreBindingNamespacePlan[];
@@ -85,6 +86,7 @@ export async function planRestoreBindingReconciliation(
   profiles: readonly string[],
   sourceBackend: string,
   destinationBackend: string,
+  destinationHostIdentity: string,
   setDigest: string,
   primaryStateDir: string,
   additionalStateDirs: readonly string[],
@@ -96,6 +98,7 @@ export async function planRestoreBindingReconciliation(
     profiles,
     sourceBackend,
     destinationBackend,
+    destinationHostIdentity,
     setDigest,
     stateDirs,
     runtimeDir,
@@ -106,6 +109,7 @@ export async function applyRestoreBindingReconciliation(
   profiles: readonly string[],
   sourceBackend: string,
   destinationBackend: string,
+  destinationHostIdentity: string,
   setDigest: string,
   primaryStateDir: string,
   additionalStateDirs: readonly string[],
@@ -123,6 +127,7 @@ export async function applyRestoreBindingReconciliation(
           profiles,
           sourceBackend,
           destinationBackend,
+          destinationHostIdentity,
           setDigest,
           stateDirs,
           runtimeDir,
@@ -137,6 +142,7 @@ export async function applyRestoreBindingReconciliation(
         profiles,
         sourceBackend,
         destinationBackend,
+        destinationHostIdentity,
         setDigest,
         stateDirs,
         runtimeDir,
@@ -159,6 +165,7 @@ export async function applyRestoreBindingReconciliation(
         profiles,
         sourceBackend,
         destinationBackend,
+        destinationHostIdentity,
         setDigest,
         stateDirs,
         runtimeDir,
@@ -231,6 +238,7 @@ export async function loadRestoreBindingReconciliation(
   profiles: readonly string[],
   sourceBackend: string,
   destinationBackend: string,
+  destinationHostIdentity: string,
   setDigest: string,
   expectedReconciliationDigest: string,
 ): Promise<RestoreBindingReconciliationPlan> {
@@ -241,6 +249,7 @@ export async function loadRestoreBindingReconciliation(
     profiles,
     sourceBackend,
     destinationBackend,
+    destinationHostIdentity,
     setDigest,
     namespacePaths(primaryStateDir, additionalStateDirs),
     runtimeDir,
@@ -449,6 +458,7 @@ async function buildPlanLocked(
   profiles: readonly string[],
   sourceBackend: string,
   destinationBackend: string,
+  destinationHostIdentity: string,
   setDigest: string,
   stateDirs: readonly string[],
   runtimeDir: string,
@@ -495,10 +505,11 @@ async function buildPlanLocked(
   }
 
   const base = {
-    version: 1 as const,
+    version: 2 as const,
     setDigest,
     sourceBackend,
     destinationBackend,
+    destinationHostIdentity,
     runtimeDir,
     runtimeIdentity:
       options === undefined ? await optionalDirectoryIdentity(runtimeDir) : options.runtimeIdentity,
@@ -658,6 +669,7 @@ function requireMatchingOperation(
   profiles: readonly string[],
   sourceBackend: string,
   destinationBackend: string,
+  destinationHostIdentity: string,
   setDigest: string,
   stateDirs: readonly string[],
   runtimeDir: string,
@@ -665,6 +677,7 @@ function requireMatchingOperation(
   if (
     plan.sourceBackend !== sourceBackend ||
     plan.destinationBackend !== destinationBackend ||
+    plan.destinationHostIdentity !== destinationHostIdentity ||
     plan.setDigest !== setDigest ||
     plan.runtimeDir !== runtimeDir ||
     JSON.stringify(plan.namespaces.map((entry) => entry.stateDir)) !== JSON.stringify(stateDirs) ||
@@ -793,11 +806,15 @@ function isPlan(value: unknown): value is RestoreBindingReconciliationPlan {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const plan = value as Record<string, unknown>;
   if (
-    plan.version !== 1 ||
+    plan.version !== 2 ||
     typeof plan.setDigest !== "string" ||
     !/^[0-9a-f]{64}$/.test(plan.setDigest) ||
     typeof plan.sourceBackend !== "string" ||
     typeof plan.destinationBackend !== "string" ||
+    typeof plan.destinationHostIdentity !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      plan.destinationHostIdentity,
+    ) ||
     typeof plan.runtimeDir !== "string" ||
     !isAbsolute(plan.runtimeDir) ||
     !(plan.runtimeIdentity === null || isDirectoryIdentity(plan.runtimeIdentity)) ||

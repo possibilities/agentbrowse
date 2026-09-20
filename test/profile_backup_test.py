@@ -9,12 +9,17 @@ import unittest
 
 SOURCE = Path(__file__).resolve().parents[1] / "host/profile-backup.py"
 BACKUP = runpy.run_path(str(SOURCE))
+HOST_IDENTITY = "018f5f68-87a7-7e4b-9cab-0123456789ab"
 
 
 class FakeHypeman:
     def __init__(self, root, backend, volumes=None, instances=None):
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
+        identity = self.root / "host-identity"
+        if not identity.exists():
+            identity.write_text(HOST_IDENTITY + "\n")
+            identity.chmod(0o600)
         self.backend = backend
         self.volumes = list(volumes or [])
         self.instances = list(instances or [])
@@ -275,8 +280,15 @@ class ProfileBackupTest(unittest.TestCase):
         destination = FakeHypeman(destination_root, "destination")
         restored = BACKUP["restore"](
             destination.api(), destination_root, "destination", backup_set, None, True, False,
-            BACKUP["inspect_set"](backup_set, None, True)["setDigest"]
+            BACKUP["inspect_set"](backup_set, None, True)["setDigest"], False, HOST_IDENTITY
         )
+        self.assertEqual(restored["destinationHostIdentity"], HOST_IDENTITY)
+        with self.assertRaisesRegex(RuntimeError, "host identity changed"):
+            BACKUP["restore"](
+                destination.api(), destination_root, "destination", backup_set, None, True,
+                True, manifest["setDigest"], False,
+                "018f5f68-87a7-7e4b-9cab-ba9876543210"
+            )
         self.assertEqual(restored["complete"], ["research"])
         self.assertNotEqual(destination.volumes[0]["id"], volume["id"])
         metadata = json.loads(
@@ -300,7 +312,7 @@ class ProfileBackupTest(unittest.TestCase):
         receipt.write_text(json.dumps(interrupted))
         repeated = BACKUP["restore"](
             destination.api(), destination_root, "destination", backup_set, None, True, False,
-            BACKUP["inspect_set"](backup_set, None, True)["setDigest"]
+            BACKUP["inspect_set"](backup_set, None, True)["setDigest"], False, HOST_IDENTITY
         )
         self.assertEqual(repeated["complete"], ["research"])
         self.assertEqual(len(destination.volumes), 1)

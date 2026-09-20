@@ -16,12 +16,18 @@ binding's profile, backend, target name, container identity, and slot. Profiles 
 a prior binding belong to the primary namespace. Bindings whose names are outside the
 manifest are never candidates.
 
-The canonical plan includes the set digest, source and destination backends, runtime
-directory, state namespace paths, ownership, receipt revisions, and observed target
-identity. Its `reconciliationDigest` is the mutation fence. Apply requires that exact
-digest, rechecks the plan while holding every namespace's provider-session registry
-lock and the sorted Profile binding locks, and stops before host mutation on drift or
-any session receipt holding a manifest name.
+The host installer creates one private, stable Hypeman host identity in the state
+root. A wipe and reinstall therefore creates a new identity while ordinary AgentBrowse
+upgrades preserve it. The restore helper returns that destination identity during
+inspect and requires the same identity on restore and release.
+
+The canonical plan includes the set digest, source and destination backends,
+destination host identity, runtime directory, state namespace paths, ownership,
+receipt revisions, and observed target identity. Its `reconciliationDigest` is the
+mutation fence. Apply requires that exact digest, rechecks the plan while holding every
+namespace's provider-session registry lock and the sorted Profile binding locks, and
+stops before host mutation on host replacement, receipt drift, or any session receipt
+holding a manifest name.
 
 Exact old receipts move into private per-set archives before digest-bound restore
 reservations replace them. Immediately before each archive, the locked operation

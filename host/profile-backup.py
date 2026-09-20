@@ -33,6 +33,7 @@ PROFILE_SCHEMA_VERSION = "1"
 PROFILE = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 BACKEND = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 VOLUME_ID = re.compile(r"[A-Za-z0-9_-]+\Z")
+HOST_IDENTITY = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 CHUNK_BYTES = 1024 * 1024
 SAMPLE_CHUNKS = 16
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -160,6 +161,48 @@ def fingerprint(path):
         "mtimeNs": details.st_mtime_ns,
         "ctimeNs": details.st_ctime_ns,
     }
+
+
+def host_identity(root, required=False):
+    path = root / "host-identity"
+    assert_no_symlink_components(path, allow_missing=not required)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        if required:
+            raise RuntimeError("Hypeman host identity is missing")
+        return None
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_uid != root.stat().st_uid
+        ):
+            raise RuntimeError("Hypeman host identity is not a private owned regular file")
+        encoded = os.read(descriptor, 129)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = os.lstat(path)
+    if (
+        len(encoded) > 128
+        or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise RuntimeError("Hypeman host identity changed while reading")
+    identity = encoded.decode().strip()
+    if not HOST_IDENTITY.fullmatch(identity):
+        raise RuntimeError("Hypeman host identity is invalid")
+    return identity
+
+
+def require_host_identity(root, expected):
+    observed = host_identity(root, required=expected is not None)
+    if expected is not None and observed != expected:
+        raise RuntimeError("destination Hypeman host identity changed")
+    return observed
 
 
 def executable(name, env_name=None):
@@ -1099,18 +1142,21 @@ def staging_name(profile, set_digest):
 
 
 def restore(api, root, backend, source, identity, allow_unencrypted, dry_run,
-            expected_set_digest=None, release=False):
+            expected_set_digest=None, release=False, expected_host_identity=None):
+    api["owned"](root)
+    destination_host_identity = require_host_identity(root, expected_host_identity)
     assert_no_symlink_components(root)
     if dry_run:
         return restore_locked(api, root, backend, source, identity, allow_unencrypted,
-                              True, expected_set_digest, False)
+                              True, expected_set_digest, False, destination_host_identity)
     with operation_lock(root / "profile-restores" / ".restore.lock"):
+        require_host_identity(root, destination_host_identity)
         return restore_locked(api, root, backend, source, identity, allow_unencrypted,
-                              dry_run, expected_set_digest, release)
+                              dry_run, expected_set_digest, release, destination_host_identity)
 
 
 def restore_locked(api, root, backend, source, identity, allow_unencrypted, dry_run,
-                   expected_set_digest, release):
+                   expected_set_digest, release, destination_host_identity):
     if not expected_set_digest:
         raise RuntimeError("restore requires an externally retained --expected-set-digest")
     manifest = inspect_set(source, identity, allow_unencrypted, expected_set_digest)
@@ -1196,6 +1242,7 @@ def restore_locked(api, root, backend, source, identity, allow_unencrypted, dry_
         "source": str(source),
         "sourceBackend": manifest["source"]["backend"],
         "destinationBackend": backend,
+        "destinationHostIdentity": destination_host_identity,
         "profiles": plans,
         "dryRun": dry_run,
         "setDigest": set_digest,
@@ -1348,6 +1395,7 @@ def parser():
     restore_parser.add_argument("--identity")
     restore_parser.add_argument("--allow-unencrypted", action="store_true")
     restore_parser.add_argument("--expected-set-digest", required=True)
+    restore_parser.add_argument("--expected-host-identity")
     restore_parser.add_argument("--release", action="store_true")
     restore_parser.add_argument("--dry-run", action="store_true")
     return result
@@ -1371,16 +1419,19 @@ def main(argv=None):
     elif args.command == "list":
         output = list_sets(args.destination, args.identity, args.allow_unencrypted)
     elif args.command == "inspect":
+        api["owned"](args.root)
         output = inspect_set(
             args.backup_set,
             args.identity,
             args.allow_unencrypted,
             args.expected_set_digest,
         )
+        output["destinationHostIdentity"] = host_identity(args.root)
     else:
         output = restore(
             api, args.root, args.backend, args.backup_set, args.identity,
-            args.allow_unencrypted, args.dry_run, args.expected_set_digest, args.release
+            args.allow_unencrypted, args.dry_run, args.expected_set_digest, args.release,
+            args.expected_host_identity,
         )
     print(json.dumps(output, sort_keys=True), flush=True)
 

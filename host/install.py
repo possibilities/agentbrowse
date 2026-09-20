@@ -6,14 +6,18 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import runpy
 import shutil
+import stat
 import subprocess
 import sys
+import uuid
 
 SOURCE = Path(__file__).resolve().parent
 MAC = sys.platform == "darwin"
 BROWSER_IMAGE = "docker.io/onkernel/chromium-headful@sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3"
+HOST_IDENTITY = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 
 
 def run(*args, **kwargs):
@@ -53,6 +57,36 @@ def restore_instances(api, root, running, helper):
     return restarted
 
 
+def ensure_host_identity(api, root):
+    path = root / "host-identity"
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise RuntimeError("refusing unsafe Hypeman host identity")
+    if not path.exists():
+        api["write_private"](path, str(uuid.uuid4()) + "\n")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(descriptor)
+        encoded = os.read(descriptor, 129)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = os.lstat(path)
+    if (
+        len(encoded) > 128
+        or not stat.S_ISREG(before.st_mode)
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_uid != root.stat().st_uid
+        or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise RuntimeError("Hypeman host identity changed or is not a private owned file")
+    identity = encoded.decode().strip()
+    if not HOST_IDENTITY.fullmatch(identity):
+        raise RuntimeError("invalid Hypeman host identity")
+    return identity
+
+
 def install():
     if MAC:
         if platform.machine() != "arm64":
@@ -81,6 +115,7 @@ def install():
     else:
         root.mkdir(mode=0o700, parents=True)
         api["write_private"](root / "OWNED", api["MARKER"] + "\n")
+    ensure_host_identity(api, root)
     if not MAC:
         configure_linux_forwarding()
         unit = Path("/etc/systemd/system/agentbrowse-hypeman.service")
