@@ -6,10 +6,10 @@ restore access to the host, and retry the normal close. `destroy` with `force`
 abandons unflushed state and belongs only to an explicitly intended recovery of
 an unresponsive target.
 
-No close or destroy should race an open attention item naming the same target.
-Resolve the human interaction first. Session identity persists across launches;
-target identity does not. AgentBrowse and AgentAttention do not infer a stale
-page's intended state or reconstruct it for the producer.
+No close or destroy should race a human handoff on the same target. Confirm
+that the interaction ended before closing. Session identity persists across
+launches; target identity does not. A stale page does not prove what the human
+did or what should happen next.
 
 ## Requested profile copy or transfer
 

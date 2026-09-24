@@ -80,20 +80,19 @@ host has not discovered `session_stage` yet, use
 
 ## Human handoff
 
-Load **attention** for sign-in, MFA, captchas or other human-only steps. Prepare
-the page as far as authorized, then call `resolve` with the exact task session.
-Use `data.target.name` from its successful envelope as the attention target.
-Never substitute the task session or saved profile name.
-
-Follow attention's supported transport. While the human may control the target,
-issue no driver commands. Wait for the durable outcome, then snapshot the same
-session and continue. New sign-ins persist when this session leased `personal`.
-For a stale handoff, reconstruct the page, resolve again and link a replacement
-attention item to the original; do not infer completion.
+For sign-in, MFA, captchas or other human-only steps, prepare the page as far
+as authorized and resolve the exact task session. Use `data.target.name` to
+identify the live target; never substitute the task session or saved profile
+name for that target. When the human is present and has granted control, run
+`agentbrowse view SESSION` to open that session's Live View on their display.
+Ask for an explicit outcome through the conversation or AgentNotify. Issue no
+driver commands while the human may control the target; after the handoff is
+complete, snapshot the same session before continuing. New sign-ins persist
+when this session leased `personal`. A stale or silent handoff is not completion.
 
 ## Finish and recover
 
-After work ends and all handoffs naming the target are terminal, call
+After work ends and all human handoffs are complete, call
 `agent_browser_close` for this session without `all`. That releases ownership,
 removes staged uploads and disposable storage, and retains saved profiles.
 

@@ -123,9 +123,9 @@ agents' sessions based only on age. Saved profile deletion requires an explicit
 request to remove that state.
 
 view is the handoff verb, and it opens the Live View on the operator's own
-display. Prefer the attention skill for a durable human interaction with an
-outcome an agent can wait on; reach for view when the human is present and
-wants to look now.`;
+display. Use it for an authorized human handoff, request an explicit outcome
+through the conversation or AgentNotify, and do not resume browser control
+until the human interaction has ended.`;
 
 const ERROR_CODES: readonly ContractErrorCode[] = [
   {
